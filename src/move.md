@@ -410,7 +410,8 @@ upload-then-cleanup, respectively).
 1. Write `extractX` (ending in `assertRows`) and `loadX` here.
 2. Add a `case` to `extract` and to `load`.
 3. Document the config in docs/move.md.
-4. Add a fixture node + test to `notsobigdata-tests/`.
+4. Add a fixture node + test via a companion PR to the sibling
+   [`notsobigtests`](https://github.com/notsobigdata/notsobigtests) repo.
 
 No change to `cli.js` — it never learns about connectors, only about kinds.
 If this file gets unwieldy, the next split is `src/move/` with a file per

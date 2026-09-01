@@ -355,8 +355,8 @@ not the config surface.
 2. Add it to `EXECUTORS` here.
 3. Add it to `build.sh`'s `MODULES` manifest.
 4. Document it: a `docs/<kind>.md` reference plus a link from README.md
-   (see CLAUDE.md's "About documentation"); add fixtures to
-   `notsobigdata-tests/`.
+   (see CLAUDE.md's "About documentation"); add fixtures via a companion
+   PR to the sibling [`notsobigtests`](https://github.com/notsobigdata/notsobigtests) repo.
 
 `usage()`, `resolveSelector`'s error text and `hello()` all read the kind
 list from `knownKinds()`, so they pick up the new kind with no edit.
