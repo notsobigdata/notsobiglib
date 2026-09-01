@@ -1521,6 +1521,17 @@ var NotSoBigData = (function () {
   // MODEL_DEFAULT_KEYS and mergeDependsOn() below, and docs/model.md's
   // "Depending on a move node" for the user-facing version.
   //
+  // {{ source('name', 'table') }} placeholders are a third, separate way to
+  // select from data outside the model itself - for a BigQuery table this
+  // project never loads or builds at all (owned by another team's own
+  // pipeline, Fivetran, BigQuery Data Transfer Service, ...), the case
+  // ref() structurally can't cover since ref() only ever resolves something
+  // this project is itself responsible for. Declared once, project-wide, as
+  // notsobigdataModels.sources (see readSourcesEntry() below) - dbt's
+  // source.yml equivalent. Unlike ref(), a source() call never derives a
+  // dependsOn edge: a source is never a node (see readSourcesEntry()'s own
+  // comment), so there's nothing for it to run before.
+  //
   // A model's .html file can hold its SQL three ways, chosen by how many
   // <script type="text/sql"> tags it contains - see extractModelSql() below:
   //
@@ -1719,6 +1730,18 @@ var NotSoBigData = (function () {
     return result;
   }
 
+  // source()'s own argument shape: exactly two quoted strings, both
+  // required - e.g. source('stripe', 'payments'). Neither existing parser
+  // fits: parseSingleStringArgument takes exactly one string,
+  // parseVarArguments makes its second string optional.
+  function parseTwoStringArguments(call, args) {
+    var match = /^\s*(['"])([^'"]*)\1\s*,\s*(['"])([^'"]*)\3\s*$/.exec(args);
+    if (!match) {
+      throw new Error('model(): "' + call + '(' + args + ')" is not a valid call - ' + call + '() takes exactly two quoted names, e.g. ' + call + '(\'source_name\', \'table_name\').');
+    }
+    return { first: match[2], second: match[4] };
+  }
+
   // The keys a model entry or the registry's top level may set as a
   // default. Kept as an explicit list rather than copying every key on
   // notsobigdataModels, so an unrelated key a user attaches to the registry
@@ -1751,7 +1774,7 @@ var NotSoBigData = (function () {
   // declaration reusing one of these names is rejected outright, the same
   // "no obvious precedence, reject rather than guess" posture this file
   // already takes for a duplicate {% set %} name or a second config() call.
-  var BUILTIN_TEMPLATE_CALLS = ['ref', 'config', 'var'];
+  var BUILTIN_TEMPLATE_CALLS = ['ref', 'config', 'var', 'source'];
 
   // Guarded read of the single notsobigdataModels global, reusing cli.js's
   // readOptionalGlobal() - same "never throw because of a global this
@@ -1769,7 +1792,7 @@ var NotSoBigData = (function () {
   function readModelsRegistry() {
     var raw = readOptionalGlobal('notsobigdataModels');
     if (raw === undefined) {
-      return { defaults: {}, models: {}, vars: {}, macroFiles: [] };
+      return { defaults: {}, models: {}, vars: {}, macroFiles: [], sources: {} };
     }
     if (!isPlainObject(raw)) {
       throw new Error('model(): notsobigdataModels must be an object - got ' + (Array.isArray(raw) ? 'an array' : typeof raw) + '.');
@@ -1811,7 +1834,143 @@ var NotSoBigData = (function () {
       });
       macroFiles = raw.macros;
     }
-    return { defaults: defaults, models: models, vars: vars, macroFiles: macroFiles };
+    var sources = readSourcesEntry(raw.sources, defaults, models);
+    return { defaults: defaults, models: models, vars: vars, macroFiles: macroFiles, sources: sources };
+  }
+
+  // notsobigdataModels.sources - dbt's source.yml analog, declaring a
+  // BigQuery table this project doesn't itself load or build (owned by
+  // Fivetran, BigQuery Data Transfer Service, a manually run script,
+  // another team's pipeline, ...) under a logical (source, table) name pair,
+  // so a model can {{ source('name', 'table') }} it instead of hardcoding
+  // its physical project.dataset.table. Deliberately a key on the same
+  // shared notsobigdataModels registry, not a second top-level global - see
+  // docs/model.md's "Declaring external data" section for the full worked
+  // example and the reasoning the user and this repo settled on.
+  //
+  // Shaped like notsobigdataModels itself, one level down: "projectId"/
+  // "dataset" at the top of the sources block are defaults (falling back to
+  // the registry's own projectId/dataset, same override chain
+  // MODEL_DEFAULT_KEYS already gives models), and every other key names one
+  // source. A source table entry can be as short as { tables: { x: {} } } -
+  // loadedAtField/freshness/columns/tests are all opt-in, only needed by a
+  // table that actually wants freshness checking, documentation, or
+  // column-level tests via cli('sources').
+  //
+  // Fully validated right here, unconditionally - like vars/macros above,
+  // not deferred into a per-node discoveryError the way one model's own
+  // mistake is: a source is never a node, so there is no per-node discovery
+  // pass for a bad source entry to become that node's own problem. This
+  // mirrors readModelsRegistry()'s existing posture for raw.vars/raw.macros:
+  // a mistake in shared, project-wide config throws for every caller, not
+  // just whichever model happens to reference it.
+  var SOURCE_LEVEL_DEFAULT_KEYS = ['projectId', 'dataset'];
+
+  function readSourcesEntry(raw, registryDefaults, models) {
+    if (raw === undefined) {
+      return {};
+    }
+    if (!isPlainObject(raw)) {
+      throw new Error('model(): notsobigdataModels.sources must be an object - got ' + (Array.isArray(raw) ? 'an array' : typeof raw) + '.');
+    }
+    var sourceLevelDefaults = {};
+    SOURCE_LEVEL_DEFAULT_KEYS.forEach(function (key) {
+      sourceLevelDefaults[key] = raw[key] !== undefined ? raw[key] : registryDefaults[key];
+    });
+    // emptyMap(), not {} - built up key-by-key below (unlike models/vars
+    // above, which just alias raw.models/raw.vars directly), so a source or
+    // table literally named "__proto__" must become a normal own property
+    // instead of silently reassigning this object's own prototype via the
+    // special __proto__ setter a plain {} still has - same reasoning
+    // cli.js's own emptyMap() comment gives for a move node named the same
+    // way.
+    var sources = emptyMap();
+    Object.keys(raw).forEach(function (sourceName) {
+      if (SOURCE_LEVEL_DEFAULT_KEYS.indexOf(sourceName) !== -1) {
+        return;
+      }
+      var sourceRaw = raw[sourceName];
+      if (!isPlainObject(sourceRaw)) {
+        throw new Error('model(): notsobigdataModels.sources.' + sourceName + ' must be an object - got ' + (Array.isArray(sourceRaw) ? 'an array' : typeof sourceRaw) + '.');
+      }
+      if (!isPlainObject(sourceRaw.tables)) {
+        throw new Error('model(): notsobigdataModels.sources.' + sourceName + '.tables must be an object - got ' + (Array.isArray(sourceRaw.tables) ? 'an array' : typeof sourceRaw.tables) + '.');
+      }
+      var sourceProjectId = sourceRaw.projectId !== undefined ? sourceRaw.projectId : sourceLevelDefaults.projectId;
+      var sourceDataset = sourceRaw.dataset !== undefined ? sourceRaw.dataset : sourceLevelDefaults.dataset;
+      var tables = emptyMap();
+      Object.keys(sourceRaw.tables).forEach(function (tableName) {
+        var prefix = 'model(): notsobigdataModels.sources.' + sourceName + '.tables.' + tableName;
+        var tableRaw = sourceRaw.tables[tableName] || {};
+        if (!isPlainObject(tableRaw)) {
+          throw new Error(prefix + ' must be an object - got ' + typeof tableRaw + '.');
+        }
+        var table = {
+          table: tableRaw.table || tableName,
+          projectId: tableRaw.projectId !== undefined ? tableRaw.projectId : sourceProjectId,
+          dataset: tableRaw.dataset !== undefined ? tableRaw.dataset : sourceDataset
+        };
+        if (!table.projectId) {
+          throw new Error(prefix + ' is missing "projectId" - set it on notsobigdataModels, notsobigdataModels.sources, notsobigdataModels.sources.' + sourceName + ', or this table entry.');
+        }
+        if (!table.dataset) {
+          throw new Error(prefix + ' is missing "dataset" - set it on notsobigdataModels, notsobigdataModels.sources, notsobigdataModels.sources.' + sourceName + ', or this table entry.');
+        }
+        if (tableRaw.loadedAtField !== undefined) {
+          if (typeof tableRaw.loadedAtField !== 'string' || !tableRaw.loadedAtField) {
+            throw new Error(prefix + ' "loadedAtField" must be a non-empty string.');
+          }
+          table.loadedAtField = tableRaw.loadedAtField;
+        }
+        if (tableRaw.freshness !== undefined) {
+          if (!table.loadedAtField) {
+            throw new Error(prefix + ' declares "freshness" but no "loadedAtField" - freshness needs a timestamp column to check.');
+          }
+          if (!isPlainObject(tableRaw.freshness)) {
+            throw new Error(prefix + ' "freshness" must be an object.');
+          }
+          var warnAfterMinutes = tableRaw.freshness.warnAfterMinutes;
+          var errorAfterMinutes = tableRaw.freshness.errorAfterMinutes;
+          if (warnAfterMinutes === undefined && errorAfterMinutes === undefined) {
+            throw new Error(prefix + ' "freshness" needs at least one of "warnAfterMinutes"/"errorAfterMinutes".');
+          }
+          [['warnAfterMinutes', warnAfterMinutes], ['errorAfterMinutes', errorAfterMinutes]].forEach(function (pair) {
+            if (pair[1] !== undefined && (typeof pair[1] !== 'number' || !(pair[1] > 0))) {
+              throw new Error(prefix + ' "freshness.' + pair[0] + '" must be a positive number.');
+            }
+          });
+          if (warnAfterMinutes !== undefined && errorAfterMinutes !== undefined && !(errorAfterMinutes > warnAfterMinutes)) {
+            throw new Error(prefix + ' "freshness.errorAfterMinutes" must be greater than "freshness.warnAfterMinutes".');
+          }
+          table.freshness = { warnAfterMinutes: warnAfterMinutes, errorAfterMinutes: errorAfterMinutes };
+        }
+        if (tableRaw.columns !== undefined) {
+          if (!isPlainObject(tableRaw.columns)) {
+            throw new Error(prefix + ' "columns" must be an object.');
+          }
+          Object.keys(tableRaw.columns).forEach(function (columnName) {
+            var column = tableRaw.columns[columnName];
+            if (!isPlainObject(column) || typeof column.description !== 'string') {
+              throw new Error(prefix + ' "columns.' + columnName + '" must be an object with a string "description".');
+            }
+          });
+          table.columns = tableRaw.columns;
+        }
+        if (tableRaw.tests !== undefined) {
+          // Reuses validateModelTests() as-is - a source table's tests[] is
+          // the identical shape (check/column/values/to/field, or a custom
+          // query) a model's own tests[] already validates, right down to a
+          // "relationships" test's "to" needing to name a declared model.
+          // Only models and defaults are needed for that resolution, both
+          // already computed above in this same readModelsRegistry() call.
+          validateModelTests(tableRaw.tests, prefix, { models: models, defaults: registryDefaults });
+          table.tests = tableRaw.tests;
+        }
+        tables[tableName] = table;
+      });
+      sources[sourceName] = { tables: tables };
+    });
+    return sources;
   }
 
   // Merges the registry's defaults with one model's own entry (the entry
@@ -2518,7 +2677,7 @@ var NotSoBigData = (function () {
     return spans.some(function (span) { return offset >= span[0] && offset < span[1]; });
   }
 
-  function compileModelSql(sql, resolveRef, registry) {
+  function compileModelSql(sql, resolveRef, resolveSource, registry) {
     var setValues = extractSetStatements(sql);
     var refConfigVarSpans = commentSpans(sql);
     var compiled = sql.replace(templateExpressionPattern(), function (raw, call, args, offset) {
@@ -2533,8 +2692,12 @@ var NotSoBigData = (function () {
         var parsed = parseVarArguments('var', args);
         return resolveVar(registry, parsed.name, parsed.hasDefault, parsed.defaultValue);
       }
+      if (call === 'source') {
+        var sourceArgs = parseTwoStringArguments('source', args);
+        return resolveSource(sourceArgs.first, sourceArgs.second);
+      }
       if (call !== 'ref') {
-        throw new Error('model(): unsupported template call "' + call + '(...)" in SQL - only ref(), config() and var() are implemented so far, '
+        throw new Error('model(): unsupported template call "' + call + '(...)" in SQL - only ref(), source(), config() and var() are implemented so far, '
           + 'and this name did not match any macro declared in notsobigdataModels.macros either.');
       }
       return resolveRef(parseSingleStringArgument('ref', args));
@@ -3078,6 +3241,116 @@ var NotSoBigData = (function () {
     };
   }
 
+  // source()'s own resolution closure, mirroring buildRefResolver() above -
+  // same "build a closure that already knows this model's name, for a
+  // clearer error message" shape, minus the dependency-graph half of what
+  // ref() does: a source is never a node (see notsobigdataModels.sources'
+  // own comment above readSourcesEntry()), so there is nothing here
+  // analogous to moveRefTargets to fall back to, and no edge to derive -
+  // {{ source(...) }} never appears in extractRefDependencies()'s scan, on
+  // purpose.
+  function buildSourceResolver(config, registry) {
+    return function (sourceName, tableName) {
+      // has() on both lookups, not a plain `registry.sources[sourceName]`
+      // bracket access - same prototype-pollution reasoning
+      // buildRefResolver()'s own has(registry.models, refName) already takes
+      // above: a model author writing {{ source('__proto__', 'x') }}, by
+      // typo or otherwise, would get Object.prototype back from a plain
+      // bracket read (truthy), and hasOwnProperty.call(undefined, ...) on
+      // its own missing .tables throws a raw TypeError instead of this
+      // function's own intended "does not match a declared source" error.
+      if (has(registry.sources, sourceName) && has(registry.sources[sourceName].tables, tableName)) {
+        var table = registry.sources[sourceName].tables[tableName];
+        return qualifiedTableRef(table.projectId, table.dataset, table.table);
+      }
+      throw new Error('model(): "' + config.name + '" has {{ source(\'' + sourceName + '\', \'' + tableName + '\') }}, which does not match a declared source/table in notsobigdataModels.sources.');
+    };
+  }
+
+  // Flattens registry.sources (nested source -> table, the shape
+  // buildSourceResolver() needs for a {{ source(...) }} lookup) into one
+  // flat array, each entry carrying its own sourceName/
+  // tableName alongside the already-resolved table config - the shape
+  // cli.js's cli('sources') and cli('list') actually want to iterate and
+  // filter by --select/--exclude, neither of which cares about the nested
+  // lookup structure ref()-style resolution needs.
+  function flattenSources(sources) {
+    var entries = [];
+    Object.keys(sources).forEach(function (sourceName) {
+      var tables = sources[sourceName].tables;
+      Object.keys(tables).forEach(function (tableName) {
+        var table = tables[tableName];
+        entries.push({
+          source: sourceName,
+          tableName: tableName,
+          projectId: table.projectId,
+          dataset: table.dataset,
+          table: table.table,
+          loadedAtField: table.loadedAtField,
+          freshness: table.freshness,
+          columns: table.columns,
+          tests: table.tests
+        });
+      });
+    });
+    return entries;
+  }
+
+  // cli('sources')'s freshness check for one source table entry (as
+  // flattenSources() above produces it - freshness/loadedAtField are only
+  // ever both set or both absent, enforced by readSourcesEntry()'s own
+  // validation). Computes the age entirely in BigQuery, not in Apps
+  // Script - TIMESTAMP_DIFF/FORMAT_TIMESTAMP against CURRENT_TIMESTAMP()
+  // sidesteps having to parse whatever raw representation (epoch seconds,
+  // an ISO string) the BigQuery REST API happens to hand back for a
+  // TIMESTAMP/DATETIME/DATE column, the same "push formatting into BigQuery
+  // itself" choice qualifiedTableRef()'s own callers already lean on for
+  // identifier quoting. loadedAtField is a config-supplied column name, so
+  // it goes through quoteIdentifier() before landing in generated SQL - the
+  // same guard MODEL_TEST_COMPILERS already applies to test.column/
+  // test.field, for the same reason: an unquoted, unvalidated identifier
+  // landing in a query string built from user config is exactly the kind of
+  // injection surface this file's own quoteIdentifier()/quoteSqlLiteral()
+  // comments already call out.
+  function checkSourceFreshness(entry) {
+    var relation = qualifiedTableRef(entry.projectId, entry.dataset, entry.table);
+    var field = quoteIdentifier(entry.loadedAtField);
+    var query = 'SELECT '
+      + 'TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), CAST(MAX(' + field + ') AS TIMESTAMP), MINUTE) AS age_minutes, '
+      + 'FORMAT_TIMESTAMP(\'%Y-%m-%dT%H:%M:%SZ\', CAST(MAX(' + field + ') AS TIMESTAMP)) AS loaded_at '
+      + 'FROM ' + relation;
+    var queryResults = runBigQueryQueryJob({ query: query, useLegacySql: false }, entry.projectId);
+    var row = queryResults.rows && queryResults.rows[0] ? queryResults.rows[0].f : null;
+    var ageMinutes = row && row[0].v !== null && row[0].v !== undefined ? Number(row[0].v) : null;
+    if (ageMinutes === null) {
+      return {
+        status: 'error', ageMinutes: null, loadedAt: null,
+        message: relation + ' has no rows (or "' + entry.loadedAtField + '" is always NULL) - cannot determine freshness.'
+      };
+    }
+    var loadedAt = row[1].v;
+    var status = 'ok';
+    if (entry.freshness.errorAfterMinutes !== undefined && ageMinutes >= entry.freshness.errorAfterMinutes) {
+      status = 'error';
+    } else if (entry.freshness.warnAfterMinutes !== undefined && ageMinutes >= entry.freshness.warnAfterMinutes) {
+      status = 'warn';
+    }
+    return { status: status, ageMinutes: ageMinutes, loadedAt: loadedAt, message: relation + ' last loaded ' + ageMinutes + ' minute(s) ago (at ' + loadedAt + ').' };
+  }
+
+  // cli('sources')'s test check for one source table entry - reuses
+  // compileModelTests()/runSqlTests() exactly as modelTableStaged()/model()
+  // above already do for a model's own tests[], just pointed at the source
+  // table's own relation instead of a model's. registry is only needed for
+  // a "relationships" test's own "to" resolution (MODEL_TEST_COMPILERS.relationships,
+  // above), the same reason readSourcesEntry() needed it once already, at
+  // validation time - this is that same test list, now actually run.
+  function runSourceTests(entry, registry) {
+    var compiledTests = compileModelTests(entry.tests, registry);
+    var relationRef = { projectId: entry.projectId, dataset: entry.dataset, table: entry.table };
+    return runSqlTests(compiledTests, relationRef, 'cli(\'sources\'): "' + entry.source + '.' + entry.tableName + '" tests');
+  }
+
   // The EXECUTORS.compile entry (see cli.js's COMPILERS map): resolves a
   // model's SQL exactly the way model() itself is about to, right down to
   // reusing the same buildRefResolver()/compileModelSql() calls, but stops
@@ -3091,7 +3364,7 @@ var NotSoBigData = (function () {
     var sql = config.sql;
     assertSingleStatement(sql, 'model(): "' + config.name + '"');
     var registry = readModelsRegistry();
-    return compileModelSql(sql, buildRefResolver(config, registry), registry);
+    return compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry);
   }
 
   // config.sql is always already set by expandModelNodes() above by the
@@ -3104,7 +3377,7 @@ var NotSoBigData = (function () {
     var sql = config.sql;
     assertSingleStatement(sql, 'model(): "' + config.name + '"');
     var registry = readModelsRegistry();
-    var compiled = compileModelSql(sql, buildRefResolver(config, registry), registry);
+    var compiled = compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry);
     var relation = qualifiedRelation(config);
     var materialized = resolveMaterialized(config);
     var hasTests = !!(config.tests && config.tests.length);
@@ -3329,7 +3602,7 @@ var NotSoBigData = (function () {
     return node.name + ' (' + node.kind + ')';
   }
 
-  var COMMANDS = ['run', 'list', 'compile', 'debug', 'hello', 'help'];
+  var COMMANDS = ['run', 'list', 'compile', 'debug', 'sources', 'hello', 'help'];
 
   function usage() {
     return [
@@ -3339,9 +3612,11 @@ var NotSoBigData = (function () {
       '  cli("run --select move")       run only nodes of a given kind',
       '  cli("run --select a,b")        run only the named nodes',
       '  cli("run --exclude a")         run everything except the named nodes',
-      '  cli("list")                    show what would run, in order, without running it',
-      '  cli("compile")                 resolve model SQL ({{ ref() }}/var()/config()) without running anything',
+      '  cli("list")                    show what would run, in order, without running it (includes declared sources)',
+      '  cli("compile")                 resolve model SQL ({{ ref()/source()/var()/config() }}) without running anything',
       '  cli("debug")                   check OAuth scopes/services for each node\'s connector, without writing anything',
+      '  cli("sources")                 check freshness + tests for every source declared in notsobigdataModels.sources',
+      '  cli("sources --select stripe")     ... just one source ("stripe.payments" selects one table)',
       '  cli("hello")                   check the library loaded and see which nodes it can find',
       '  cli("help")                    this message',
       '',
@@ -4303,6 +4578,145 @@ var NotSoBigData = (function () {
     return message;
   }
 
+  // cli('sources') - dbt's `source freshness` + `test --select source:...`,
+  // combined into one verb (see notsobiglib's model.js "notsobigdataModels.sources"
+  // comment for why the two aren't split the way dbt splits them: a source
+  // is never a node here, so there's no run/skip-downstream machinery either
+  // check needs to plug into - each is just an independent BigQuery check,
+  // reported the same "surface everything in one pass" way cli('debug')
+  // already reports its own independent connector checks).
+  //
+  // A token matches a bare source name ("stripe") or a dotted
+  // "source.table" ("stripe.payments") - deliberately not resolveSelector()'s
+  // kind-then-name matching above, which answers a different question (a
+  // node's kind or name) that doesn't apply here: a source has no kind, and
+  // "table" alone would be ambiguous across sources the way a bare node name
+  // never is.
+  function sourceEntryMatchesToken(entry, token) {
+    return token === entry.source || token === entry.source + '.' + entry.tableName;
+  }
+
+  function filterSourceEntries(entries, select, exclude) {
+    var selected = entries;
+    if (select.length) {
+      selected = selected.filter(function (entry) {
+        return select.some(function (token) { return sourceEntryMatchesToken(entry, token); });
+      });
+      if (!selected.length) {
+        throw new Error('cli(): "sources" selection (' + select.join(', ') + ') matched no declared source or source.table. Known: '
+          + entries.map(function (entry) { return entry.source + '.' + entry.tableName; }).join(', ') + '.');
+      }
+    }
+    if (exclude.length) {
+      selected = selected.filter(function (entry) {
+        return !exclude.some(function (token) { return sourceEntryMatchesToken(entry, token); });
+      });
+    }
+    return selected;
+  }
+
+  // cli('sources')'s own status vocabulary - separate from NODE_RESULT_STATUSES/
+  // DEBUG_CHECK_STATUSES above (same "kept as a separate list since the
+  // vocabularies don't overlap" reasoning formatDebugStatusCounts()'s own
+  // comment already gives): a source check is never 'success'/'planned', and
+  // 'warn' (a source that's stale enough to flag but not to block on) has no
+  // equivalent in either existing list.
+  var SOURCE_CHECK_STATUSES = [
+    { status: 'ok', label: 'ok' },
+    { status: 'warn', label: 'warn' },
+    { status: 'error', label: 'error' },
+    { status: 'skipped', label: 'skipped' }
+  ];
+
+  function formatSourceStatusCounts(checks) {
+    return formatStatusList(checks, 'status', SOURCE_CHECK_STATUSES, 'nothing to check', 'source check');
+  }
+
+  function sourceCheckLogPrefix(status) {
+    if (status === 'ok') { return 'OK    '; }
+    if (status === 'warn') { return 'WARN  '; }
+    if (status === 'skipped') { return 'SKIP  '; }
+    return 'FAIL  ';
+  }
+
+  function pushSourceCheck(checks, entry, check, status, message) {
+    checks.push({ source: entry.source, table: entry.tableName, check: check, status: status, message: message });
+    Logger.log(sourceCheckLogPrefix(status) + entry.source + '.' + entry.tableName + ' ' + check + ' - ' + message);
+  }
+
+  // Runs both checks cli('sources') knows about for one source table entry -
+  // freshness (checkSourceFreshness, model.js) and column-level tests
+  // (runSourceTests, model.js, reusing the exact compileModelTests()/
+  // runSqlTests() pipeline a model's own tests[] already runs through). Both
+  // are independently opt-in per table (see readSourcesEntry()'s own
+  // comment in model.js), so a table missing either reports 'skipped' rather
+  // than being silently left out of the report - the same "report absence
+  // explicitly" posture runNodes()'s own 'skipped' status already takes for
+  // a blocked node, so a human reading the report can tell "nothing
+  // configured" apart from "configured and passing" at a glance.
+  function checkSourceEntry(checks, entry, registry) {
+    if (entry.freshness) {
+      try {
+        var freshness = checkSourceFreshness(entry);
+        pushSourceCheck(checks, entry, 'freshness', freshness.status, freshness.message);
+      } catch (error) {
+        pushSourceCheck(checks, entry, 'freshness', 'error', error.message);
+      }
+    } else {
+      pushSourceCheck(checks, entry, 'freshness', 'skipped', 'no loadedAtField/freshness configured.');
+    }
+    if (entry.tests && entry.tests.length) {
+      try {
+        var testResult = runSourceTests(entry, registry);
+        pushSourceCheck(checks, entry, 'tests', 'ok', testResult.ran + ' test(s) passed.');
+      } catch (error) {
+        pushSourceCheck(checks, entry, 'tests', 'error', error.message);
+      }
+    } else {
+      pushSourceCheck(checks, entry, 'tests', 'skipped', 'no tests declared.');
+    }
+  }
+
+  // The cli('sources') implementation, called directly from cli()'s own
+  // dispatch below rather than going through discoverNodes()/orderNodes()/
+  // runNodes() - a source was never in that node list to begin with (see
+  // model.js's "notsobigdataModels.sources" comment), so there is no
+  // dependency order to compute and nothing for the run/skip-downstream
+  // machinery in runNodes() to do here. 'warn' deliberately doesn't flip
+  // `ok` to false, same as dbt's own `source freshness` treats a warn as
+  // worth surfacing, not as a run-blocking failure - only 'error' does.
+  function runSourcesCommand(input, select, exclude) {
+    var registry = readModelsRegistry();
+    var entries = filterSourceEntries(flattenSources(registry.sources), select, exclude);
+    var checks = [];
+    entries.forEach(function (entry) {
+      checkSourceEntry(checks, entry, registry);
+    });
+    var ok = checks.every(function (check) { return check.status !== 'error'; });
+    Logger.log('DONE  cli("' + input + '") - ' + formatSourceStatusCounts(checks) + ' (' + checks.length + ' total).');
+    return { ok: ok, command: 'sources', checks: checks };
+  }
+
+  // cli('list')'s own "Sources:" section - see cli()'s own 'list' branch
+  // below. Pure registry read + qualifiedTableRef() string-building, no
+  // BigQuery call, matching 'list''s existing "resolve + order, execute
+  // nothing" contract: unlike cli('sources') above, this never actually
+  // checks freshness or runs a test, it only reports what's declared and
+  // configured, the same "planned, not run" spirit runNodes()'s own 'list'
+  // branch already takes for every node.
+  function listSourcesForReport() {
+    var registry = readModelsRegistry();
+    return flattenSources(registry.sources).map(function (entry) {
+      var relation = qualifiedTableRef(entry.projectId, entry.dataset, entry.table);
+      var flags = [];
+      if (entry.freshness) { flags.push('freshness'); }
+      if (entry.columns) { flags.push('columns'); }
+      if (entry.tests && entry.tests.length) { flags.push('tests'); }
+      Logger.log('LIST  ' + entry.source + '.' + entry.tableName + ' - ' + relation + (flags.length ? ' (' + flags.join(', ') + ' configured)' : ''));
+      return { source: entry.source, table: entry.tableName, relation: relation, freshness: entry.freshness !== undefined, columns: entry.columns !== undefined, tests: !!(entry.tests && entry.tests.length) };
+    });
+  }
+
   // The single public entrypoint. Takes one command string and returns
   // either a run report (for "run"/"list"/"compile") or a message string
   // (for "hello"/"help").
@@ -4313,9 +4727,10 @@ var NotSoBigData = (function () {
   // thing this function does, before parseCommand() - so a call that
   // throws immediately (an unknown command, zero discovered nodes) still
   // leaves a marker that cli() actually ran, not silence up to the error.
-  // "DONE" only fires for "run"/"list"/"compile": hello()/help() already log
-  // their own single result line and have no per-node pass/fail/skip status
-  // to roll up. Both are pure Logger.log side effects - report is unchanged.
+  // "DONE" only fires for "run"/"list"/"compile"/"debug"/"sources":
+  // hello()/help() already log their own single result line and have no
+  // per-item pass/fail/skip status to roll up. Both are pure Logger.log side
+  // effects - report is unchanged.
   function cli(input) {
     Logger.log('START cli("' + input + '")');
     var parsed = parseCommand(input);
@@ -4326,6 +4741,14 @@ var NotSoBigData = (function () {
     }
     if (parsed.command === 'hello') {
       return hello();
+    }
+    // sources diverges here too, same as debug does further down (see its
+    // own comment below) but even earlier: a source is never a node, so
+    // cli('sources') has no use for discoverNodes() at all, let alone
+    // dependency order or selection-by-kind-or-node-name - see
+    // runSourcesCommand()'s own comment above.
+    if (parsed.command === 'sources') {
+      return runSourcesCommand(input, parsed.select, parsed.exclude);
     }
     var discovered = discoverNodes();
     if (!discovered.nodes.length) {
@@ -4367,6 +4790,13 @@ var NotSoBigData = (function () {
       report.manifest = writeManifest(input, ok, results, discovered.ignored);
     } else if (parsed.command === 'compile') {
       report.manifest = writeCompileManifest(input, ok, results, discovered.ignored);
+    } else if (parsed.command === 'list') {
+      // "list" additionally reports every declared source table (see
+      // listSourcesForReport()'s own comment) - a source is never a node, so
+      // it would otherwise be entirely invisible to "list", the one command
+      // whose whole point is showing everything a project has declared
+      // before anything runs for real.
+      report.sources = listSourcesForReport();
     }
     return report;
   }
