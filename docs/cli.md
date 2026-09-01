@@ -22,6 +22,8 @@ NotSoBigData.cli('compile')                 // resolve model SQL, without runnin
 NotSoBigData.cli('compile --select orders') // resolve just that model's SQL
 NotSoBigData.cli('debug')                   // check OAuth scopes/services per connector, without writing anything
 NotSoBigData.cli('debug --select orders')   // check just that node's connector(s)
+NotSoBigData.cli('sources')                 // check freshness + tests for every declared source table
+NotSoBigData.cli('sources --select stripe') // just one source ("stripe.payments" selects one table)
 NotSoBigData.cli('hello')                   // check the library loaded and see what it can find
 NotSoBigData.cli('help')                    // the command list
 ```
@@ -160,10 +162,68 @@ SKIP  loadToWebhook (move) target (custom) - custom target calls your own "fn" -
 DONE  cli("debug") - 1 ok, 1 missing scope, 1 unverifiable (3 total).
 ```
 
+### cli('sources') — check declared sources
+
+`{{ source(...) }}` (see [docs/model.md](model.md#declaring-external-data-source)) lets a model
+name a BigQuery table this project doesn't itself load or build. Since
+nothing here is responsible for loading it, a source is never a node —
+`cli('run')` never touches it, and there's nothing for `cli('debug')`'s
+connector checks to say about it either. `cli('sources')` is the one
+command that actually checks a declared source table: freshness (is
+`loadedAtField`'s newest value recent enough?) and any declared
+column-level `tests` (the same generic checks — `not_null`/`unique`/
+`accepted_values`/`relationships` — a model's own `tests` already runs,
+see [docs/model.md](model.md#tests)), run against a source table's own
+relation instead of a model's.
+
+```javascript
+NotSoBigData.cli('sources')                     // check every declared source table
+NotSoBigData.cli('sources --select stripe')     // just one source - every table under it
+NotSoBigData.cli('sources --select stripe.payments')  // just one table
+NotSoBigData.cli('sources --exclude stripe.charges')  // everything except one table
+```
+
+**`--select`/`--exclude` work differently here than everywhere else in this
+document.** A source has no `kind` to match against — a token matches a
+bare source name (`stripe`, every table under it) or a dotted
+`source.table` (`stripe.payments`, just that one table), never a node kind
+or node name.
+
+Each table gets up to two independent checks, `freshness` and `tests`,
+each reporting one of:
+
+| Status | Meaning |
+| --- | --- |
+| `ok` | Fresh enough (freshness) or every declared test passed (tests). |
+| `warn` | Freshness only: older than `warnAfterMinutes` but not yet `errorAfterMinutes`. Reported, doesn't fail the run. |
+| `error` | Freshness: older than `errorAfterMinutes`, or the table has no rows / `loadedAtField` is always `NULL`. Tests: at least one declared test failed. |
+| `skipped` | Nothing declared to check — no `loadedAtField`/`freshness` (freshness) or no `tests` (tests). Not an error; most source tables only declare one or the other, or neither. |
+
+```javascript
+{
+  ok: false,
+  command: 'sources',
+  checks: [
+    { source: 'stripe', table: 'payments', check: 'freshness', status: 'ok',      message: '`proj.stripe_raw.payments` last loaded 12 minute(s) ago (at ...).' },
+    { source: 'stripe', table: 'payments', check: 'tests',     status: 'error',   message: 'cli(\'sources\'): "stripe.payments" tests failed against ... - "unique_id" returned 2 failing row(s) ...' },
+    { source: 'stripe', table: 'charges',  check: 'freshness', status: 'skipped', message: 'no loadedAtField/freshness configured.' },
+    { source: 'stripe', table: 'charges',  check: 'tests',     status: 'skipped', message: 'no tests declared.' }
+  ]
+}
+```
+
+`ok` is `true` only when no check is `error` — a `warn` freshness result is
+surfaced (in the report and the execution log) but doesn't flip `ok` to
+`false`, the same way dbt's own `source freshness` treats a warning as
+worth seeing, not as a run-blocking failure. Like `debug`, this returns
+its own report shape (no `nodes[]`, no `manifest` — a diagnostic check,
+not a record of pipeline output) and writes no manifest.
+
 ### What cli() returns
 
 `hello` and `help` return their message as a string. `debug` returns its
 own report shape — see [above](#clidebug-check-your-oauth-scopesservices-before-clirun-does).
+`sources` also returns its own shape — see [above](#clisources--check-declared-sources).
 `run`, `list` and `compile` share this one:
 
 ```javascript
@@ -186,7 +246,27 @@ its own dependents too), and **unrelated branches still run**. That matters
 more here than in a normal scheduler: each run is you clicking Run in the
 Apps Script editor and waiting, so seeing every independent failure in one
 pass beats fixing them one run at a time. Under `list`, every node's status
-is `planned` and nothing executes. Under `compile`, every node is also
+is `planned` and nothing executes; `list`'s report also carries a
+`sources` array (see [docs/model.md](model.md#declaring-external-data-source)) — one entry per table
+declared in `notsobigdataModels.sources`, naming its resolved relation and
+which of `freshness`/`columns`/`tests` are configured, without actually
+checking any of them (that's `cli('sources')`'s job, above) since a source
+is invisible to the node list `run`/`compile`/`debug` all share:
+
+```javascript
+{
+  ok: true,
+  command: 'list',
+  nodes: [ { name: 'rawOrders', kind: 'move', status: 'planned' } ],
+  ignored: [],
+  sources: [
+    { source: 'stripe', table: 'payments', relation: '`proj.stripe_raw.payments`', freshness: true, columns: true, tests: true },
+    { source: 'stripe', table: 'charges',  relation: '`proj.stripe_raw.raw_charges`', freshness: false, columns: false, tests: false }
+  ]
+}
+```
+
+Under `compile`, every node is also
 `planned` — a `model` node additionally carries `compiledSql`, and a model
 that fails to compile (rare — most template mistakes are already caught
 before this point) is `failed` instead, blocking its dependents the same
@@ -206,10 +286,9 @@ way a real run failure does:
 ```
 
 `manifest` is present on `run` and `compile`, never `list` (a pure dry run
-with nothing, not even compiled SQL, to record) or `debug` (a diagnostic
-check, not a record of pipeline output — see [its own section
-above](#clidebug-check-your-oauth-scopesservices-before-clirun-does)), and
-is always one of:
+with nothing, not even compiled SQL, to record), `debug`, or `sources`
+(each a diagnostic check, not a record of pipeline output — see their own
+sections above), and is always one of:
 
 ```javascript
 { written: true, fileId: '...' }                      // wrote/overwrote the manifest file
@@ -252,7 +331,13 @@ node with both a `source` and a `target` gets two lines), reusing those
 same three prefixes; `SKIP` means a `custom` connector wasn't checked, not
 that anything failed. See [its own section
 above](#clidebug-check-your-oauth-scopesservices-before-clirun-does) for
-the full log example.
+the full log example. `cli('sources')` logs one `OK`/`WARN`/`FAIL`/`SKIP`
+line per check (freshness and tests are logged separately, so a table with
+both configured gets two lines) — `WARN` is new here, for a freshness
+result older than `warnAfterMinutes` but not yet `errorAfterMinutes`; see
+[its own section above](#clisources--check-declared-sources). `cli('list')`
+additionally logs one `LIST` line per declared source table, alongside its
+usual `PLAN` line per node.
 
 Want the full detail back, e.g. while actively debugging a run? Set
 `verbose: true`:

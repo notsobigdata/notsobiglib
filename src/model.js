@@ -15,6 +15,17 @@
 // MODEL_DEFAULT_KEYS and mergeDependsOn() below, and docs/model.md's
 // "Depending on a move node" for the user-facing version.
 //
+// {{ source('name', 'table') }} placeholders are a third, separate way to
+// select from data outside the model itself - for a BigQuery table this
+// project never loads or builds at all (owned by another team's own
+// pipeline, Fivetran, BigQuery Data Transfer Service, ...), the case
+// ref() structurally can't cover since ref() only ever resolves something
+// this project is itself responsible for. Declared once, project-wide, as
+// notsobigdataModels.sources (see readSourcesEntry() below) - dbt's
+// source.yml equivalent. Unlike ref(), a source() call never derives a
+// dependsOn edge: a source is never a node (see readSourcesEntry()'s own
+// comment), so there's nothing for it to run before.
+//
 // A model's .html file can hold its SQL three ways, chosen by how many
 // <script type="text/sql"> tags it contains - see extractModelSql() below:
 //
@@ -213,6 +224,18 @@ function parseKwargsArgument(call, args) {
   return result;
 }
 
+// source()'s own argument shape: exactly two quoted strings, both
+// required - e.g. source('stripe', 'payments'). Neither existing parser
+// fits: parseSingleStringArgument takes exactly one string,
+// parseVarArguments makes its second string optional.
+function parseTwoStringArguments(call, args) {
+  var match = /^\s*(['"])([^'"]*)\1\s*,\s*(['"])([^'"]*)\3\s*$/.exec(args);
+  if (!match) {
+    throw new Error('model(): "' + call + '(' + args + ')" is not a valid call - ' + call + '() takes exactly two quoted names, e.g. ' + call + '(\'source_name\', \'table_name\').');
+  }
+  return { first: match[2], second: match[4] };
+}
+
 // The keys a model entry or the registry's top level may set as a
 // default. Kept as an explicit list rather than copying every key on
 // notsobigdataModels, so an unrelated key a user attaches to the registry
@@ -245,7 +268,7 @@ var MODEL_CONFIG_KEYS = ['materialized'];
 // declaration reusing one of these names is rejected outright, the same
 // "no obvious precedence, reject rather than guess" posture this file
 // already takes for a duplicate {% set %} name or a second config() call.
-var BUILTIN_TEMPLATE_CALLS = ['ref', 'config', 'var'];
+var BUILTIN_TEMPLATE_CALLS = ['ref', 'config', 'var', 'source'];
 
 // Guarded read of the single notsobigdataModels global, reusing cli.js's
 // readOptionalGlobal() - same "never throw because of a global this
@@ -263,7 +286,7 @@ var BUILTIN_TEMPLATE_CALLS = ['ref', 'config', 'var'];
 function readModelsRegistry() {
   var raw = readOptionalGlobal('notsobigdataModels');
   if (raw === undefined) {
-    return { defaults: {}, models: {}, vars: {}, macroFiles: [] };
+    return { defaults: {}, models: {}, vars: {}, macroFiles: [], sources: {} };
   }
   if (!isPlainObject(raw)) {
     throw new Error('model(): notsobigdataModels must be an object - got ' + (Array.isArray(raw) ? 'an array' : typeof raw) + '.');
@@ -305,7 +328,143 @@ function readModelsRegistry() {
     });
     macroFiles = raw.macros;
   }
-  return { defaults: defaults, models: models, vars: vars, macroFiles: macroFiles };
+  var sources = readSourcesEntry(raw.sources, defaults, models);
+  return { defaults: defaults, models: models, vars: vars, macroFiles: macroFiles, sources: sources };
+}
+
+// notsobigdataModels.sources - dbt's source.yml analog, declaring a
+// BigQuery table this project doesn't itself load or build (owned by
+// Fivetran, BigQuery Data Transfer Service, a manually run script,
+// another team's pipeline, ...) under a logical (source, table) name pair,
+// so a model can {{ source('name', 'table') }} it instead of hardcoding
+// its physical project.dataset.table. Deliberately a key on the same
+// shared notsobigdataModels registry, not a second top-level global - see
+// docs/model.md's "Declaring external data" section for the full worked
+// example and the reasoning the user and this repo settled on.
+//
+// Shaped like notsobigdataModels itself, one level down: "projectId"/
+// "dataset" at the top of the sources block are defaults (falling back to
+// the registry's own projectId/dataset, same override chain
+// MODEL_DEFAULT_KEYS already gives models), and every other key names one
+// source. A source table entry can be as short as { tables: { x: {} } } -
+// loadedAtField/freshness/columns/tests are all opt-in, only needed by a
+// table that actually wants freshness checking, documentation, or
+// column-level tests via cli('sources').
+//
+// Fully validated right here, unconditionally - like vars/macros above,
+// not deferred into a per-node discoveryError the way one model's own
+// mistake is: a source is never a node, so there is no per-node discovery
+// pass for a bad source entry to become that node's own problem. This
+// mirrors readModelsRegistry()'s existing posture for raw.vars/raw.macros:
+// a mistake in shared, project-wide config throws for every caller, not
+// just whichever model happens to reference it.
+var SOURCE_LEVEL_DEFAULT_KEYS = ['projectId', 'dataset'];
+
+function readSourcesEntry(raw, registryDefaults, models) {
+  if (raw === undefined) {
+    return {};
+  }
+  if (!isPlainObject(raw)) {
+    throw new Error('model(): notsobigdataModels.sources must be an object - got ' + (Array.isArray(raw) ? 'an array' : typeof raw) + '.');
+  }
+  var sourceLevelDefaults = {};
+  SOURCE_LEVEL_DEFAULT_KEYS.forEach(function (key) {
+    sourceLevelDefaults[key] = raw[key] !== undefined ? raw[key] : registryDefaults[key];
+  });
+  // emptyMap(), not {} - built up key-by-key below (unlike models/vars
+  // above, which just alias raw.models/raw.vars directly), so a source or
+  // table literally named "__proto__" must become a normal own property
+  // instead of silently reassigning this object's own prototype via the
+  // special __proto__ setter a plain {} still has - same reasoning
+  // cli.js's own emptyMap() comment gives for a move node named the same
+  // way.
+  var sources = emptyMap();
+  Object.keys(raw).forEach(function (sourceName) {
+    if (SOURCE_LEVEL_DEFAULT_KEYS.indexOf(sourceName) !== -1) {
+      return;
+    }
+    var sourceRaw = raw[sourceName];
+    if (!isPlainObject(sourceRaw)) {
+      throw new Error('model(): notsobigdataModels.sources.' + sourceName + ' must be an object - got ' + (Array.isArray(sourceRaw) ? 'an array' : typeof sourceRaw) + '.');
+    }
+    if (!isPlainObject(sourceRaw.tables)) {
+      throw new Error('model(): notsobigdataModels.sources.' + sourceName + '.tables must be an object - got ' + (Array.isArray(sourceRaw.tables) ? 'an array' : typeof sourceRaw.tables) + '.');
+    }
+    var sourceProjectId = sourceRaw.projectId !== undefined ? sourceRaw.projectId : sourceLevelDefaults.projectId;
+    var sourceDataset = sourceRaw.dataset !== undefined ? sourceRaw.dataset : sourceLevelDefaults.dataset;
+    var tables = emptyMap();
+    Object.keys(sourceRaw.tables).forEach(function (tableName) {
+      var prefix = 'model(): notsobigdataModels.sources.' + sourceName + '.tables.' + tableName;
+      var tableRaw = sourceRaw.tables[tableName] || {};
+      if (!isPlainObject(tableRaw)) {
+        throw new Error(prefix + ' must be an object - got ' + typeof tableRaw + '.');
+      }
+      var table = {
+        table: tableRaw.table || tableName,
+        projectId: tableRaw.projectId !== undefined ? tableRaw.projectId : sourceProjectId,
+        dataset: tableRaw.dataset !== undefined ? tableRaw.dataset : sourceDataset
+      };
+      if (!table.projectId) {
+        throw new Error(prefix + ' is missing "projectId" - set it on notsobigdataModels, notsobigdataModels.sources, notsobigdataModels.sources.' + sourceName + ', or this table entry.');
+      }
+      if (!table.dataset) {
+        throw new Error(prefix + ' is missing "dataset" - set it on notsobigdataModels, notsobigdataModels.sources, notsobigdataModels.sources.' + sourceName + ', or this table entry.');
+      }
+      if (tableRaw.loadedAtField !== undefined) {
+        if (typeof tableRaw.loadedAtField !== 'string' || !tableRaw.loadedAtField) {
+          throw new Error(prefix + ' "loadedAtField" must be a non-empty string.');
+        }
+        table.loadedAtField = tableRaw.loadedAtField;
+      }
+      if (tableRaw.freshness !== undefined) {
+        if (!table.loadedAtField) {
+          throw new Error(prefix + ' declares "freshness" but no "loadedAtField" - freshness needs a timestamp column to check.');
+        }
+        if (!isPlainObject(tableRaw.freshness)) {
+          throw new Error(prefix + ' "freshness" must be an object.');
+        }
+        var warnAfterMinutes = tableRaw.freshness.warnAfterMinutes;
+        var errorAfterMinutes = tableRaw.freshness.errorAfterMinutes;
+        if (warnAfterMinutes === undefined && errorAfterMinutes === undefined) {
+          throw new Error(prefix + ' "freshness" needs at least one of "warnAfterMinutes"/"errorAfterMinutes".');
+        }
+        [['warnAfterMinutes', warnAfterMinutes], ['errorAfterMinutes', errorAfterMinutes]].forEach(function (pair) {
+          if (pair[1] !== undefined && (typeof pair[1] !== 'number' || !(pair[1] > 0))) {
+            throw new Error(prefix + ' "freshness.' + pair[0] + '" must be a positive number.');
+          }
+        });
+        if (warnAfterMinutes !== undefined && errorAfterMinutes !== undefined && !(errorAfterMinutes > warnAfterMinutes)) {
+          throw new Error(prefix + ' "freshness.errorAfterMinutes" must be greater than "freshness.warnAfterMinutes".');
+        }
+        table.freshness = { warnAfterMinutes: warnAfterMinutes, errorAfterMinutes: errorAfterMinutes };
+      }
+      if (tableRaw.columns !== undefined) {
+        if (!isPlainObject(tableRaw.columns)) {
+          throw new Error(prefix + ' "columns" must be an object.');
+        }
+        Object.keys(tableRaw.columns).forEach(function (columnName) {
+          var column = tableRaw.columns[columnName];
+          if (!isPlainObject(column) || typeof column.description !== 'string') {
+            throw new Error(prefix + ' "columns.' + columnName + '" must be an object with a string "description".');
+          }
+        });
+        table.columns = tableRaw.columns;
+      }
+      if (tableRaw.tests !== undefined) {
+        // Reuses validateModelTests() as-is - a source table's tests[] is
+        // the identical shape (check/column/values/to/field, or a custom
+        // query) a model's own tests[] already validates, right down to a
+        // "relationships" test's "to" needing to name a declared model.
+        // Only models and defaults are needed for that resolution, both
+        // already computed above in this same readModelsRegistry() call.
+        validateModelTests(tableRaw.tests, prefix, { models: models, defaults: registryDefaults });
+        table.tests = tableRaw.tests;
+      }
+      tables[tableName] = table;
+    });
+    sources[sourceName] = { tables: tables };
+  });
+  return sources;
 }
 
 // Merges the registry's defaults with one model's own entry (the entry
@@ -1012,7 +1171,7 @@ function isCommentedOut(spans, offset) {
   return spans.some(function (span) { return offset >= span[0] && offset < span[1]; });
 }
 
-function compileModelSql(sql, resolveRef, registry) {
+function compileModelSql(sql, resolveRef, resolveSource, registry) {
   var setValues = extractSetStatements(sql);
   var refConfigVarSpans = commentSpans(sql);
   var compiled = sql.replace(templateExpressionPattern(), function (raw, call, args, offset) {
@@ -1027,8 +1186,12 @@ function compileModelSql(sql, resolveRef, registry) {
       var parsed = parseVarArguments('var', args);
       return resolveVar(registry, parsed.name, parsed.hasDefault, parsed.defaultValue);
     }
+    if (call === 'source') {
+      var sourceArgs = parseTwoStringArguments('source', args);
+      return resolveSource(sourceArgs.first, sourceArgs.second);
+    }
     if (call !== 'ref') {
-      throw new Error('model(): unsupported template call "' + call + '(...)" in SQL - only ref(), config() and var() are implemented so far, '
+      throw new Error('model(): unsupported template call "' + call + '(...)" in SQL - only ref(), source(), config() and var() are implemented so far, '
         + 'and this name did not match any macro declared in notsobigdataModels.macros either.');
     }
     return resolveRef(parseSingleStringArgument('ref', args));
@@ -1572,6 +1735,116 @@ function buildRefResolver(config, registry) {
   };
 }
 
+// source()'s own resolution closure, mirroring buildRefResolver() above -
+// same "build a closure that already knows this model's name, for a
+// clearer error message" shape, minus the dependency-graph half of what
+// ref() does: a source is never a node (see notsobigdataModels.sources'
+// own comment above readSourcesEntry()), so there is nothing here
+// analogous to moveRefTargets to fall back to, and no edge to derive -
+// {{ source(...) }} never appears in extractRefDependencies()'s scan, on
+// purpose.
+function buildSourceResolver(config, registry) {
+  return function (sourceName, tableName) {
+    // has() on both lookups, not a plain `registry.sources[sourceName]`
+    // bracket access - same prototype-pollution reasoning
+    // buildRefResolver()'s own has(registry.models, refName) already takes
+    // above: a model author writing {{ source('__proto__', 'x') }}, by
+    // typo or otherwise, would get Object.prototype back from a plain
+    // bracket read (truthy), and hasOwnProperty.call(undefined, ...) on
+    // its own missing .tables throws a raw TypeError instead of this
+    // function's own intended "does not match a declared source" error.
+    if (has(registry.sources, sourceName) && has(registry.sources[sourceName].tables, tableName)) {
+      var table = registry.sources[sourceName].tables[tableName];
+      return qualifiedTableRef(table.projectId, table.dataset, table.table);
+    }
+    throw new Error('model(): "' + config.name + '" has {{ source(\'' + sourceName + '\', \'' + tableName + '\') }}, which does not match a declared source/table in notsobigdataModels.sources.');
+  };
+}
+
+// Flattens registry.sources (nested source -> table, the shape
+// buildSourceResolver() needs for a {{ source(...) }} lookup) into one
+// flat array, each entry carrying its own sourceName/
+// tableName alongside the already-resolved table config - the shape
+// cli.js's cli('sources') and cli('list') actually want to iterate and
+// filter by --select/--exclude, neither of which cares about the nested
+// lookup structure ref()-style resolution needs.
+function flattenSources(sources) {
+  var entries = [];
+  Object.keys(sources).forEach(function (sourceName) {
+    var tables = sources[sourceName].tables;
+    Object.keys(tables).forEach(function (tableName) {
+      var table = tables[tableName];
+      entries.push({
+        source: sourceName,
+        tableName: tableName,
+        projectId: table.projectId,
+        dataset: table.dataset,
+        table: table.table,
+        loadedAtField: table.loadedAtField,
+        freshness: table.freshness,
+        columns: table.columns,
+        tests: table.tests
+      });
+    });
+  });
+  return entries;
+}
+
+// cli('sources')'s freshness check for one source table entry (as
+// flattenSources() above produces it - freshness/loadedAtField are only
+// ever both set or both absent, enforced by readSourcesEntry()'s own
+// validation). Computes the age entirely in BigQuery, not in Apps
+// Script - TIMESTAMP_DIFF/FORMAT_TIMESTAMP against CURRENT_TIMESTAMP()
+// sidesteps having to parse whatever raw representation (epoch seconds,
+// an ISO string) the BigQuery REST API happens to hand back for a
+// TIMESTAMP/DATETIME/DATE column, the same "push formatting into BigQuery
+// itself" choice qualifiedTableRef()'s own callers already lean on for
+// identifier quoting. loadedAtField is a config-supplied column name, so
+// it goes through quoteIdentifier() before landing in generated SQL - the
+// same guard MODEL_TEST_COMPILERS already applies to test.column/
+// test.field, for the same reason: an unquoted, unvalidated identifier
+// landing in a query string built from user config is exactly the kind of
+// injection surface this file's own quoteIdentifier()/quoteSqlLiteral()
+// comments already call out.
+function checkSourceFreshness(entry) {
+  var relation = qualifiedTableRef(entry.projectId, entry.dataset, entry.table);
+  var field = quoteIdentifier(entry.loadedAtField);
+  var query = 'SELECT '
+    + 'TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), CAST(MAX(' + field + ') AS TIMESTAMP), MINUTE) AS age_minutes, '
+    + 'FORMAT_TIMESTAMP(\'%Y-%m-%dT%H:%M:%SZ\', CAST(MAX(' + field + ') AS TIMESTAMP)) AS loaded_at '
+    + 'FROM ' + relation;
+  var queryResults = runBigQueryQueryJob({ query: query, useLegacySql: false }, entry.projectId);
+  var row = queryResults.rows && queryResults.rows[0] ? queryResults.rows[0].f : null;
+  var ageMinutes = row && row[0].v !== null && row[0].v !== undefined ? Number(row[0].v) : null;
+  if (ageMinutes === null) {
+    return {
+      status: 'error', ageMinutes: null, loadedAt: null,
+      message: relation + ' has no rows (or "' + entry.loadedAtField + '" is always NULL) - cannot determine freshness.'
+    };
+  }
+  var loadedAt = row[1].v;
+  var status = 'ok';
+  if (entry.freshness.errorAfterMinutes !== undefined && ageMinutes >= entry.freshness.errorAfterMinutes) {
+    status = 'error';
+  } else if (entry.freshness.warnAfterMinutes !== undefined && ageMinutes >= entry.freshness.warnAfterMinutes) {
+    status = 'warn';
+  }
+  return { status: status, ageMinutes: ageMinutes, loadedAt: loadedAt, message: relation + ' last loaded ' + ageMinutes + ' minute(s) ago (at ' + loadedAt + ').' };
+}
+
+// cli('sources')'s test check for one source table entry - reuses
+// compileModelTests()/runSqlTests() exactly as modelTableStaged()/model()
+// above already do for a model's own tests[], just pointed at the source
+// table's own relation instead of a model's. registry is only needed for
+// a "relationships" test's own "to" resolution (MODEL_TEST_COMPILERS.relationships,
+// above), the same reason readSourcesEntry() needed it once already, at
+// validation time - this is that same test list, now actually run.
+function runSourceTests(entry, registry) {
+  var compiledTests = compileModelTests(entry.tests, registry);
+  var relationRef = { projectId: entry.projectId, dataset: entry.dataset, table: entry.table };
+  return runSqlTests(compiledTests, relationRef, 'cli(\'sources\'): "' + entry.source + '.' + entry.tableName + '" tests');
+}
+
 // The EXECUTORS.compile entry (see cli.js's COMPILERS map): resolves a
 // model's SQL exactly the way model() itself is about to, right down to
 // reusing the same buildRefResolver()/compileModelSql() calls, but stops
@@ -1585,7 +1858,7 @@ function compileModel(config) {
   var sql = config.sql;
   assertSingleStatement(sql, 'model(): "' + config.name + '"');
   var registry = readModelsRegistry();
-  return compileModelSql(sql, buildRefResolver(config, registry), registry);
+  return compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry);
 }
 
 // config.sql is always already set by expandModelNodes() above by the
@@ -1598,7 +1871,7 @@ function model(config) {
   var sql = config.sql;
   assertSingleStatement(sql, 'model(): "' + config.name + '"');
   var registry = readModelsRegistry();
-  var compiled = compileModelSql(sql, buildRefResolver(config, registry), registry);
+  var compiled = compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry);
   var relation = qualifiedRelation(config);
   var materialized = resolveMaterialized(config);
   var hasTests = !!(config.tests && config.tests.length);
