@@ -1561,6 +1561,21 @@ var NotSoBigData = (function () {
   // defaults to "<model name>.html" when omitted, same spirit as a node's
   // own name defaulting from its variable elsewhere in this library.
   //
+  // notsobigdataModels.folders is an optional second, narrower tier of
+  // defaults between the two above: a named group of config (any of the
+  // same keys a model entry could set) a model opts into with its own
+  // "folder: '<name>'", so several models sharing a dataset/materialized/
+  // sqlFile-prefix don't each repeat it. modelDir - one more registry/
+  // folder-level default key, alongside projectId/dataset/materialized/
+  // dependsOn - only ever changes what sqlFile's *default* expands to
+  // ("<modelDir><model name>.html"); a model with its own sqlFile ignores
+  // it. This is deliberately not dbt's model-paths: there is no directory
+  // scanning here (Apps Script's runtime has no API to list a project's
+  // own files, only exact-name fetch via HtmlService, so real discovery
+  // isn't buildable), and folder membership never affects a node's name or
+  // cli() selection - see docs/model.md's "Grouping models with folders"
+  // for the worked example.
+  //
   // This is a deliberately different discovery shape than move's "every
   // node is its own var": with dozens of models, N boilerplate top-level
   // vars just to register them is worse than one object naming them all.
@@ -1753,8 +1768,11 @@ var NotSoBigData = (function () {
   // registry's, not merges with it) for free, the same way materialized
   // already does. (Union-with-ref() semantics - dependsOn can never
   // suppress a real ref() - are enforced separately in mergeDependsOn()
-  // below, not by this override.)
-  var MODEL_DEFAULT_KEYS = ['projectId', 'dataset', 'materialized', 'dependsOn'];
+  // below, not by this override.) modelDir joins the list for the same
+  // reason: a registry-wide "every model's default sqlFile lives under
+  // this prefix" is a real shape, and folders (below) reuse this same key
+  // name to set it per group instead of project-wide.
+  var MODEL_DEFAULT_KEYS = ['projectId', 'dataset', 'materialized', 'dependsOn', 'modelDir'];
 
   // The keys a {{ config(...) }} call inside a model's own SQL may set - see
   // extractConfigOverrides below. Kept separate from MODEL_DEFAULT_KEYS (even
@@ -1792,7 +1810,7 @@ var NotSoBigData = (function () {
   function readModelsRegistry() {
     var raw = readOptionalGlobal('notsobigdataModels');
     if (raw === undefined) {
-      return { defaults: {}, models: {}, vars: {}, macroFiles: [], sources: {} };
+      return { defaults: {}, models: {}, vars: {}, macroFiles: [], sources: {}, folders: {} };
     }
     if (!isPlainObject(raw)) {
       throw new Error('model(): notsobigdataModels must be an object - got ' + (Array.isArray(raw) ? 'an array' : typeof raw) + '.');
@@ -1835,7 +1853,27 @@ var NotSoBigData = (function () {
       macroFiles = raw.macros;
     }
     var sources = readSourcesEntry(raw.sources, defaults, models);
-    return { defaults: defaults, models: models, vars: vars, macroFiles: macroFiles, sources: sources };
+    // Each folder is a partial config template - same shape as a model
+    // entry, no key whitelist - merged into a model's config between the
+    // registry-wide defaults above and the model entry's own keys (see
+    // resolveModelConfig below), so a model can group shared config
+    // (dataset, modelDir, materialized, ...) without repeating it per
+    // model. Named "folders" rather than dbt's "groups" deliberately: dbt
+    // groups are node ownership/access control, a different concept this
+    // isn't borrowing.
+    var folders = {};
+    if (raw.folders !== undefined) {
+      if (!isPlainObject(raw.folders)) {
+        throw new Error('model(): notsobigdataModels.folders must be an object - got ' + (Array.isArray(raw.folders) ? 'an array' : typeof raw.folders) + '.');
+      }
+      Object.keys(raw.folders).forEach(function (key) {
+        if (!isPlainObject(raw.folders[key])) {
+          throw new Error('model(): notsobigdataModels.folders.' + key + ' must be an object - got ' + (Array.isArray(raw.folders[key]) ? 'an array' : typeof raw.folders[key]) + '.');
+        }
+      });
+      folders = raw.folders;
+    }
+    return { defaults: defaults, models: models, vars: vars, macroFiles: macroFiles, sources: sources, folders: folders };
   }
 
   // notsobigdataModels.sources - dbt's source.yml analog, declaring a
@@ -1973,9 +2011,11 @@ var NotSoBigData = (function () {
     return sources;
   }
 
-  // Merges the registry's defaults with one model's own entry (the entry
-  // wins on any key both set) and resolves sqlFile's naming-convention
-  // default. Reused for two different callers: expandModelNodes() below
+  // Merges the registry's defaults, then the model's folder (if it
+  // declares one) - via notsobigdataModels.folders, see readModelsRegistry()
+  // above - then the model's own entry (later wins on any key more than one
+  // of these sets), and resolves sqlFile's naming-convention default.
+  // Reused for two different callers: expandModelNodes() below
   // resolves a model's *own* config, and compileModelSql()'s ref() handler
   // resolves what a ref() *points at* - both need "here is everything known
   // about model X", and an unknown model name has to be an error either way
@@ -2005,11 +2045,25 @@ var NotSoBigData = (function () {
     }
     var config = {};
     Object.keys(registry.defaults).forEach(function (key) { config[key] = registry.defaults[key]; });
+    if (entry.folder !== undefined) {
+      if (!has(registry.folders, entry.folder)) {
+        throw new Error('model(): "' + name + '" declares folder "' + entry.folder + '", which is not declared in notsobigdataModels.folders. Known folders: ' + Object.keys(registry.folders).join(', ') + '.');
+      }
+      var folder = registry.folders[entry.folder];
+      Object.keys(folder).forEach(function (key) { config[key] = folder[key]; });
+    }
     Object.keys(entry).forEach(function (key) { config[key] = entry[key]; });
     config.name = name;
+    delete config.folder;
+    // modelDir only shapes sqlFile's *default* - a model with its own
+    // sqlFile ignores it entirely. No path-joining: modelDir must carry its
+    // own trailing slash (e.g. "html/marketing/"), same opaque-string
+    // posture sqlFile itself already has all the way down to
+    // readModelHtml() below.
     if (!config.sqlFile) {
-      config.sqlFile = name + '.html';
+      config.sqlFile = (config.modelDir || '') + name + '.html';
     }
+    delete config.modelDir;
     return config;
   }
 

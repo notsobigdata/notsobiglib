@@ -1222,6 +1222,68 @@ instead mirrors `cli('debug')`'s own posture: an independent diagnostic
 pass, its own report shape, no manifest, checked but never run/skipped
 transitively.
 
+## `notsobigdataModels.folders` + `modelDir` (2026-09-01)
+
+User question that started this: `clasp push` (and typing a `/`-containing
+name directly in the Apps Script UI) already lets a project's `.html`
+files live in subfolders, and `readModelHtml()` already forwards `sqlFile`
+verbatim to `HtmlService.createHtmlOutputFromFile()` with zero parsing of
+`/` anywhere - so an explicit `sqlFile: 'html/marketing/x.html'` already
+worked before this change. The only real gap was `sqlFile`'s *default*
+(`name + '.html'`, no folder segment ever), which meant a model relying on
+it was stuck at the project root - `notsobigtests/PROJECT.md`'s
+"`sqlFile`/`macros` paths" section already documented this as a known
+constraint.
+
+**Not dbt's `model-paths`, and said so explicitly rather than let the name
+imply otherwise.** dbt's `model-paths` bundles three things: directory
+*discovery* (no per-model registration needed), *hierarchical config
+inheritance* (a `models:` tree in `dbt_project.yml` mirroring the folder
+tree), and *path-based selection* (`--select path:models/marketing`).
+Only the middle one is buildable here - discovery is a platform
+limitation, not a scoping choice: Apps Script's runtime has no API to
+list a project's own files, only exact-name fetch via `HtmlService`.
+Selection was left alone too - a folder never changes a model's registry
+key, so `cli('run --select <name>')` keeps meaning exactly what it always
+has.
+
+**`folders` mirrors a model entry's own shape on purpose - no key
+whitelist.** `readModelsRegistry()`'s validation only checks that
+`notsobigdataModels.folders` and each of its values are plain objects,
+the same posture already taken for a model *entry* (`resolveModelConfig()`
+never whitelists `entry`'s keys either). A tighter whitelist would need to
+track `MODEL_DEFAULT_KEYS` by hand and go stale the next time that list
+grows - not whitelisting costs nothing today since a folder's keys just
+get merged into `config` the same way `entry`'s keys already do.
+
+**Precedence is a third merge step, not a new merge algorithm.**
+`resolveModelConfig()` already had exactly one merge step (defaults, then
+entry, later wins). Folders slot in as a second step in between (defaults
+→ folder → entry) using the identical `Object.keys(...).forEach(function
+(key) { config[key] = ...[key]; })` pattern already used for defaults -
+deliberately not refactored into a shared "merge object into config"
+helper for three call sites, since the loop is one line and a helper
+would be more surface than the duplication it removes.
+
+**`folder`/`modelDir` are deleted off `config` right after they're used**,
+same posture `expandModelNodes()` already takes with `dependsOn` (computed
+into `node.dependsOn`, then `delete config.dependsOn` before `node.config
+= config`) - both are routing/lookup-only values, not something a caller
+inspecting a resolved model's config should see or rely on afterward.
+
+**`modelDir` joined `MODEL_DEFAULT_KEYS` alongside `projectId`/`dataset`/
+`materialized`/`dependsOn`**, so a project with one flat default folder
+and no need for multiple `folders` groups can still set it once at the
+registry's top level - `folders` reuses the exact same key name inside
+each group rather than inventing a second name for the same concept at a
+narrower scope.
+
+**No path-joining or normalization.** `modelDir` must carry its own
+trailing slash; the library does not insert one, strip a double slash, or
+otherwise touch the string - identical to how `sqlFile` itself is already
+forwarded to `HtmlService.createHtmlOutputFromFile()` untouched save for
+stripping a trailing `.html`.
+
 ## Deferred to v2
 
 Incremental materialization, column-level tests beyond dbt's four

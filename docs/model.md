@@ -55,6 +55,48 @@ BigQuery's own atomic `CREATE OR REPLACE {VIEW|TABLE} ... AS SELECT` — no
 temp-table swap dance required. Incremental materialization isn't
 implemented yet.
 
+### Grouping models with folders
+
+`notsobigdataModels.folders` is an optional, narrower tier of defaults
+between the registry-wide ones above and a model's own entry — a named
+group of config a model opts into with `folder: '<name>'`, so several
+models that share a dataset, a `materialized`, or a `.html` folder don't
+each repeat it:
+
+```javascript
+var notsobigdataModels = {
+  projectId: 'my-project', dataset: 'analytics',
+  folders: {
+    marketing: { dataset: 'marketing', modelDir: 'html/marketing/' }
+  },
+  models: {
+    stg_orders: { folder: 'marketing' },                        // dataset: 'marketing', sqlFile: html/marketing/stg_orders.html
+    orders_summary: { folder: 'marketing', materialized: 'table' }, // model's own key still wins over the folder's
+    special_case: { sqlFile: 'html/other/special.html' }        // no folder - unaffected
+  }
+};
+```
+
+Precedence, low to high: the registry's top-level defaults → the model's
+folder (if it sets one) → the model's own entry keys. A folder can set
+any key a model entry could (`dataset`, `materialized`, `dependsOn`,
+`modelDir`, ...) — there's no restricted list.
+
+`modelDir` (settable at the registry's top level or inside a folder) only
+ever changes what `sqlFile`'s *default* expands to
+(`<modelDir><model name>.html`) — a model that sets its own `sqlFile`
+ignores `modelDir` entirely, folder or no folder. It needs its own
+trailing slash (`'html/marketing/'`, not `'html/marketing'`) — like
+`sqlFile` itself, the library never joins or normalizes the path, it's
+forwarded as written.
+
+This is deliberately not the same thing as dbt's `model-paths`: there is
+no directory scanning here — Apps Script's runtime has no API to list a
+project's own files, only exact-name fetch, so real file discovery isn't
+buildable — and a folder never changes a model's name or how `cli()`
+selects it (`cli('run --select <name>')` still selects by the model's own
+registry key, unrelated to its folder).
+
 ### Setting config from SQL: `{{ config(...) }}`
 
 A model can also set its own config from inside its SQL, dbt-style, instead
