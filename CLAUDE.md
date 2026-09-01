@@ -238,6 +238,19 @@ link the two PRs from each other's description, since they can no longer
 be the same diff once testing lives in a separate repo — see `/ship`'s
 workflow.
 
+**Pointing `notsobigtests` at the branch under test is a Script Property,
+not a code edit.** `js/00-bootstrap.js` builds the `eval()` URL from
+`SRC_REF` (`PropertiesService.getScriptProperties().getProperty('SRC_REF')`),
+not a hardcoded ref — so testing a feature PR before it merges means
+setting `SRC_REF` to that branch name (e.g. `feat/move-bigquery-source`) in
+the Apps Script editor, running the fixtures, and pointing it back at
+`main` (or the active `release/N`) afterward. This is a per-run human step,
+not something either repo's docs previously called out end to end —
+`notsobigtests`' own PROJECT.md documents the file's mechanics but not this
+workflow-level habit, so it's worth remembering here too: an empty/stale
+`SRC_REF` silently tests the wrong version of the library rather than
+failing loudly.
+
 Both the test Apps Script project itself and any fixture files it depends
 on (test Sheets, sample CSV/XLSX/JSON files, etc.) live together inside a
 single Google Drive folder named after the library (`notsobigdata`), so
@@ -368,3 +381,25 @@ All three commands ask before any externally visible action (pushing,
 opening a PR, merging) and favor more confirmation checkpoints over fewer,
 since part of the point of this workflow is understanding the changes an
 agent makes, not just approving them.
+
+### Downstream consumers pinned to a release
+
+Not every sibling repo tracks `main`. [`notsobigjaffle`](https://github.com/notsobigdata/notsobigjaffle)
+(a demo project, see its own CLAUDE.md) `eval()`s `src.js` from a specific
+commit **SHA** rather than `main`, by design — it shouldn't move just
+because this library does.
+
+**Pin to a commit SHA on `main`, never to a `release/*` branch name.**
+`/merge-pr` deletes a release branch the instant it merges (see that
+command's step 5), so a URL built from `release/N` 404s the moment that
+release ships — this bit `notsobigjaffle` for real (pinned at
+`release/11`, three releases stale, silently 404ing since release/11
+merged). A commit SHA is permanent regardless of what happens to branches
+afterward, and needs no new tagging convention.
+
+`/merge-pr` step 6 asks, right after a release-branch-into-`main` merge,
+whether to bump a pinned consumer to the SHA just landed — but that's a
+prompt, not an enforcement mechanism. A consumer can still drift silently
+between releases if the answer is "not now"; if you suspect one has, check
+its `eval()` URL's SHA against `git log main --oneline` here by hand
+rather than assuming it's current.
