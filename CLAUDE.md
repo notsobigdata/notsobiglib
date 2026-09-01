@@ -25,7 +25,7 @@ only, not as source to port.
 The intentioin is to wrap the whole library in a IFFE funciton and then "call" it from google apps script like this:
 
 ``` javascript
-    eval(UrlFetchApp.fetch('https://raw.githubusercontent.com/notsobigdata/lib/main/src.js').getContentText())
+    eval(UrlFetchApp.fetch('https://raw.githubusercontent.com/notsobigdata/notsobiglib/main/src.js').getContentText())
 ```
 
 In that way we can use custom gas functions within the user scope (like reading html files) without problemse
@@ -213,26 +213,29 @@ For each and every possible combination that each module provide, we need to cre
 Since Google Apps script has its own runtime (or something like this) every test should be triggered by a human, but prepared but you.
 
 In practice this means maintaining a companion example Apps Script project
-in its own folder in this repo (`notsobigdata-tests/`), managed with the `clasp` CLI —
-already installed locally — that pulls in `src.js` and exercises every
-documented node kind / connector / cli() command combination against real
-Sheets/Drive/BigQuery resources. Because `cli()` discovers nodes by scanning
-the global scope, every fixture config in that project is a top-level `var`,
-and each test selects its own node (`cli('run --select <node>')`) — a bare
-`cli('run')` there would fire every fixture at once. A human runs it from the Apps Script
-editor (or `clasp run`) and reports back pass/fail; there is no automated
-CI for this since the GAS runtime can't run headless in this setup.
+in its own sibling repo, [`notsobigtests`](https://github.com/notsobigdata/notsobigtests),
+managed with the `clasp` CLI — already installed locally — that pulls in
+`src.js` and exercises every documented node kind / connector / cli()
+command combination against real Sheets/Drive/BigQuery resources. Because
+`cli()` discovers nodes by scanning the global scope, every fixture config
+in that project is a top-level `var`, and each test selects its own node
+(`cli('run --select <node>')`) — a bare `cli('run')` there would fire
+every fixture at once. A human runs it from the Apps Script editor (or
+`clasp run`) and reports back pass/fail; there is no automated CI for
+this since the GAS runtime can't run headless in this setup.
 
-`notsobigdata-tests/` is committed — its fixtures and test code are part
-of this repo, reviewed in PRs like everything else. The one file that
-isn't is `notsobigdata-tests/.clasp.json` (see `.gitignore`): a clasp
-project is tied to a specific Apps Script deployment via that file's
-`scriptId`, which is personal to whoever's Google account owns it, so it
-can't be shared across contributors. Each contributor runs `clasp create`
-or `clasp clone` once to generate their own local `.clasp.json` pointing
-at their own deployment, then `clasp push -f` to deploy the tracked code
-there. PRs that add a new node kind, connector, or cli() command update
-`notsobigdata-tests/` directly as part of the same diff — see `/ship`'s
+`notsobigtests` is its own repo, with its own git history and its own PR
+review — not a folder inside this one. The one file not committed there
+is its own `.clasp.json` (see that repo's `.gitignore`): a clasp project
+is tied to a specific Apps Script deployment via that file's `scriptId`,
+which is personal to whoever's Google account owns it, so it can't be
+shared across contributors. Each contributor runs `clasp create` or
+`clasp clone` once to generate their own local `.clasp.json` pointing at
+their own deployment, then `clasp push -f` to deploy the tracked code
+there. A PR here that adds a new node kind, connector, or cli() command
+needs a **companion PR in `notsobigtests`** adding the matching fixture —
+link the two PRs from each other's description, since they can no longer
+be the same diff once testing lives in a separate repo — see `/ship`'s
 workflow.
 
 Both the test Apps Script project itself and any fixture files it depends
@@ -273,9 +276,9 @@ IDs, BigQuery project IDs, dataset/schema/table names, folder IDs, and
 anything else that points at a real resource rather than describing the
 library's behavior — must be stored in GAS's built-in Script Properties
 (`PropertiesService.getScriptProperties()`), never hardcoded inline in the
-test project's code. This matters more now that `notsobigdata-tests/` is
-committed: Script Properties keep the test project's own code — and this
-repo, which is public — free of real resource identifiers.
+test project's code. This matters more now that `notsobigtests` is a
+committed, public repo of its own: Script Properties keep its code free
+of real resource identifiers.
 
 ## About documentation
 
@@ -320,9 +323,9 @@ and commit messages use a `type/description` (branch) / `type: description`
 main — always a feature branch and a PR, even for small or doc-only changes
 like edits to the README.md file. This applies to everything git actually
 tracks — which now includes this file. Only what's still listed in
-`.gitignore` (`.claude/`, and `notsobigdata-tests/.clasp.json`'s
-per-contributor `scriptId`) stays untracked and is edited directly, with
-no branch/PR involved.
+`.gitignore` (`.claude/`) stays untracked and is edited directly, with no
+branch/PR involved. (`notsobigtests` has its own equivalent `.clasp.json`
+exemption in its own `.gitignore`, now that it's a separate repo.)
 
 Branches are three-tier: feature branches (`feat/`, `fix/`, `refactor/`,
 `docs/`, `test/`, `chore/`) branch off the current `release/N` branch and
