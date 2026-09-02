@@ -209,67 +209,96 @@ generalized version of either of these.
 
 ## About testing
 
-For each and every possible combination that each module provide, we need to create a test in order to test it in a Google Apps Script project.
-Since Google Apps script has its own runtime (or something like this) every test should be triggered by a human, but prepared but you.
+Testing here has two layers: a fast, headless Node layer for the
+`cli()` commands that never touch a live resource by design, and a
+human-run Apps Script layer for everything that does.
 
-In practice this means maintaining a companion example Apps Script project
-in its own sibling repo, [`notsobigtests`](https://github.com/notsobigdata/notsobigtests),
-managed with the `clasp` CLI — already installed locally — that pulls in
-`src.js` and exercises every documented node kind / connector / cli()
-command combination against real Sheets/Drive/BigQuery resources. Because
-`cli()` discovers nodes by scanning the global scope, every fixture config
-in that project is a top-level `var`, and each test selects its own node
-(`cli('run --select <node>')`) — a bare `cli('run')` there would fire
-every fixture at once. A human runs it from the Apps Script editor (or
-`clasp run`) and reports back pass/fail; there is no automated CI for
-this since the GAS runtime can't run headless in this setup.
+### Layer 1 — Node, headless, `list`/`compile`/`hello`/`help`
 
-`notsobigtests` is its own repo, with its own git history and its own PR
-review — not a folder inside this one. The one file not committed there
-is its own `.clasp.json` (see that repo's `.gitignore`): a clasp project
-is tied to a specific Apps Script deployment via that file's `scriptId`,
-which is personal to whoever's Google account owns it, so it can't be
-shared across contributors. Each contributor runs `clasp create` or
-`clasp clone` once to generate their own local `.clasp.json` pointing at
-their own deployment, then `clasp push -f` to deploy the tracked code
-there. A PR here that adds a new node kind, connector, or cli() command
-needs a **companion PR in `notsobigtests`** adding the matching fixture —
-link the two PRs from each other's description, since they can no longer
-be the same diff once testing lives in a separate repo — see `/ship`'s
-workflow.
+`cli()` is the library's one public entrypoint (`return { cli: cli }`,
+the footer `build.sh` writes), and four of its seven commands are
+dry-run by construction: `list` resolves and orders nodes without
+executing anything, `compile` renders a model's SQL without touching
+BigQuery, `hello` and `help` touch nothing at all. Between them they
+exercise discovery, `--select`/`--exclude`, dependency ordering, the
+`model` registry's expansion into nodes, and the `{{ ref() }}`/
+`{% for %}`/`{% set %}`/`{{ config() }}` macro parser — most of the
+logic that actually has bugs worth catching before a human ever opens
+the Apps Script editor.
 
-**Pointing `notsobigtests` at the branch under test is a Script Property,
-not a code edit.** `js/00-bootstrap.js` builds the `eval()` URL from
-`SRC_REF` (`PropertiesService.getScriptProperties().getProperty('SRC_REF')`),
-not a hardcoded ref — so testing a feature PR before it merges means
-setting `SRC_REF` to that branch name (e.g. `feat/move-bigquery-source`) in
-the Apps Script editor, running the fixtures, and pointing it back at
-`main` (or the active `release/N`) afterward. This is a per-run human step,
-not something either repo's docs previously called out end to end —
-`notsobigtests`' own PROJECT.md documents the file's mechanics but not this
-workflow-level habit, so it's worth remembering here too: an empty/stale
-`SRC_REF` silently tests the wrong version of the library rather than
-failing loudly.
+`test/harness.js` loads `src.js` into a Node `vm` context alongside a
+~15-line shim (`Logger.log` as a no-op, `HtmlService.createHtmlOutputFromFile`
+reading a local fixture file instead of a GAS project file) and then
+runs one or more fixture files — plain `.js` files declaring top-level
+`var` nodes, exactly like a GAS project file — into that same context,
+so `cli()`'s `globalThis`-scanning discovery sees them exactly as it
+would in Apps Script. `test/*.test.js` files use this harness plus
+plain `assert`; `node test/run.js` finds and runs every `*.test.js`
+file. No framework, no `package.json`, no dependency — the same "no
+tooling required" posture `build.sh` has. **Node itself is a dev/test-
+only tool here — the library still ships and runs as a single
+`eval()`'d file in Apps Script; nothing in `test/` is part of what a
+consumer installs.**
 
-Both the test Apps Script project itself and any fixture files it depends
-on (test Sheets, sample CSV/XLSX/JSON files, etc.) live together inside a
-single Google Drive folder named after the library (`notsobigdata`), so
-everything the test project touches is co-located and easy to find/clean
-up.
+TDD applies for real on this layer: a change to discovery, ordering,
+selection, model registry expansion, or the macro parser gets a failing
+`test/*.test.js` written first, `node test/run.js` run to confirm it
+fails, then the `src/*.js` change, then the same command to confirm it
+passes. `./build.sh` must run before the test does if the change
+touched `src/*.js` — the harness loads the committed `src.js`, not the
+`src/` modules directly.
+
+### Layer 2 — Apps Script, human-run, `run`/`debug`/`sources`
+
+The other three commands need a live resource: `run` actually reads/
+writes Sheets/Drive/BigQuery, `debug` probes real connector
+permissions, `sources` checks freshness against real data. None of that
+is fakeable in Node without faking the thing under test, so this layer
+stays what it already was: a companion example Apps Script project in
+its own sibling repo, [`notsobigtests`](https://github.com/notsobigdata/notsobigtests),
+managed with `clasp`, that pulls in `src.js` and exercises every
+documented node kind/connector/`cli()` command combination against real
+resources. A human runs it from the Apps Script editor (or `clasp run`)
+and reports back pass/fail — there is no way to run this headless.
+
+**Write the fixture before the `src/` change, not after.** A PR that
+adds a node kind, connector, or `cli()` command needs a companion PR in
+`notsobigtests` either way (link the two PRs from each other's
+description — see "About devops stuff" below) — write that fixture,
+describing the expected `cli('run --select <node>')` result, *before*
+touching `src/`, the same test-first discipline as Layer 1, just
+without an automated red/green loop to run it through. This can't tell
+you you're wrong until a human runs it, but it forces the same "define
+the behavior before writing the code" thinking Layer 1 gets for free.
+
+Because `cli()` discovers nodes by scanning the global scope, every
+fixture config in that project is a top-level `var`, and each test
+selects its own node (`cli('run --select <node>')`) — a bare
+`cli('run')` there would fire every fixture at once.
+
+**Pointing `notsobigtests` at the branch under test is a Script
+Property, not a code edit.** `js/00-bootstrap.js` builds the `eval()`
+URL from `SRC_REF`
+(`PropertiesService.getScriptProperties().getProperty('SRC_REF')`), not
+a hardcoded ref — so testing a feature PR before it merges means
+setting `SRC_REF` to that branch name (e.g. `feat/move-bigquery-source`)
+in the Apps Script editor, running the fixtures, and pointing it back
+at `main` (or the active `release/N`) afterward.
+
+Both the test Apps Script project itself and any fixture files it
+depends on (test Sheets, sample CSV/XLSX/JSON files, etc.) live
+together inside a single Google Drive folder named after the library
+(`notsobigdata`), so everything the test project touches is co-located
+and easy to find/clean up.
 
 **Drive-target tests that create a new file must clean up after
 themselves.** Any fixture whose `target` has no `fileId` (Drive
 `folderId` + `fileName`, exercising the "create" path of `loadDrive*`)
-writes a brand-new file on every run — that's inherent to the path being
-tested, not a bug, since a create-mode test can't reuse a target and still
-be testing creation. Left alone, every run leaves one more duplicate
-behind: `notsobigdata-load-test.csv/.json/.xlsx` and
-`notsobigdata-load-new-test.csv` piled up to 30 files in the Drive folder
-before anyone noticed (2026-08-06). The fix belongs in the test project,
-not the library — `loadDrive*` already returns the id of the file it
-wrote, attached to the run result as `.loadResult` (see `src/move.md`) —
-so any fixture that tests file *creation* should assert on the result and
-then trash the file it just made:
+writes a brand-new file on every run — that's inherent to the path
+being tested, not a bug. `loadDrive*` returns the id of the file it
+wrote, attached to the run result as `.loadResult` (see `src/move.md`),
+so any fixture that tests file *creation* should assert on the result
+and then trash the file it just made:
 
 ``` javascript
     var report = NotSoBigData.cli('run --select loadNewTest');
@@ -284,14 +313,12 @@ testing overwrite/upsert, not creation — they reuse the same file every
 run and must **not** be trashed, or the next run's overwrite has nothing
 left to write to.
 
-Any identifying or sensitive value the test project needs — spreadsheet/file
-IDs, BigQuery project IDs, dataset/schema/table names, folder IDs, and
-anything else that points at a real resource rather than describing the
-library's behavior — must be stored in GAS's built-in Script Properties
-(`PropertiesService.getScriptProperties()`), never hardcoded inline in the
-test project's code. This matters more now that `notsobigtests` is a
-committed, public repo of its own: Script Properties keep its code free
-of real resource identifiers.
+Any identifying or sensitive value the test project needs —
+spreadsheet/file IDs, BigQuery project IDs, dataset/schema/table names,
+folder IDs, and anything else that points at a real resource rather
+than describing the library's behavior — must be stored in GAS's
+built-in Script Properties (`PropertiesService.getScriptProperties()`),
+never hardcoded inline in the test project's code.
 
 ## About documentation
 
