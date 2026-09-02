@@ -152,9 +152,10 @@ function usage() {
 
 // Turns a command string into { command, select, exclude, target }. Deliberately
 // a tiny hand-rolled parser rather than anything clever: the whole
-// grammar is one verb plus three optional flags (--select, --exclude, --target),
-// and both "--select a,b" and "--select=a,b" are accepted because both spellings
-// are muscle memory for anyone who has used a real CLI.
+// grammar is one verb plus four optional flags (--select, --exclude, --target,
+// --full-refresh), and both "--select a,b" and "--select=a,b" are accepted
+// because both spellings are muscle memory for anyone who has used a real CLI.
+// --full-refresh is a value-less boolean flag, only legal on run/compile.
 function parseCommand(input) {
   var text = typeof input === 'string' ? input.trim() : '';
   if (!text) {
@@ -170,7 +171,7 @@ function parseCommand(input) {
   if (COMMANDS.indexOf(command) === -1) {
     throw new Error('cli(): unknown command "' + command + '".\n\n' + usage());
   }
-  var parsed = { command: command, select: [], exclude: [], target: null };
+  var parsed = { command: command, select: [], exclude: [], target: null, fullRefresh: false };
   while (tokens.length) {
     var token = tokens.shift();
     var flag = token;
@@ -180,31 +181,42 @@ function parseCommand(input) {
       flag = token.slice(0, equalsAt);
       value = token.slice(equalsAt + 1);
     }
-    if (flag !== '--select' && flag !== '--exclude' && flag !== '--target') {
-      throw new Error('cli(): unknown option "' + flag + '". Expected "--select", "--exclude", or "--target".\n\n' + usage());
+    if (flag !== '--select' && flag !== '--exclude' && flag !== '--target' && flag !== '--full-refresh') {
+      throw new Error('cli(): unknown option "' + flag + '". Expected "--select", "--exclude", "--target", or "--full-refresh".\n\n' + usage());
     }
-    if (value === null) {
+    if (flag === '--full-refresh') {
+      // --full-refresh is a value-less boolean flag
+      if (value !== null) {
+        throw new Error('cli(): "--full-refresh" does not take a value.');
+      }
+      if (command !== 'run' && command !== 'compile') {
+        throw new Error('cli(): "--full-refresh" is only valid for "run" and "compile", not for "' + command + '".');
+      }
+      parsed.fullRefresh = true;
+    } else if (value === null) {
       value = tokens.length && tokens[0].indexOf('--') !== 0 ? tokens.shift() : '';
     }
-    if (flag === '--target') {
-      if (!value) {
-        throw new Error('cli(): "--target" needs a value, e.g. --target prod.');
+    if (flag !== '--full-refresh') {
+      if (flag === '--target') {
+        if (!value) {
+          throw new Error('cli(): "--target" needs a value, e.g. --target prod.');
+        }
+        if (parsed.target !== null) {
+          throw new Error('cli(): "--target" can only be specified once.');
+        }
+        parsed.target = value;
+      } else {
+        var list = value.split(',')
+          .map(function (item) { return item.trim(); })
+          .filter(function (item) { return !!item; });
+        if (!list.length) {
+          throw new Error('cli(): "' + flag + '" needs a comma-separated value, e.g. ' + flag + ' orders,customers.');
+        }
+        // Both flags are "--" plus the key they fill, and flag was validated
+        // above, so this is the key rather than a lookup that could miss.
+        var key = flag.slice(2);
+        parsed[key] = parsed[key].concat(list);
       }
-      if (parsed.target !== null) {
-        throw new Error('cli(): "--target" can only be specified once.');
-      }
-      parsed.target = value;
-    } else {
-      var list = value.split(',')
-        .map(function (item) { return item.trim(); })
-        .filter(function (item) { return !!item; });
-      if (!list.length) {
-        throw new Error('cli(): "' + flag + '" needs a comma-separated value, e.g. ' + flag + ' orders,customers.');
-      }
-      // Both flags are "--" plus the key they fill, and flag was validated
-      // above, so this is the key rather than a lookup that could miss.
-      var key = flag.slice(2);
-      parsed[key] = parsed[key].concat(list);
     }
   }
   return parsed;
@@ -1289,6 +1301,20 @@ function applyTargetOverlay(nodes, targetName) {
   applyModelTargets(nodes, targetName);
 }
 
+// Applies --full-refresh to every incremental model node. Mirroring
+// applyTargetOverlay()'s pattern, this sets config.fullRefresh on every
+// model node when the --full-refresh flag was provided.
+function applyFullRefresh(nodes, fullRefresh) {
+  if (!fullRefresh) {
+    return;
+  }
+  nodes.forEach(function (node) {
+    if (node.kind === 'model') {
+      node.config.fullRefresh = true;
+    }
+  });
+}
+
 // The single public entrypoint. Takes one command string and returns
 // either a run report (for "run"/"list"/"compile") or a message string
 // (for "hello"/"help").
@@ -1328,6 +1354,7 @@ function cli(input) {
   }
   assertDependenciesExist(discovered.nodes);
   applyTargetOverlay(discovered.nodes, parsed.target);
+  applyFullRefresh(discovered.nodes, parsed.fullRefresh);
   var selected = applySelection(discovered.nodes, parsed.select, parsed.exclude);
   if (!selected.length) {
     throw new Error('cli(): the selection matched no nodes. Run cli("list") to see everything available.');

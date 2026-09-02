@@ -165,6 +165,47 @@ function forEndPattern() {
   return /\{%\s*endfor\s*%\}/;
 }
 
+// {% if is_incremental() %} - conditional block, only for the exact condition
+// is_incremental(), no else/elif. Used in discovery (always evaluate true) to
+// keep refs inside the block, and at compile-time to evaluate the real
+// condition: relation exists && materialized is incremental && no full-refresh.
+function ifOpenPattern() {
+  return /\{%\s*if\s+is_incremental\s*\(\s*\)\s*%\}/;
+}
+
+function ifEndPattern() {
+  return /\{%\s*endif\s*%\}/;
+}
+
+// Expands {% if is_incremental() %}...{% endif %} blocks. The evaluateIsIncremental
+// boolean determines whether to keep or discard the body: true (at discovery time,
+// or at compile-time when the condition is true) keeps it, false (at compile-time
+// when the condition is false) discards it and both markers.
+function expandIfStatements(sql, evaluateIsIncremental) {
+  var openPattern = ifOpenPattern();
+  var endPattern = ifEndPattern();
+  var result = '';
+  var remaining = sql;
+  var openMatch;
+  while ((openMatch = openPattern.exec(remaining))) {
+    var before = remaining.slice(0, openMatch.index);
+    var afterOpen = remaining.slice(openMatch.index + openMatch[0].length);
+    var endMatch = endPattern.exec(afterOpen);
+    if (!endMatch) {
+      throw new Error('model(): "{% if is_incremental() %}" has no matching "{% endif %}".');
+    }
+    var body = afterOpen.slice(0, endMatch.index);
+    var bodyPart = evaluateIsIncremental ? body : '';
+    result += before + bodyPart;
+    remaining = afterOpen.slice(endMatch.index + endMatch[0].length);
+  }
+  result += remaining;
+  if (endPattern.test(result)) {
+    throw new Error('model(): SQL has a "{% endif %}" with no matching "{% if is_incremental() %}".');
+  }
+  return result;
+}
+
 function scanTemplateExpressions(sql) {
   var pattern = templateExpressionPattern();
   var matches = [];
@@ -266,7 +307,7 @@ function parseTwoStringArguments(call, args) {
 // reason: a registry-wide "every model's default sqlFile lives under
 // this prefix" is a real shape, and folders (below) reuse this same key
 // name to set it per group instead of project-wide.
-var MODEL_DEFAULT_KEYS = ['projectId', 'dataset', 'materialized', 'dependsOn', 'modelDir'];
+var MODEL_DEFAULT_KEYS = ['projectId', 'dataset', 'materialized', 'dependsOn', 'modelDir', 'incrementalStrategy', 'uniqueKey', 'partitionBy'];
 
 // The keys a {{ config(...) }} call inside a model's own SQL may set - see
 // extractConfigOverrides below. Kept separate from MODEL_DEFAULT_KEYS (even
@@ -276,7 +317,11 @@ var MODEL_DEFAULT_KEYS = ['projectId', 'dataset', 'materialized', 'dependsOn', '
 // itself may override inline" - projectId/dataset/dependsOn are registry
 // routing concerns a model's own SQL has no business changing, even once a
 // second config()-settable key beyond materialized eventually shows up.
-var MODEL_CONFIG_KEYS = ['materialized'];
+// incrementalStrategy and uniqueKey are settable via config() inside SQL
+// (as comma-separated strings: uniqueKey='a,b'), but partitionBy (a structured
+// object { field, dataType, granularity }) is not - string-only parsing stays
+// in MODEL_CONFIG_KEYS, structured config stays registry-only.
+var MODEL_CONFIG_KEYS = ['materialized', 'incrementalStrategy', 'uniqueKey'];
 
 // The {{ name(...) }} calls compileModelSql() gives a built-in meaning -
 // see readMacroDefinitions() below. A user-authored macro reusing one of
@@ -1254,9 +1299,23 @@ function isCommentedOut(spans, offset) {
   return spans.some(function (span) { return offset >= span[0] && offset < span[1]; });
 }
 
-function compileModelSql(sql, resolveRef, resolveSource, registry) {
+// config is passed so that {% if is_incremental() %} can be evaluated - it needs
+// to know if materialized is 'incremental', and if so, whether the relation exists
+// and fullRefresh is false. In discovery mode (expandModelNodes), config is undefined
+// and is_incremental() is always kept; at compile/run time, config is passed and
+// the condition is evaluated for real.
+function compileModelSql(sql, resolveRef, resolveSource, registry, config) {
   var setValues = extractSetStatements(sql);
   var refConfigVarSpans = commentSpans(sql);
+  // Evaluate is_incremental() for {% if %} expansion. True if all three conditions
+  // hold: materialized is 'incremental', the target relation exists, and there's
+  // no full-refresh override.
+  var isIncremental = config && config.materialized === 'incremental' &&
+    relationExists(config.projectId, config.dataset, config.name) &&
+    !config.fullRefresh;
+  // Expand {% if is_incremental() %}...{% endif %} - strip the block if the
+  // condition is false, keep it (both body and markers) if true.
+  sql = expandIfStatements(sql, isIncremental);
   var compiled = sql.replace(templateExpressionPattern(), function (raw, call, args, offset) {
     if (isCommentedOut(refConfigVarSpans, offset)) {
       return raw;
@@ -1292,6 +1351,14 @@ function compileModelSql(sql, resolveRef, resolveSource, registry) {
   compiled = compiled.replace(bareVarPattern(), function (raw, name, offset) {
     if (isCommentedOut(bareVarSpans, offset)) {
       return raw;
+    }
+    // {{ this }} - the model's own qualified relation. Only valid for incremental
+    // models, where it refers to the target table (the incremental update target).
+    if (name === 'this') {
+      if (!config || config.materialized !== 'incremental') {
+        throw new Error('model(): "{{ this }}" can only be used in incremental models.');
+      }
+      return qualifiedRelation(config);
     }
     if (!has(setValues, name)) {
       throw new Error('model(): {{ ' + name + ' }} references "' + name + '", which is never set via {% set ' + name + ' = ... %} in this SQL.');
@@ -1340,14 +1407,43 @@ function qualifiedRelation(config) {
   return qualifiedTableRef(config.projectId, config.dataset, config.name);
 }
 
-// view/table only - incremental (dbt's third materialization) is v2, same
-// deferral as column-level tests.
+// view/table/incremental - materialization shape. incremental is a table with
+// an incremental strategy and an optional unique_key (for merge) or partition_by
+// (for insert_overwrite).
 function resolveMaterialized(config) {
   var materialized = config.materialized || 'view';
-  if (materialized !== 'view' && materialized !== 'table') {
-    throw new Error('model(): "' + config.name + '" has materialized "' + materialized + '" - expected "view" or "table" (incremental is not implemented yet).');
+  if (materialized !== 'view' && materialized !== 'table' && materialized !== 'incremental') {
+    throw new Error('model(): "' + config.name + '" has materialized "' + materialized + '" - expected "view", "table", or "incremental".');
   }
   return materialized;
+}
+
+// For incremental models: resolve the strategy (merge/insert_overwrite/append,
+// default merge). Called only when materialized is 'incremental'.
+function resolveIncrementalStrategy(config) {
+  var strategy = config.incrementalStrategy || 'merge';
+  if (strategy !== 'merge' && strategy !== 'insert_overwrite' && strategy !== 'append') {
+    throw new Error('model(): "' + config.name + '" has incrementalStrategy "' + strategy + '" - expected "merge", "insert_overwrite", or "append".');
+  }
+  return strategy;
+}
+
+// Validates that an incremental model's config has the required keys for its
+// chosen strategy. merge needs uniqueKey, insert_overwrite needs partitionBy.
+// append has no required keys.
+function validateIncrementalConfig(config, strategy) {
+  if (strategy === 'merge') {
+    if (!config.uniqueKey) {
+      throw new Error('model(): "' + config.name + '" has incrementalStrategy "merge" but no uniqueKey - set uniqueKey on the model entry or in {{ config(...) }}.');
+    }
+  } else if (strategy === 'insert_overwrite') {
+    if (!config.partitionBy) {
+      throw new Error('model(): "' + config.name + '" has incrementalStrategy "insert_overwrite" but no partitionBy - set partitionBy on the model entry.');
+    }
+    if (!config.partitionBy.field || !config.partitionBy.dataType || !config.partitionBy.granularity) {
+      throw new Error('model(): "' + config.name + '" has partitionBy but is missing field, dataType, or granularity.');
+    }
+  }
 }
 
 // The check names a model's own tests[] entries may use for a "generic"
@@ -1686,6 +1782,10 @@ function expandModelNodes(otherNodes) {
         throw new Error(cached.error);
       }
       config.sql = extractModelSql(cached.content, config.sqlFile, name);
+      // {% if is_incremental() %} expands first at discovery time - always
+      // keeping the body so refs inside it are found by the dependency scan
+      // below, regardless of whether the relation actually exists.
+      config.sql = expandIfStatements(config.sql, true);
       // {% for %} expands before anything else scans this SQL - see
       // expandForLoops()'s own comment for why this has to run first, not
       // as another case in compileModelSql()'s dispatch.
@@ -1844,6 +1944,19 @@ function buildSourceResolver(config, registry) {
   };
 }
 
+// Checks whether a BigQuery table exists. Used to determine if an incremental
+// model should do a full-refresh build (relation doesn't exist yet) or an
+// incremental mutation (relation exists). Returns true if the table exists,
+// false if it doesn't or if the API call fails for any reason.
+function relationExists(projectId, dataset, table) {
+  try {
+    BigQuery.Tables.get(projectId, dataset, table);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
 // Flattens registry.sources (nested source -> table, the shape
 // buildSourceResolver() needs for a {{ source(...) }} lookup) into one
 // flat array, each entry carrying its own sourceName/
@@ -1941,7 +2054,7 @@ function compileModel(config) {
   var sql = config.sql;
   assertSingleStatement(sql, 'model(): "' + config.name + '"');
   var registry = readModelsRegistry();
-  return compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry);
+  return compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry, config);
 }
 
 // config.sql is always already set by expandModelNodes() above by the
@@ -1954,10 +2067,14 @@ function model(config) {
   var sql = config.sql;
   assertSingleStatement(sql, 'model(): "' + config.name + '"');
   var registry = readModelsRegistry();
-  var compiled = compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry);
+  var compiled = compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry, config);
   var relation = qualifiedRelation(config);
   var materialized = resolveMaterialized(config);
   var hasTests = !!(config.tests && config.tests.length);
+
+  if (materialized === 'incremental') {
+    return modelIncremental(config, compiled, relation, registry);
+  }
 
   if (materialized === 'table' && hasTests) {
     return modelTableStaged(config, compiled, relation, registry);
@@ -1967,6 +2084,173 @@ function model(config) {
   runBigQueryQueryJob({ query: statement, useLegacySql: false }, config.projectId);
   var result = { relation: relation, materialized: materialized };
   if (hasTests) {
+    var compiledTests = compileModelTests(config.tests, registry);
+    result.testResults = runSqlTests(
+      compiledTests,
+      { projectId: config.projectId, dataset: config.dataset, table: config.name },
+      'model(): "' + config.name + '" tests'
+    );
+  }
+  return result;
+}
+
+// Handles an incremental model: first build (CREATE OR REPLACE TABLE), or
+// incremental mutation (MERGE/INSERT INTO/INSERT OVERWRITE, depending on strategy).
+// Tests run after the mutation against the real relation (no staging - see the
+// main comment in the design spec for why).
+function modelIncremental(config, compiled, relation, registry) {
+  var strategy = resolveIncrementalStrategy(config);
+  validateIncrementalConfig(config, strategy);
+  var exists = relationExists(config.projectId, config.dataset, config.name);
+  var hasTests = !!(config.tests && config.tests.length);
+
+  // First build or full-refresh: CREATE OR REPLACE TABLE (same semantics as
+  // a regular table materialization). insert_overwrite adds PARTITION BY.
+  if (!exists || config.fullRefresh) {
+    var partitionClause = '';
+    if (strategy === 'insert_overwrite' && config.partitionBy) {
+      partitionClause = ' PARTITION BY ' +
+        config.partitionBy.granularity + '(' + quoteIdentifier(config.partitionBy.field) + ') ' +
+        'OPTIONS(require_partition_filter=false)';
+    }
+    var statement = 'CREATE OR REPLACE TABLE ' + relation + partitionClause + ' AS\n' + compiled;
+    runBigQueryQueryJob({ query: statement, useLegacySql: false }, config.projectId);
+    var result = { relation: relation, materialized: 'incremental', strategy: strategy };
+    if (hasTests) {
+      var compiledTests = compileModelTests(config.tests, registry);
+      result.testResults = runSqlTests(
+        compiledTests,
+        { projectId: config.projectId, dataset: config.dataset, table: config.name },
+        'model(): "' + config.name + '" tests'
+      );
+    }
+    return result;
+  }
+
+  // Incremental mutation: relation exists and no full-refresh
+  if (strategy === 'merge') {
+    return modelIncrementalMerge(config, compiled, relation, registry);
+  } else if (strategy === 'insert_overwrite') {
+    return modelIncrementalInsertOverwrite(config, compiled, relation, registry);
+  } else { // append
+    return modelIncrementalAppend(config, compiled, relation, registry);
+  }
+}
+
+// MERGE strategy: upsert by unique_key. Extracts columns from the table schema,
+// builds SET clauses for MATCHED updates and INSERT clauses for NOT MATCHED,
+// deriving both from the compiled SELECT's column list (via BigQuery's schema
+// introspection).
+function modelIncrementalMerge(config, compiled, relation, registry) {
+  var uniqueKey = config.uniqueKey;
+  if (typeof uniqueKey === 'string') {
+    uniqueKey = uniqueKey.split(',').map(function (k) { return k.trim(); });
+  } else if (!Array.isArray(uniqueKey)) {
+    uniqueKey = [uniqueKey];
+  }
+
+  // Introspect the target relation's schema to get column names
+  var targetTable = BigQuery.Tables.get(config.projectId, config.dataset, config.name);
+  var targetColumns = targetTable.schema.fields.map(function (f) { return f.name; });
+
+  // Build the ON clause from uniqueKey - e.g., "T.id = S.id AND T.date = S.date"
+  var onClauses = uniqueKey.map(function (col) {
+    return 'T.' + quoteIdentifier(col) + ' = S.' + quoteIdentifier(col);
+  });
+  var onClause = onClauses.join(' AND ');
+
+  // Build SET clause for MATCHED: "col = S.col" for non-key columns
+  var setClauses = targetColumns
+    .filter(function (col) { return uniqueKey.indexOf(col) === -1; })
+    .map(function (col) { return quoteIdentifier(col) + ' = S.' + quoteIdentifier(col); });
+  var setClause = setClauses.length ? ', ' + setClauses.join(', ') : '';
+
+  // Build column lists for NOT MATCHED INSERT
+  var insertCols = targetColumns.map(function (col) { return quoteIdentifier(col); }).join(', ');
+  var insertVals = targetColumns.map(function (col) { return 'S.' + quoteIdentifier(col); }).join(', ');
+
+  var mergeStatement = 'MERGE INTO ' + relation + ' T\n' +
+    'USING (\n' + compiled + '\n) S\n' +
+    'ON ' + onClause + '\n' +
+    'WHEN MATCHED THEN UPDATE SET ' + uniqueKey.map(function (col) {
+      return quoteIdentifier(col) + ' = S.' + quoteIdentifier(col);
+    }).join(', ') + setClause + '\n' +
+    'WHEN NOT MATCHED THEN INSERT (' + insertCols + ') VALUES (' + insertVals + ')';
+
+  runBigQueryQueryJob({ query: mergeStatement, useLegacySql: false }, config.projectId);
+  var result = { relation: relation, materialized: 'incremental', strategy: 'merge' };
+  if (config.tests && config.tests.length) {
+    var compiledTests = compileModelTests(config.tests, registry);
+    result.testResults = runSqlTests(
+      compiledTests,
+      { projectId: config.projectId, dataset: config.dataset, table: config.name },
+      'model(): "' + config.name + '" tests'
+    );
+  }
+  return result;
+}
+
+// INSERT OVERWRITE strategy: partition-based incremental via multi-statement
+// BigQuery script. Stages the compiled SELECT into a temp table, captures
+// touched partitions, deletes those partitions from the target, then inserts
+// the staged data.
+//
+// ponytail: this assumes GAS's BigQuery Advanced Service accepts multi-statement
+// scripts (BEGIN...END in BigQuery scripting). Not confirmed against live BigQuery
+// yet - see notsobigtests Layer 2 for the real verification.
+function modelIncrementalInsertOverwrite(config, compiled, relation, registry) {
+  var partitionField = quoteIdentifier(config.partitionBy.field);
+  var stagingTable = resolveStagingTableId(config.name);
+  var stagingRelation = qualifiedTableRef(config.projectId, config.dataset, stagingTable);
+
+  // Multi-statement script: stage the data, capture partitions, delete+insert
+  var script = 'BEGIN\n' +
+    '  CREATE OR REPLACE TABLE ' + stagingRelation + ' AS\n' +
+    '  ' + compiled + ';\n' +
+    '  DECLARE touched_partitions ARRAY<' + config.partitionBy.dataType + '>;\n' +
+    '  SET touched_partitions = (\n' +
+    '    SELECT AS STRUCT ARRAY_AGG(DISTINCT ' + partitionField + ')\n' +
+    '    FROM ' + stagingRelation + '\n' +
+    '  );\n' +
+    '  DELETE FROM ' + relation + '\n' +
+    '  WHERE ' + partitionField + ' IN UNNEST(touched_partitions);\n' +
+    '  INSERT INTO ' + relation + '\n' +
+    '  SELECT * FROM ' + stagingRelation + ';\n' +
+    'END';
+
+  var stagingCreated = false;
+  try {
+    runBigQueryQueryJob({ query: script, useLegacySql: false }, config.projectId);
+    stagingCreated = true;
+
+    var result = { relation: relation, materialized: 'incremental', strategy: 'insert_overwrite' };
+    if (config.tests && config.tests.length) {
+      var compiledTests = compileModelTests(config.tests, registry);
+      result.testResults = runSqlTests(
+        compiledTests,
+        { projectId: config.projectId, dataset: config.dataset, table: config.name },
+        'model(): "' + config.name + '" tests'
+      );
+    }
+    return result;
+  } finally {
+    if (stagingCreated) {
+      try {
+        BigQuery.Tables.remove(config.projectId, config.dataset, stagingTable);
+      } catch (e) {
+        // Ignore cleanup errors - staging table has expiration_timestamp anyway
+      }
+    }
+  }
+}
+
+// APPEND strategy: simplest incremental - just INSERT INTO the compiled SELECT
+function modelIncrementalAppend(config, compiled, relation, registry) {
+  var appendStatement = 'INSERT INTO ' + relation + '\n' + compiled;
+  runBigQueryQueryJob({ query: appendStatement, useLegacySql: false }, config.projectId);
+
+  var result = { relation: relation, materialized: 'incremental', strategy: 'append' };
+  if (config.tests && config.tests.length) {
     var compiledTests = compileModelTests(config.tests, registry);
     result.testResults = runSqlTests(
       compiledTests,
