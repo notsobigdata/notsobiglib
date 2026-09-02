@@ -30,7 +30,7 @@ The intentioin is to wrap the whole library in a IFFE funciton and then "call" i
 
 In that way we can use custom gas functions within the user scope (like reading html files) without problemse
 
-**Eval scoping gotcha, discovered building the `notsobigdata-tests` test
+**Eval scoping gotcha, discovered building the `notsobigtests` test
 project:** a direct `eval()` call's `var`/function declarations only leak
 into the scope of whatever function `eval()` was called from — never
 beyond it. So `eval(UrlFetchApp.fetch(...).getContentText())` must run
