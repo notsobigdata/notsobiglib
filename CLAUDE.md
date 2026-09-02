@@ -375,80 +375,152 @@ written — a summary line elsewhere (e.g. a stale "currently only X" aside)
 is exactly the kind of thing a change can leave behind unnoticed otherwise.
 
 ## About devops stuff
-We should create a new branch and use git semantic and git flow to implement new changes do the repo
 
-Concretely: Conventional Commits + git-flow-style branches. Branch names
-and commit messages use a `type/description` (branch) / `type: description`
+Conventional Commits + git-flow-style branches. Branch names and commit
+messages use a `type/description` (branch) / `type: description`
 (commit) convention, where `type` is one of `feat`, `fix`, `refactor`,
-`docs`, `test`, or `chore`. E.g. branch `feat/move-bigquery-source`, commit
-`feat: add BigQuery source support to the move kind`. Never commit directly to
-main — always a feature branch and a PR, even for small or doc-only changes
-like edits to the README.md file. This applies to everything git actually
-tracks — which now includes this file. Only what's still listed in
-`.gitignore` (`.claude/`) stays untracked and is edited directly, with no
-branch/PR involved. (`notsobigtests` has its own equivalent `.clasp.json`
-exemption in its own `.gitignore`, now that it's a separate repo.)
+`docs`, `test`, or `chore`. E.g. branch `feat/move-bigquery-source`,
+commit `feat: add BigQuery source support to the move kind`. Never
+commit directly to `main` — always a feature branch and a PR, even for
+small or doc-only changes like edits to README.md. This applies to
+everything git actually tracks — which now includes this file. Only
+what's still listed in `.gitignore` (`.claude/`) stays untracked and is
+edited directly, with no branch/PR involved.
 
 Branches are three-tier: feature branches (`feat/`, `fix/`, `refactor/`,
-`docs/`, `test/`, `chore/`) branch off the current `release/N` branch and
-merge into it via PR; `release/N` itself later merges into `main` via PR.
-There is always at most one active (unmerged) `release/*` branch at a
-time. This exists to split review cost by risk: `security-review` runs on
-every feature PR since it's cheap and this library gets `eval()`'d with
-live OAuth access, while heavier quality checks (`simplify`, an
-independent fresh-agent review) are batched once per release instead of
-once per feature PR — see `/release` below.
+`docs/`, `test/`, `chore/`) branch off the current `release/N` branch
+and merge into it via PR; `release/N` itself later merges into `main`
+via PR. There is always at most one active (unmerged) `release/*`
+branch at a time — resolve it with `git branch -a --list '*release/*'`
+(a `release/*` branch is deleted the instant it merges, so any that
+still exists is active by definition; don't cross-check against `git
+branch --merged main`, which is trivially true for a release branch
+with zero commits ahead yet). This exists to split review cost by risk:
+`security-review` runs on every feature PR since it's cheap and this
+library gets `eval()`'d with live OAuth access, while heavier quality
+checks (`simplify`, an independent review) are batched once per release
+instead of once per feature PR.
 
-### Workflow commands
+### Working through a change: which skill, when
 
-Three custom Claude Code commands (`.claude/commands/`) implement this
-workflow end to end, split at the points where a human has to get
-involved:
+None of this is a slash command anymore — the workflow below is a
+sequence of superpowers skills, invoked directly, with the
+project-specific bookkeeping (which branch, which repo, what gets asked
+before merging) as explicit steps around them, since no generic skill
+knows this project's shape.
 
-- **`/release start` / `/release finish`** — cuts a new `release/N`
-  branch off `main` for `/ship` to target, or finishes one: runs
-  `simplify` and one fresh independent code review pass against the whole
-  release's diff (batched together, once, instead of per feature PR),
-  folds findings back in, and opens the `release/N → main` PR.
-- **`/ship <change description>`** — plans the change, implements it
-  together with any doc updates it requires, rebuilds `src.js` with
-  `./build.sh` and verifies it with `./build.sh --check`, self-reviews (via
-  the `security-review` skill only — see above for why `simplify` and the
-  independent review moved to `/release`), opens a PR against the active
-  release branch with a didactic explanation of what changed and why, and
-  updates the companion Apps Script test project. It stops there and
-  never merges — Google Apps Script can't be tested headless, so a human
-  always runs the new/changed combination by hand first (see "About
-  testing" above).
-- **`/merge-pr [PR number]`** — merges one PR (a feature branch into its
-  release branch, or a release branch into `main`) after explicitly
-  confirming the human ran the GAS tests and they passed. Always asks
-  before merging (regular merge, not squash) and never assumes a prior
-  "tests passed" from earlier in the conversation.
+**1. Plan — `superpowers:brainstorming`.** Before touching code: re-read
+this file for current conventions, then resolve the active `release/N`
+branch as above (none active → stop and cut one first: confirm `main`
+is clean and up to date, name it one past the highest `release/*`
+number `git log main --merges --oneline | grep -oE 'release/[0-9]+'`
+has ever shown — that history survives branch deletion, a live branch
+listing doesn't — create and push it). Most changes are brainstorming's
+*bounded* path: the flow already exists in this repo, so a short design
+in chat (branch name, what changes, which docs need updating alongside
+the code, anything touching credential handling/`eval`/`UrlFetchApp`/
+SQL templating worth flagging now) is enough. A new node `kind` or a
+change that reshapes `cli()`'s own interface is brainstorming's
+*architectural* path instead — write the spec, then
+`superpowers:writing-plans` before implementing.
 
-All three commands ask before any externally visible action (pushing,
-opening a PR, merging) and favor more confirmation checkpoints over fewer,
-since part of the point of this workflow is understanding the changes an
-agent makes, not just approving them.
+**2. Implement.** Branch off the active `release/N` (never off `main`
+directly). Code and docs land in the same pass, not as a follow-up —
+see "About documentation" below for which doc tracks what. A bugfix
+goes through `superpowers:systematic-debugging` before a fix is
+proposed, not after. A change to discovery/ordering/selection/
+model-registry expansion/macro-parsing gets its Node test written first
+(see "About testing"'s Layer 1); a change that only touches a
+connector's real I/O gets its `notsobigtests` fixture written first
+instead (Layer 2). Run `./build.sh` and commit the regenerated `src.js`
+alongside the module changes — a new module also needs adding to
+`build.sh`'s `MODULES` manifest.
+
+**3. Self-review.** `superpowers:verification-before-completion` covers
+both gates: `./build.sh --check` must pass (`src.js` matches `src/`)
+and `node test/run.js` must pass (if the change touched anything
+Layer 1 covers). Then `security-review` against the diff — this
+library gets `eval()`'d into a user's Apps Script project with live
+OAuth access to their Drive/Sheets/BigQuery, so credential handling,
+the `{{ ref() }}` SQL templating, and anything touching `UrlFetchApp`
+get real scrutiny. `simplify` and an independent review are
+deliberately **not** run here — see step 5.
+
+**4. Open the PR — stop before merge.** Push the branch (ask first —
+this is externally visible) and open the PR against the active
+`release/N` (`gh pr create --base release/N`), never `main`. The
+description has two parts: a standard summary/test plan, and a
+didactic walkthrough aimed at a data/analytics background reader, not a
+software engineer — bridge new concepts to things they already know
+(SQL, dbt's `ref()`, spreadsheet formulas, BigQuery), explain *why*
+this shape was chosen, scope the depth to what's actually new. If this
+change adds a node kind/connector/`cli()` command, open the companion
+PR in `notsobigtests` now too (its own `PROJECT.md` "Contributing" has
+the convention — it mirrors this one), cross-linked both ways, and run
+`clasp push -f` from `~/projetos/notsobig_org/notsobigtests` to
+actually deploy the fixture — do this without asking, it only touches
+the human's own personal test project. Skip that push quietly if that
+repo's `.clasp.json` doesn't exist yet (per-contributor, gitignored,
+needs `clasp create`/`clasp clone` first — the human's own setup step).
+If the change touched `setupScriptProperties()` (most commonly a
+`SRC_REF` pointing at this branch), say so explicitly. **This never
+merges.** Google Apps Script can't be tested headless — a human runs
+the change by hand in the Apps Script editor first, every time, no
+exception this chain of skills can create.
+
+**5. Finish the release — `simplify` + independent review,
+`superpowers:receiving-code-review`.** Once the release branch has the
+changes it needs: show what's included (the feature PRs/commits merged
+into it since it branched from `main`), then run `simplify` and a
+fresh, unbriefed independent code review
+(`superpowers:requesting-code-review`) **in parallel** against the
+whole release-branch-vs-`main` diff — this is the batching this
+two-tier branch model exists for, once per release instead of once per
+feature PR. Fold findings back with `superpowers:receiving-code-review`
+— judge each one, don't accept by default — and flag to the user which
+GAS scenarios need re-verifying by hand if a fix changed runtime
+behavior (those fix commits weren't individually GAS-tested the way
+the original feature PRs were). Open the PR from the release branch
+into `main` (`gh pr create --base main`), summarizing by aggregating
+the individual feature PRs' didactic explanations rather than repeating
+them. Stop before merging, same rule as step 4.
+
+**6. Merge — human confirmation, every time, no skill.** Resolving and
+showing the PR (title, branches, diff summary) is mechanical. The one
+question that is never skipped, never inferred from earlier
+conversation, asked fresh every single time: *did the Google Apps
+Script tests pass?* If the base branch is `main` (a release merge),
+this also covers any fix commits step 5 added on top of individual
+feature-branch testing. No → stop. Yes → show the exact merge command
+(`gh pr merge --merge` — regular merge, never squash) and get final
+confirmation before running it. After merging: delete the merged
+branch (local + remote), sync the local base branch, report what
+happened — routine cleanup, no separate confirmation needed. If the
+merge was into `main`: note the merge commit SHA and ask whether any
+pinned downstream consumer (see "Downstream consumers pinned to a
+release" below) should bump to it — a separate decision every time,
+never automatic. Never merge a branch that skipped its required review
+stage: a feature branch must have gone through steps 1-3, a release
+branch through step 5.
 
 ### Downstream consumers pinned to a release
 
 Not every sibling repo tracks `main`. [`notsobigjaffle`](https://github.com/notsobigdata/notsobigjaffle)
-(a demo project, see its own CLAUDE.md) `eval()`s `src.js` from a specific
-commit **SHA** rather than `main`, by design — it shouldn't move just
-because this library does.
+(a demo project, see its own CLAUDE.md) `eval()`s `src.js` from a
+specific commit **SHA** rather than `main`, by design — it shouldn't
+move just because this library does.
 
 **Pin to a commit SHA on `main`, never to a `release/*` branch name.**
-`/merge-pr` deletes a release branch the instant it merges (see that
-command's step 5), so a URL built from `release/N` 404s the moment that
-release ships — this bit `notsobigjaffle` for real (pinned at
-`release/11`, three releases stale, silently 404ing since release/11
-merged). A commit SHA is permanent regardless of what happens to branches
-afterward, and needs no new tagging convention.
+Step 6 above deletes a release branch the instant it merges, so a URL
+built from `release/N` 404s the moment that release ships — this bit
+`notsobigjaffle` for real (pinned at `release/11`, three releases
+stale, silently 404ing since release/11 merged). A commit SHA is
+permanent regardless of what happens to branches afterward, and needs
+no new tagging convention.
 
-`/merge-pr` step 6 asks, right after a release-branch-into-`main` merge,
-whether to bump a pinned consumer to the SHA just landed — but that's a
-prompt, not an enforcement mechanism. A consumer can still drift silently
-between releases if the answer is "not now"; if you suspect one has, check
-its `eval()` URL's SHA against `git log main --oneline` here by hand
-rather than assuming it's current.
+Step 6 asks, right after a release-branch-into-`main` merge, whether to
+bump a pinned consumer to the SHA just landed — but that's a prompt,
+not an enforcement mechanism. A consumer can still drift silently
+between releases if the answer is "not now"; if you suspect one has,
+check its `eval()` URL's SHA against `git log main --oneline` here by
+hand rather than assuming it's current.
