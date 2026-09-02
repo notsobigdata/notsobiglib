@@ -342,6 +342,70 @@ never hardcoded inline in the test project's code. This matters more now
 that `notsobigtests` is a committed, public repo of its own: Script
 Properties keep its code free of real resource identifiers.
 
+### Feature branch workflow: Layer 1 + Layer 2
+
+When a feature (new kind, connector, or `cli()` command) needs both Layer 1
+and Layer 2 testing, follow this sequence:
+
+**1. Create feature branch in notsobiglib**
+```bash
+cd notsobiglib
+git checkout -b feat/your-feature-name
+# implement the feature in src/*.js
+```
+
+**2. Layer 1: Run Node tests until green**
+```bash
+./build.sh
+node test/run.js  # all tests pass
+```
+
+**3. Push the feature branch to GitHub**
+```bash
+git push origin feat/your-feature-name
+```
+
+**4. Create fixtures in notsobigtests**
+- Add `.html` fixture files in `html/` (models, SQL, etc.)
+- Add test functions in `js/` (test file matching the pattern `14*-tests-model-*.js`)
+- Add your test category to `TEST_CATEGORIES` in `js/90-test-registry.js`
+
+**5. Deploy to Apps Script via clasp**
+```bash
+cd notsobigtests
+clasp push -f
+```
+
+**6. Set SRC_REF to the feature branch**
+In the Apps Script editor, set Script Properties:
+```
+SRC_REF: 'feat/your-feature-name'
+```
+
+**7. Run Layer 2 tests in Apps Script**
+```javascript
+runAllTests('your-test-category')
+// or run a specific test:
+runAllTests('testYourFeatureName')
+```
+
+If tests pass, note any BigQuery artifacts created (tables, datasets). If tests
+fail, fix the issue in notsobiglib, push the branch again, and re-run step 7.
+
+**8. Reset SRC_REF and clean up**
+Set `SRC_REF` back to `main` (or the active release branch) in Apps Script.
+Delete any test tables/files in BigQuery/Drive that won't be reused by future
+Layer 2 runs (see "Drive-target tests" section above for the cleanup pattern).
+
+**9. Open PR and merge in notsobiglib**
+```bash
+gh pr create
+# human review & merge
+```
+
+The feature is now live on `main` and Layer 2 tests in `notsobigtests` will run
+against it from then on (SRC_REF points to `main`).
+
 ## About documentation
 
 Docs are split into four tiers, by audience:
