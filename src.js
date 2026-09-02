@@ -3721,7 +3721,7 @@ var NotSoBigData = (function () {
       '  CREATE OR REPLACE TABLE ' + stagingRelation + ' AS\n' +
       '  ' + compiled + ';\n' +
       '  SET touched_partitions = (\n' +
-      '    SELECT AS STRUCT ARRAY_AGG(DISTINCT ' + partitionField + ')\n' +
+      '    SELECT ARRAY_AGG(DISTINCT ' + partitionField + ')\n' +
       '    FROM ' + stagingRelation + '\n' +
       '  );\n' +
       '  DELETE FROM ' + relation + '\n' +
