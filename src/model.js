@@ -2209,10 +2209,11 @@ function modelIncrementalInsertOverwrite(config, compiled, relation, registry) {
   var stagingRelation = qualifiedTableRef(config.projectId, config.dataset, stagingTable);
 
   // Multi-statement script: stage the data, capture partitions, delete+insert
+  // DECLARE must come first in BigQuery scripts, before any other statements
   var script = 'BEGIN\n' +
+    '  DECLARE touched_partitions ARRAY<' + config.partitionBy.dataType + '>;\n' +
     '  CREATE OR REPLACE TABLE ' + stagingRelation + ' AS\n' +
     '  ' + compiled + ';\n' +
-    '  DECLARE touched_partitions ARRAY<' + config.partitionBy.dataType + '>;\n' +
     '  SET touched_partitions = (\n' +
     '    SELECT AS STRUCT ARRAY_AGG(DISTINCT ' + partitionField + ')\n' +
     '    FROM ' + stagingRelation + '\n' +
