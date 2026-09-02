@@ -261,6 +261,16 @@ documented node kind/connector/`cli()` command combination against real
 resources. A human runs it from the Apps Script editor (or `clasp run`)
 and reports back pass/fail — there is no way to run this headless.
 
+`notsobigtests` is its own repo, with its own git history and its own PR
+review — not a folder inside this one. The one file not committed there
+is its own `.clasp.json` (see that repo's `.gitignore`): a clasp project
+is tied to a specific Apps Script deployment via that file's `scriptId`,
+which is personal to whoever's Google account owns it, so it can't be
+shared across contributors. Each contributor runs `clasp create` or
+`clasp clone` once to generate their own local `.clasp.json` pointing at
+their own deployment, then `clasp push -f` to deploy the tracked code
+there.
+
 **Write the fixture before the `src/` change, not after.** A PR that
 adds a node kind, connector, or `cli()` command needs a companion PR in
 `notsobigtests` either way (link the two PRs from each other's
@@ -283,7 +293,12 @@ URL from `SRC_REF`
 a hardcoded ref — so testing a feature PR before it merges means
 setting `SRC_REF` to that branch name (e.g. `feat/move-bigquery-source`)
 in the Apps Script editor, running the fixtures, and pointing it back
-at `main` (or the active `release/N`) afterward.
+at `main` (or the active `release/N`) afterward. This is a per-run human
+step, not something either repo's docs previously called out end to end
+— `notsobigtests`' own PROJECT.md documents the file's mechanics but
+not this workflow-level habit, so it's worth remembering here too: an
+empty/stale `SRC_REF` silently tests the wrong version of the library
+rather than failing loudly.
 
 Both the test Apps Script project itself and any fixture files it
 depends on (test Sheets, sample CSV/XLSX/JSON files, etc.) live
@@ -294,9 +309,14 @@ and easy to find/clean up.
 **Drive-target tests that create a new file must clean up after
 themselves.** Any fixture whose `target` has no `fileId` (Drive
 `folderId` + `fileName`, exercising the "create" path of `loadDrive*`)
-writes a brand-new file on every run — that's inherent to the path
-being tested, not a bug. `loadDrive*` returns the id of the file it
-wrote, attached to the run result as `.loadResult` (see `src/move.md`),
+writes a brand-new file on every run — that's inherent to the path being
+tested, not a bug, since a create-mode test can't reuse a target and still
+be testing creation. Left alone, every run leaves one more duplicate
+behind: `notsobigdata-load-test.csv/.json/.xlsx` and
+`notsobigdata-load-new-test.csv` piled up to 30 files in the Drive folder
+before anyone noticed (2026-08-06). The fix belongs in the test project,
+not the library — `loadDrive*` already returns the id of the file it
+wrote, attached to the run result as `.loadResult` (see `src/move.md`) —
 so any fixture that tests file *creation* should assert on the result
 and then trash the file it just made:
 
@@ -318,7 +338,9 @@ spreadsheet/file IDs, BigQuery project IDs, dataset/schema/table names,
 folder IDs, and anything else that points at a real resource rather
 than describing the library's behavior — must be stored in GAS's
 built-in Script Properties (`PropertiesService.getScriptProperties()`),
-never hardcoded inline in the test project's code.
+never hardcoded inline in the test project's code. This matters more now
+that `notsobigtests` is a committed, public repo of its own: Script
+Properties keep its code free of real resource identifiers.
 
 ## About documentation
 
