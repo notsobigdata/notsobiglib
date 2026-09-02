@@ -2052,3 +2052,35 @@ function modelTableStaged(config, compiled, relation, registry) {
     }
   }
 }
+
+// Applies target overlay to every model node after discovery. Each model
+// entry in notsobigdataModels.models may optionally declare a targets
+// object, shaped like {prod: {dataset: 'x'}, dev: {dataset: 'y'}} - overlay
+// the target's config onto the node's already-resolved config. Complements
+// cli.js's applyTargetOverlay for move nodes - model targets can't be
+// applied at the same time because resolveModelConfig() is called during
+// discovery, before targets are known, so this runs after discovery instead.
+function applyModelTargets(nodes, targetName) {
+  if (!targetName) {
+    return;
+  }
+  var registry = readModelsRegistry();
+  nodes.forEach(function (node) {
+    if (node.kind !== 'model') {
+      return;
+    }
+    var modelEntry = registry.models[node.name];
+    if (!modelEntry || !isPlainObject(modelEntry.targets)) {
+      return;
+    }
+    if (!has(modelEntry.targets, targetName)) {
+      throw new Error('cli(): target "' + targetName + '" is not declared on model "' + node.name + '". Known targets: ' + Object.keys(modelEntry.targets).join(', ') + '.');
+    }
+    var targetConfig = modelEntry.targets[targetName];
+    if (isPlainObject(targetConfig)) {
+      Object.keys(targetConfig).forEach(function (key) {
+        node.config[key] = targetConfig[key];
+      });
+    }
+  });
+}
