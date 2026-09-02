@@ -121,7 +121,7 @@ function nodeLabel(node) {
   return node.name + ' (' + node.kind + ')';
 }
 
-var COMMANDS = ['run', 'list', 'compile', 'debug', 'hello', 'help'];
+var COMMANDS = ['run', 'list', 'compile', 'debug', 'sources', 'hello', 'help'];
 
 function usage() {
   return [
@@ -131,9 +131,11 @@ function usage() {
     '  cli("run --select move")       run only nodes of a given kind',
     '  cli("run --select a,b")        run only the named nodes',
     '  cli("run --exclude a")         run everything except the named nodes',
-    '  cli("list")                    show what would run, in order, without running it',
-    '  cli("compile")                 resolve model SQL ({{ ref() }}/var()/config()) without running anything',
+    '  cli("list")                    show what would run, in order, without running it (includes declared sources)',
+    '  cli("compile")                 resolve model SQL ({{ ref()/source()/var()/config() }}) without running anything',
     '  cli("debug")                   check OAuth scopes/services for each node\'s connector, without writing anything',
+    '  cli("sources")                 check freshness + tests for every source declared in notsobigdataModels.sources',
+    '  cli("sources --select stripe")     ... just one source ("stripe.payments" selects one table)',
     '  cli("hello")                   check the library loaded and see which nodes it can find',
     '  cli("help")                    this message',
     '',
@@ -1095,6 +1097,149 @@ function hello() {
   return message;
 }
 
+// cli('sources') - dbt's `source freshness` + `test --select source:...`,
+// combined into one verb (see notsobiglib's model.js "notsobigdataModels.sources"
+// comment for why the two aren't split the way dbt splits them: a source
+// is never a node here, so there's no run/skip-downstream machinery either
+// check needs to plug into - each is just an independent BigQuery check,
+// reported the same "surface everything in one pass" way cli('debug')
+// already reports its own independent connector checks).
+//
+// A token matches a bare source name ("stripe") or a dotted
+// "source.table" ("stripe.payments") - deliberately not resolveSelector()'s
+// kind-then-name matching above, which answers a different question (a
+// node's kind or name) that doesn't apply here: a source has no kind, and
+// "table" alone would be ambiguous across sources the way a bare node name
+// never is.
+function sourceEntryMatchesToken(entry, token) {
+  return token === entry.source || token === entry.source + '.' + entry.tableName;
+}
+
+function filterSourceEntries(entries, select, exclude) {
+  var selected = entries;
+  if (select.length) {
+    selected = selected.filter(function (entry) {
+      return select.some(function (token) { return sourceEntryMatchesToken(entry, token); });
+    });
+    if (!selected.length) {
+      throw new Error('cli(): "sources" selection (' + select.join(', ') + ') matched no declared source or source.table. Known: '
+        + entries.map(function (entry) { return entry.source + '.' + entry.tableName; }).join(', ') + '.');
+    }
+  }
+  if (exclude.length) {
+    selected = selected.filter(function (entry) {
+      return !exclude.some(function (token) { return sourceEntryMatchesToken(entry, token); });
+    });
+  }
+  return selected;
+}
+
+// cli('sources')'s own status vocabulary - separate from NODE_RESULT_STATUSES/
+// DEBUG_CHECK_STATUSES above (same "kept as a separate list since the
+// vocabularies don't overlap" reasoning formatDebugStatusCounts()'s own
+// comment already gives): a source check is never 'success'/'planned', and
+// 'warn' (a source that's stale enough to flag but not to block on) has no
+// equivalent in either existing list.
+var SOURCE_CHECK_STATUSES = [
+  { status: 'ok', label: 'ok' },
+  { status: 'warn', label: 'warn' },
+  { status: 'error', label: 'error' },
+  { status: 'skipped', label: 'skipped' }
+];
+
+function formatSourceStatusCounts(checks) {
+  return formatStatusList(checks, 'status', SOURCE_CHECK_STATUSES, 'nothing to check', 'source check');
+}
+
+function sourceCheckLogPrefix(status) {
+  if (status === 'ok') { return 'OK    '; }
+  if (status === 'warn') { return 'WARN  '; }
+  if (status === 'skipped') { return 'SKIP  '; }
+  return 'FAIL  ';
+}
+
+function pushSourceCheck(checks, entry, check, status, message) {
+  checks.push({ source: entry.source, table: entry.tableName, check: check, status: status, message: message });
+  Logger.log(sourceCheckLogPrefix(status) + entry.source + '.' + entry.tableName + ' ' + check + ' - ' + message);
+}
+
+// Runs both checks cli('sources') knows about for one source table entry -
+// freshness (checkSourceFreshness, model.js) and column-level tests
+// (runSourceTests, model.js, reusing the exact compileModelTests()/
+// runSqlTests() pipeline a model's own tests[] already runs through). Both
+// are independently opt-in per table (see readSourcesEntry()'s own
+// comment in model.js), so a table missing either reports 'skipped' rather
+// than being silently left out of the report - the same "report absence
+// explicitly" posture runNodes()'s own 'skipped' status already takes for
+// a blocked node, so a human reading the report can tell "nothing
+// configured" apart from "configured and passing" at a glance.
+// Shared shape behind both checks below: skip with a reason if not
+// configured, otherwise run and report 'error' on a thrown exception -
+// pulled out since freshness and tests differed only in that predicate,
+// skip message, and run body, not in this control flow.
+function runSourceCheck(checks, entry, check, configured, skipMessage, run) {
+  if (!configured) {
+    pushSourceCheck(checks, entry, check, 'skipped', skipMessage);
+    return;
+  }
+  try {
+    run();
+  } catch (error) {
+    pushSourceCheck(checks, entry, check, 'error', error.message);
+  }
+}
+
+function checkSourceEntry(checks, entry, registry) {
+  runSourceCheck(checks, entry, 'freshness', !!entry.freshness, 'no loadedAtField/freshness configured.', function () {
+    var freshness = checkSourceFreshness(entry);
+    pushSourceCheck(checks, entry, 'freshness', freshness.status, freshness.message);
+  });
+  runSourceCheck(checks, entry, 'tests', !!(entry.tests && entry.tests.length), 'no tests declared.', function () {
+    var testResult = runSourceTests(entry, registry);
+    pushSourceCheck(checks, entry, 'tests', 'ok', testResult.ran + ' test(s) passed.');
+  });
+}
+
+// The cli('sources') implementation, called directly from cli()'s own
+// dispatch below rather than going through discoverNodes()/orderNodes()/
+// runNodes() - a source was never in that node list to begin with (see
+// model.js's "notsobigdataModels.sources" comment), so there is no
+// dependency order to compute and nothing for the run/skip-downstream
+// machinery in runNodes() to do here. 'warn' deliberately doesn't flip
+// `ok` to false, same as dbt's own `source freshness` treats a warn as
+// worth surfacing, not as a run-blocking failure - only 'error' does.
+function runSourcesCommand(input, select, exclude) {
+  var registry = readModelsRegistry();
+  var entries = filterSourceEntries(flattenSources(registry.sources), select, exclude);
+  var checks = [];
+  entries.forEach(function (entry) {
+    checkSourceEntry(checks, entry, registry);
+  });
+  var ok = checks.every(function (check) { return check.status !== 'error'; });
+  Logger.log('DONE  cli("' + input + '") - ' + formatSourceStatusCounts(checks) + ' (' + checks.length + ' total).');
+  return { ok: ok, command: 'sources', checks: checks };
+}
+
+// cli('list')'s own "Sources:" section - see cli()'s own 'list' branch
+// below. Pure registry read + qualifiedTableRef() string-building, no
+// BigQuery call, matching 'list''s existing "resolve + order, execute
+// nothing" contract: unlike cli('sources') above, this never actually
+// checks freshness or runs a test, it only reports what's declared and
+// configured, the same "planned, not run" spirit runNodes()'s own 'list'
+// branch already takes for every node.
+function listSourcesForReport() {
+  var registry = readModelsRegistry();
+  return flattenSources(registry.sources).map(function (entry) {
+    var relation = qualifiedTableRef(entry.projectId, entry.dataset, entry.table);
+    var flags = [];
+    if (entry.freshness) { flags.push('freshness'); }
+    if (entry.columns) { flags.push('columns'); }
+    if (entry.tests && entry.tests.length) { flags.push('tests'); }
+    Logger.log('LIST  ' + entry.source + '.' + entry.tableName + ' - ' + relation + (flags.length ? ' (' + flags.join(', ') + ' configured)' : ''));
+    return { source: entry.source, table: entry.tableName, relation: relation, freshness: entry.freshness !== undefined, columns: entry.columns !== undefined, tests: !!(entry.tests && entry.tests.length) };
+  });
+}
+
 // The single public entrypoint. Takes one command string and returns
 // either a run report (for "run"/"list"/"compile") or a message string
 // (for "hello"/"help").
@@ -1105,9 +1250,10 @@ function hello() {
 // thing this function does, before parseCommand() - so a call that
 // throws immediately (an unknown command, zero discovered nodes) still
 // leaves a marker that cli() actually ran, not silence up to the error.
-// "DONE" only fires for "run"/"list"/"compile": hello()/help() already log
-// their own single result line and have no per-node pass/fail/skip status
-// to roll up. Both are pure Logger.log side effects - report is unchanged.
+// "DONE" only fires for "run"/"list"/"compile"/"debug"/"sources":
+// hello()/help() already log their own single result line and have no
+// per-item pass/fail/skip status to roll up. Both are pure Logger.log side
+// effects - report is unchanged.
 function cli(input) {
   Logger.log('START cli("' + input + '")');
   var parsed = parseCommand(input);
@@ -1118,6 +1264,14 @@ function cli(input) {
   }
   if (parsed.command === 'hello') {
     return hello();
+  }
+  // sources diverges here too, same as debug does further down (see its
+  // own comment below) but even earlier: a source is never a node, so
+  // cli('sources') has no use for discoverNodes() at all, let alone
+  // dependency order or selection-by-kind-or-node-name - see
+  // runSourcesCommand()'s own comment above.
+  if (parsed.command === 'sources') {
+    return runSourcesCommand(input, parsed.select, parsed.exclude);
   }
   var discovered = discoverNodes();
   if (!discovered.nodes.length) {
@@ -1159,6 +1313,13 @@ function cli(input) {
     report.manifest = writeManifest(input, ok, results, discovered.ignored);
   } else if (parsed.command === 'compile') {
     report.manifest = writeCompileManifest(input, ok, results, discovered.ignored);
+  } else if (parsed.command === 'list') {
+    // "list" additionally reports every declared source table (see
+    // listSourcesForReport()'s own comment) - a source is never a node, so
+    // it would otherwise be entirely invisible to "list", the one command
+    // whose whole point is showing everything a project has declared
+    // before anything runs for real.
+    report.sources = listSourcesForReport();
   }
   return report;
 }

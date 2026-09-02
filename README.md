@@ -38,7 +38,7 @@ right order from the dependencies you declared, and runs them:
 
 ```javascript
 // Top level of a .gs file — see the scope warning under Installation.
-eval(UrlFetchApp.fetch('https://raw.githubusercontent.com/notsobigdata/lib/v1.0.0/src.js').getContentText())
+eval(UrlFetchApp.fetch('https://raw.githubusercontent.com/notsobigdata/notsobiglib/v1.0.0/src.js').getContentText())
 
 var props = PropertiesService.getScriptProperties().getProperties();
 
@@ -83,7 +83,7 @@ The library is pulled into your Apps Script project at runtime — no package
 manager, no build step, just one line:
 
 ```javascript
-eval(UrlFetchApp.fetch('https://raw.githubusercontent.com/notsobigdata/lib/main/src.js').getContentText())
+eval(UrlFetchApp.fetch('https://raw.githubusercontent.com/notsobigdata/notsobiglib/main/src.js').getContentText())
 ```
 
 > **Where you put your code matters — for two things.**
@@ -112,7 +112,7 @@ trusting this repo continuously rather than once.
 different:
 
 ```javascript
-eval(UrlFetchApp.fetch('https://raw.githubusercontent.com/notsobigdata/lib/v1.0.0/src.js').getContentText())
+eval(UrlFetchApp.fetch('https://raw.githubusercontent.com/notsobigdata/notsobiglib/v1.0.0/src.js').getContentText())
 ```
 
 Unlike `main`, a tag never moves — `v1.0.0` will keep pointing at exactly
@@ -133,6 +133,7 @@ NotSoBigData.cli('run --exclude a')         // run everything except these
 NotSoBigData.cli('list')                    // show what would run, in order — runs nothing
 NotSoBigData.cli('compile')                 // resolve model SQL, without running anything
 NotSoBigData.cli('debug')                   // check OAuth scopes/services per connector, without writing anything
+NotSoBigData.cli('sources')                 // check freshness + tests for every declared source table
 NotSoBigData.cli('hello')                   // check the library loaded and see what it can find
 NotSoBigData.cli('help')                    // the command list
 ```
@@ -152,7 +153,10 @@ declared → **[docs/cli.md](docs/cli.md)**.
 - **`model`** — SQL models against BigQuery, the "T" of "ELT": dbt-style
   `{{ ref() }}` dependencies, `view`/`table` materialization, SQL stored in
   `.html` files, with optional dbt-style tests (`not_null`, `unique`,
-  `accepted_values`, `relationships`) or your own SQL. Full config →
+  `accepted_values`, `relationships`) or your own SQL. `{{ source(...) }}`
+  is dbt's `source.yml` equivalent — name a BigQuery table this project
+  doesn't itself load, with optional freshness checks and column-level
+  tests of its own, checked via `cli('sources')`. Full config →
   **[docs/model.md](docs/model.md)**.
 
 ## Scheduling

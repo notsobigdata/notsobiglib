@@ -25,12 +25,12 @@ only, not as source to port.
 The intentioin is to wrap the whole library in a IFFE funciton and then "call" it from google apps script like this:
 
 ``` javascript
-    eval(UrlFetchApp.fetch('https://raw.githubusercontent.com/notsobigdata/lib/main/src.js').getContentText())
+    eval(UrlFetchApp.fetch('https://raw.githubusercontent.com/notsobigdata/notsobiglib/main/src.js').getContentText())
 ```
 
 In that way we can use custom gas functions within the user scope (like reading html files) without problemse
 
-**Eval scoping gotcha, discovered building the `notsobigdata-tests` test
+**Eval scoping gotcha, discovered building the `notsobigtests` test
 project:** a direct `eval()` call's `var`/function declarations only leak
 into the scope of whatever function `eval()` was called from — never
 beyond it. So `eval(UrlFetchApp.fetch(...).getContentText())` must run
@@ -213,27 +213,43 @@ For each and every possible combination that each module provide, we need to cre
 Since Google Apps script has its own runtime (or something like this) every test should be triggered by a human, but prepared but you.
 
 In practice this means maintaining a companion example Apps Script project
-in its own folder in this repo (`notsobigdata-tests/`), managed with the `clasp` CLI —
-already installed locally — that pulls in `src.js` and exercises every
-documented node kind / connector / cli() command combination against real
-Sheets/Drive/BigQuery resources. Because `cli()` discovers nodes by scanning
-the global scope, every fixture config in that project is a top-level `var`,
-and each test selects its own node (`cli('run --select <node>')`) — a bare
-`cli('run')` there would fire every fixture at once. A human runs it from the Apps Script
-editor (or `clasp run`) and reports back pass/fail; there is no automated
-CI for this since the GAS runtime can't run headless in this setup.
+in its own sibling repo, [`notsobigtests`](https://github.com/notsobigdata/notsobigtests),
+managed with the `clasp` CLI — already installed locally — that pulls in
+`src.js` and exercises every documented node kind / connector / cli()
+command combination against real Sheets/Drive/BigQuery resources. Because
+`cli()` discovers nodes by scanning the global scope, every fixture config
+in that project is a top-level `var`, and each test selects its own node
+(`cli('run --select <node>')`) — a bare `cli('run')` there would fire
+every fixture at once. A human runs it from the Apps Script editor (or
+`clasp run`) and reports back pass/fail; there is no automated CI for
+this since the GAS runtime can't run headless in this setup.
 
-`notsobigdata-tests/` is committed — its fixtures and test code are part
-of this repo, reviewed in PRs like everything else. The one file that
-isn't is `notsobigdata-tests/.clasp.json` (see `.gitignore`): a clasp
-project is tied to a specific Apps Script deployment via that file's
-`scriptId`, which is personal to whoever's Google account owns it, so it
-can't be shared across contributors. Each contributor runs `clasp create`
-or `clasp clone` once to generate their own local `.clasp.json` pointing
-at their own deployment, then `clasp push -f` to deploy the tracked code
-there. PRs that add a new node kind, connector, or cli() command update
-`notsobigdata-tests/` directly as part of the same diff — see `/ship`'s
+`notsobigtests` is its own repo, with its own git history and its own PR
+review — not a folder inside this one. The one file not committed there
+is its own `.clasp.json` (see that repo's `.gitignore`): a clasp project
+is tied to a specific Apps Script deployment via that file's `scriptId`,
+which is personal to whoever's Google account owns it, so it can't be
+shared across contributors. Each contributor runs `clasp create` or
+`clasp clone` once to generate their own local `.clasp.json` pointing at
+their own deployment, then `clasp push -f` to deploy the tracked code
+there. A PR here that adds a new node kind, connector, or cli() command
+needs a **companion PR in `notsobigtests`** adding the matching fixture —
+link the two PRs from each other's description, since they can no longer
+be the same diff once testing lives in a separate repo — see `/ship`'s
 workflow.
+
+**Pointing `notsobigtests` at the branch under test is a Script Property,
+not a code edit.** `js/00-bootstrap.js` builds the `eval()` URL from
+`SRC_REF` (`PropertiesService.getScriptProperties().getProperty('SRC_REF')`),
+not a hardcoded ref — so testing a feature PR before it merges means
+setting `SRC_REF` to that branch name (e.g. `feat/move-bigquery-source`) in
+the Apps Script editor, running the fixtures, and pointing it back at
+`main` (or the active `release/N`) afterward. This is a per-run human step,
+not something either repo's docs previously called out end to end —
+`notsobigtests`' own PROJECT.md documents the file's mechanics but not this
+workflow-level habit, so it's worth remembering here too: an empty/stale
+`SRC_REF` silently tests the wrong version of the library rather than
+failing loudly.
 
 Both the test Apps Script project itself and any fixture files it depends
 on (test Sheets, sample CSV/XLSX/JSON files, etc.) live together inside a
@@ -273,9 +289,9 @@ IDs, BigQuery project IDs, dataset/schema/table names, folder IDs, and
 anything else that points at a real resource rather than describing the
 library's behavior — must be stored in GAS's built-in Script Properties
 (`PropertiesService.getScriptProperties()`), never hardcoded inline in the
-test project's code. This matters more now that `notsobigdata-tests/` is
-committed: Script Properties keep the test project's own code — and this
-repo, which is public — free of real resource identifiers.
+test project's code. This matters more now that `notsobigtests` is a
+committed, public repo of its own: Script Properties keep its code free
+of real resource identifiers.
 
 ## About documentation
 
@@ -320,9 +336,9 @@ and commit messages use a `type/description` (branch) / `type: description`
 main — always a feature branch and a PR, even for small or doc-only changes
 like edits to the README.md file. This applies to everything git actually
 tracks — which now includes this file. Only what's still listed in
-`.gitignore` (`.claude/`, and `notsobigdata-tests/.clasp.json`'s
-per-contributor `scriptId`) stays untracked and is edited directly, with
-no branch/PR involved.
+`.gitignore` (`.claude/`) stays untracked and is edited directly, with no
+branch/PR involved. (`notsobigtests` has its own equivalent `.clasp.json`
+exemption in its own `.gitignore`, now that it's a separate repo.)
 
 Branches are three-tier: feature branches (`feat/`, `fix/`, `refactor/`,
 `docs/`, `test/`, `chore/`) branch off the current `release/N` branch and
@@ -365,3 +381,25 @@ All three commands ask before any externally visible action (pushing,
 opening a PR, merging) and favor more confirmation checkpoints over fewer,
 since part of the point of this workflow is understanding the changes an
 agent makes, not just approving them.
+
+### Downstream consumers pinned to a release
+
+Not every sibling repo tracks `main`. [`notsobigjaffle`](https://github.com/notsobigdata/notsobigjaffle)
+(a demo project, see its own CLAUDE.md) `eval()`s `src.js` from a specific
+commit **SHA** rather than `main`, by design — it shouldn't move just
+because this library does.
+
+**Pin to a commit SHA on `main`, never to a `release/*` branch name.**
+`/merge-pr` deletes a release branch the instant it merges (see that
+command's step 5), so a URL built from `release/N` 404s the moment that
+release ships — this bit `notsobigjaffle` for real (pinned at
+`release/11`, three releases stale, silently 404ing since release/11
+merged). A commit SHA is permanent regardless of what happens to branches
+afterward, and needs no new tagging convention.
+
+`/merge-pr` step 6 asks, right after a release-branch-into-`main` merge,
+whether to bump a pinned consumer to the SHA just landed — but that's a
+prompt, not an enforcement mechanism. A consumer can still drift silently
+between releases if the answer is "not now"; if you suspect one has, check
+its `eval()` URL's SHA against `git log main --oneline` here by hand
+rather than assuming it's current.

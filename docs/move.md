@@ -5,6 +5,38 @@ optionally, loads that array into a `target`. See the main
 [README](../README.md) for installation and a worked example, and
 [docs/cli.md](cli.md) for how a `move` node is declared and run.
 
+## Sharing config across nodes
+
+`move` nodes have no `folders`/registry mechanism the way `model` nodes
+do (see [docs/model.md](model.md)) — every `move` node is its own plain
+object literal (see [docs/cli.md](cli.md) for how one is declared), and
+there's no name-derived default like `model`'s `sqlFile` for a
+shared-config layer to compute. Cutting repeated `source`/`target` keys
+across sibling nodes — the same `projectId`/`dataset` on every BigQuery
+target, the same `spreadsheetId` on every Sheets source — is just object
+composition in the JS you already write, no library feature needed:
+
+```javascript
+var bqTarget = { type: 'bigquery', projectId: 'my-project', dataset: 'staging' };
+
+var loadOrders = {
+  kind: 'move', name: 'loadOrders',
+  source: { type: 'sheets', spreadsheetId: '...', range: 'Orders!A1:F' },
+  target: { ...bqTarget, table: 'orders', mode: 'append' }
+};
+
+var loadCustomers = {
+  kind: 'move', name: 'loadCustomers',
+  source: { type: 'sheets', spreadsheetId: '...', range: 'Customers!A1:D' },
+  target: { ...bqTarget, table: 'customers', mode: 'overwrite' }
+};
+```
+
+Spread copies `bqTarget`'s keys first, so a node's own trailing keys
+(`table`, `mode` above) still win if either ever collides with something
+in the shared object — `Object.assign({}, bqTarget, { table: ..., mode: ... })`
+is the same thing, if you prefer that over spread syntax.
+
 ## Extract
 
 A `move` node extracts a `source` into a 2D array — the same shape Apps

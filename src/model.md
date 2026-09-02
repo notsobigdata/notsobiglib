@@ -5,8 +5,8 @@
 
 ## Status
 
-Implemented (v1: view/table materialization, `ref()`, `config()`, `set()`,
-`var()`, `for()`, and user-authored `{% macro %}`).
+Implemented (v1: view/table materialization, `ref()`, `source()`,
+`config()`, `set()`, `var()`, `for()`, and user-authored `{% macro %}`).
 
 ## `compileModel()` and `buildRefResolver()` (2026-08-09)
 
@@ -1142,6 +1142,147 @@ time, just moved earlier, with the same "Known models: ..." message shape
 completely made-up name (not any node at all) already threw at discovery
 before this fix, via `assertDependenciesExist()` — this only closes the
 gap for a `to` naming a *real* node of the wrong kind.
+
+## `{{ source(...) }}` + `notsobigdataModels.sources` + `cli('sources')` (2026-09-01)
+
+dbt's `source.yml` equivalent: a way to name a BigQuery table this
+project doesn't itself load or build (Fivetran, BigQuery Data Transfer
+Service, a manually run script, another team's own pipeline), so a model
+references it by a logical `(source, table)` name pair instead of a
+hardcoded `project.dataset.table` literal. `{{ ref() }}` deliberately
+can't cover this - it only ever resolves a declared model or a `move`
+node's own BigQuery target (see this file's `expandModelNodes()` section
+above), both of which are tables this project is itself responsible for.
+
+**Where it lives, and why not a second global.** The obvious shape - a
+`notsobigdataSources` global, mirroring `notsobigdataModels` - was the
+first design, but the user asked to fold it into the existing registry
+instead: `sources` joins `models`/`vars`/`macros` as a fourth key on
+`notsobigdataModels`, read by the same one `readOptionalGlobal('notsobigdataModels')`
+call `readModelsRegistry()` already makes, not a second guarded global
+read. Reasoning given: introducing a brand-new top-level `var` for one
+feature, when the project already committed to "one shared registry" for
+everything model-related, would be exactly the kind of surface-area growth
+this library tries to avoid - a user scanning their own global scope for
+"what does notsobigdata look for here" now has one more name to remember
+for something that's conceptually part of the same registry anyway.
+
+**Validated unconditionally in `readSourcesEntry()`/`readModelsRegistry()`,
+not deferred to a per-node `discoveryError`.** Every other per-model
+mistake becomes that one model's own `discoveryError`, caught by
+`expandModelNodes()`'s per-model `try`/`catch` - but a source is never a
+node, so there's no analogous per-source discovery pass for a bad entry to
+become "that source's own problem." This isn't a gap: `vars`/`macros`
+already take the harder line for the same reason (project-wide shared
+config, not one node's own), and `sources` matches that existing posture
+rather than inventing a third validation timing.
+
+**`{{ source(name, table) }}` never derives a `dependsOn` edge, on
+purpose.** `extractRefDependencies()` filters strictly on `call === 'ref'`
+and needed zero changes - a `source()` call is invisible to it by
+construction. This is the dbt-accurate behavior (`dbt` doesn't build a
+source either), and it's also why `buildSourceResolver()` (mirroring
+`buildRefResolver()`, right above it) has no `config.moveRefTargets`-style
+fallback to consult: there's nothing upstream for a source to "already
+have been resolved by discovery" the way a `move` node's bigquery target
+is.
+
+**`loadedAtField`/`freshness`/`columns`/`tests` are all opt-in per
+table**, validated together: `freshness` without `loadedAtField` is
+rejected at registry-read time ("declares freshness but no
+loadedAtField") rather than silently never getting checked - the kind of
+config mistake this file's other validators (`resolveMaterialized`'s bad
+enum, `validateModelTest`'s missing required key) already fail loudly on
+rather than let through. `tests` reuses `validateModelTests()`/
+`compileModelTests()`/`move.js`'s `runSqlTests()` completely unchanged -
+the shape (`check`/`column`/`values`/`to`/`field`, or a custom `query`)
+was never actually model-specific, it's "a list of checks against some
+relation," and a source table's own relation is just another relation to
+point `{{ this }}` at.
+
+**Freshness computed entirely in BigQuery, not parsed client-side.**
+`checkSourceFreshness()`'s query uses `TIMESTAMP_DIFF(CURRENT_TIMESTAMP(),
+CAST(MAX(field) AS TIMESTAMP), MINUTE)` plus `FORMAT_TIMESTAMP(...)` for
+the human-readable timestamp, rather than pulling `MAX(field)`'s raw value
+back and computing an age in Apps Script - the BigQuery REST API's raw
+value encoding for `TIMESTAMP`/`DATETIME`/`DATE` isn't uniform enough to
+be worth hand-parsing when BigQuery can just be asked for the number
+directly. `loadedAtField`, a config-supplied column name, still goes
+through `quoteIdentifier()` before landing in that generated SQL - same
+guard `MODEL_TEST_COMPILERS` already applies to `test.column`/
+`test.field`, for the same injection-surface reason.
+
+**Why `cli('sources')` is its own verb, not folded into `cli('run')`'s
+fail-and-skip-downstream machinery (cli.js).** A source is never a node,
+so there is no dependency edge for a stale/failing source to block via the
+existing `blocked` map in `runNodes()` - wiring that in would mean
+inventing a pseudo-node for sources after all, just for this one feature,
+contradicting the "never a node" decision made above. `cli('sources')`
+instead mirrors `cli('debug')`'s own posture: an independent diagnostic
+pass, its own report shape, no manifest, checked but never run/skipped
+transitively.
+
+## `notsobigdataModels.folders` + `modelDir` (2026-09-01)
+
+User question that started this: `clasp push` (and typing a `/`-containing
+name directly in the Apps Script UI) already lets a project's `.html`
+files live in subfolders, and `readModelHtml()` already forwards `sqlFile`
+verbatim to `HtmlService.createHtmlOutputFromFile()` with zero parsing of
+`/` anywhere - so an explicit `sqlFile: 'html/marketing/x.html'` already
+worked before this change. The only real gap was `sqlFile`'s *default*
+(`name + '.html'`, no folder segment ever), which meant a model relying on
+it was stuck at the project root - `notsobigtests/PROJECT.md`'s
+"`sqlFile`/`macros` paths" section already documented this as a known
+constraint.
+
+**Not dbt's `model-paths`, and said so explicitly rather than let the name
+imply otherwise.** dbt's `model-paths` bundles three things: directory
+*discovery* (no per-model registration needed), *hierarchical config
+inheritance* (a `models:` tree in `dbt_project.yml` mirroring the folder
+tree), and *path-based selection* (`--select path:models/marketing`).
+Only the middle one is buildable here - discovery is a platform
+limitation, not a scoping choice: Apps Script's runtime has no API to
+list a project's own files, only exact-name fetch via `HtmlService`.
+Selection was left alone too - a folder never changes a model's registry
+key, so `cli('run --select <name>')` keeps meaning exactly what it always
+has.
+
+**`folders` mirrors a model entry's own shape on purpose - no key
+whitelist.** `readModelsRegistry()`'s validation only checks that
+`notsobigdataModels.folders` and each of its values are plain objects,
+the same posture already taken for a model *entry* (`resolveModelConfig()`
+never whitelists `entry`'s keys either). A tighter whitelist would need to
+track `MODEL_DEFAULT_KEYS` by hand and go stale the next time that list
+grows - not whitelisting costs nothing today since a folder's keys just
+get merged into `config` the same way `entry`'s keys already do.
+
+**Precedence is a third merge step, not a new merge algorithm.**
+`resolveModelConfig()` already had exactly one merge step (defaults, then
+entry, later wins). Folders slot in as a second step in between (defaults
+→ folder → entry) using the identical `Object.keys(...).forEach(function
+(key) { config[key] = ...[key]; })` pattern already used for defaults -
+deliberately not refactored into a shared "merge object into config"
+helper for three call sites, since the loop is one line and a helper
+would be more surface than the duplication it removes.
+
+**`folder`/`modelDir` are deleted off `config` right after they're used**,
+same posture `expandModelNodes()` already takes with `dependsOn` (computed
+into `node.dependsOn`, then `delete config.dependsOn` before `node.config
+= config`) - both are routing/lookup-only values, not something a caller
+inspecting a resolved model's config should see or rely on afterward.
+
+**`modelDir` joined `MODEL_DEFAULT_KEYS` alongside `projectId`/`dataset`/
+`materialized`/`dependsOn`**, so a project with one flat default folder
+and no need for multiple `folders` groups can still set it once at the
+registry's top level - `folders` reuses the exact same key name inside
+each group rather than inventing a second name for the same concept at a
+narrower scope.
+
+**No path-joining or normalization.** `modelDir` must carry its own
+trailing slash; the library does not insert one, strip a double slash, or
+otherwise touch the string - identical to how `sqlFile` itself is already
+forwarded to `HtmlService.createHtmlOutputFromFile()` untouched save for
+stripping a trailing `.html`.
 
 ## Deferred to v2
 

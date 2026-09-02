@@ -25,7 +25,11 @@ that's the whole dependency declaration for a model-to-model dependency;
 nothing goes in a hand-written `dependsOn` for that. `ref()` also resolves
 a `move` node that loads into BigQuery — see "Depending on a `move` node"
 below for both that case and the one case `dependsOn` is still needed for.
-Unlike a `move` node, a model isn't its own top-level `var`.
+For a BigQuery table this project doesn't load or build at all — owned by
+another team's pipeline, Fivetran, BigQuery Data Transfer Service, ... —
+see "Declaring external data: `{{ source(...) }}`" below instead, dbt's
+`source.yml` equivalent. Unlike a `move` node, a model isn't its own
+top-level `var`.
 Every model is one entry in a single shared registry instead, because a
 project with a dozen models shouldn't need a dozen boilerplate top-level
 `var`s just to register them:
@@ -50,6 +54,48 @@ model only. `sqlFile` defaults to `<model name>.html` when omitted —
 BigQuery's own atomic `CREATE OR REPLACE {VIEW|TABLE} ... AS SELECT` — no
 temp-table swap dance required. Incremental materialization isn't
 implemented yet.
+
+### Grouping models with folders
+
+`notsobigdataModels.folders` is an optional, narrower tier of defaults
+between the registry-wide ones above and a model's own entry — a named
+group of config a model opts into with `folder: '<name>'`, so several
+models that share a dataset, a `materialized`, or a `.html` folder don't
+each repeat it:
+
+```javascript
+var notsobigdataModels = {
+  projectId: 'my-project', dataset: 'analytics',
+  folders: {
+    marketing: { dataset: 'marketing', modelDir: 'html/marketing/' }
+  },
+  models: {
+    stg_orders: { folder: 'marketing' },                        // dataset: 'marketing', sqlFile: html/marketing/stg_orders.html
+    orders_summary: { folder: 'marketing', materialized: 'table' }, // model's own key still wins over the folder's
+    special_case: { sqlFile: 'html/other/special.html' }        // no folder - unaffected
+  }
+};
+```
+
+Precedence, low to high: the registry's top-level defaults → the model's
+folder (if it sets one) → the model's own entry keys. A folder can set
+any key a model entry could (`dataset`, `materialized`, `dependsOn`,
+`modelDir`, ...) — there's no restricted list.
+
+`modelDir` (settable at the registry's top level or inside a folder) only
+ever changes what `sqlFile`'s *default* expands to
+(`<modelDir><model name>.html`) — a model that sets its own `sqlFile`
+ignores `modelDir` entirely, folder or no folder. It needs its own
+trailing slash (`'html/marketing/'`, not `'html/marketing'`) — like
+`sqlFile` itself, the library never joins or normalizes the path, it's
+forwarded as written.
+
+This is deliberately not the same thing as dbt's `model-paths`: there is
+no directory scanning here — Apps Script's runtime has no API to list a
+project's own files, only exact-name fetch, so real file discovery isn't
+buildable — and a folder never changes a model's name or how `cli()`
+selects it (`cli('run --select <name>')` still selects by the model's own
+registry key, unrelated to its folder).
 
 ### Setting config from SQL: `{{ config(...) }}`
 
@@ -395,6 +441,87 @@ declared edge always matches what the SQL actually does. Naming a
 the documented way to do it and skips the guarantee `ref()` gives that the
 dependency and the SQL can't drift apart.
 
+### Declaring external data: `{{ source(...) }}`
+
+`{{ ref() }}` (above) only ever resolves a table *this project* loads or
+builds — another model, or a `move` node with a BigQuery target. Plenty of
+real projects also need to select from a BigQuery table nothing here
+loads at all: one landed by Fivetran, BigQuery Data Transfer Service, a
+manually run script, or another team's own pipeline. `{{ source(...) }}`
+is dbt's `source.yml` for exactly that case — a name for an
+externally-owned table, so a model references it by that name instead of
+hardcoding `` `project.dataset.table` `` inline:
+
+```javascript
+var notsobigdataModels = {
+  projectId: 'my-project', dataset: 'analytics',
+  sources: {
+    dataset: 'raw',              // default for every source below
+    stripe: {
+      dataset: 'stripe_raw',     // overrides the default above, for this source only
+      tables: {
+        payments: {
+          loadedAtField: 'updated_at',
+          freshness: { warnAfterMinutes: 60, errorAfterMinutes: 1440 },
+          columns: { id: { description: 'Stripe payment id' } },
+          tests: [
+            { column: 'id', check: 'not_null' },
+            { column: 'id', check: 'unique' }
+          ]
+        },
+        charges: { table: 'raw_charges' }   // physical table name differs from the key
+      }
+    }
+  },
+  models: {
+    stg_payments: { /* SQL: select * from {{ source('stripe', 'payments') }} */ }
+  }
+};
+```
+
+`sources` is a key on the same shared `notsobigdataModels` registry, not a
+second global — `projectId`/`dataset` cascade the same way they do for
+`models`: registry-level default → `sources`-level default → one source's
+own override → one table's own override, closest wins. Only `tables.<name>`
+is required; a table declared purely so a model can name it needs nothing
+more than `{}` — `loadedAtField`/`freshness`/`columns`/`tests` are all
+opt-in. A table's physical name defaults to its own key (`payments` above)
+or can be set explicitly (`charges` → the real table `raw_charges`).
+
+```html
+<!-- stg_payments.html -->
+<script type="text/sql">
+  select * from {{ source('stripe', 'payments') }}
+</script>
+```
+
+resolves at compile time to `` `my-project.stripe_raw.payments` ``, exactly
+like `{{ ref() }}` does — but a source is **never** a node: it has no
+`kind`, it's never selectable via `cli('run --select ...')`, and
+`{{ source(...) }}` never creates a `dependsOn` edge the way `{{ ref() }}`
+does. That's deliberate, not a limitation — dbt doesn't build a source
+either, since nothing here is responsible for loading it.
+
+`loadedAtField` (a timestamp column) plus `freshness` (`warnAfterMinutes`
+and/or `errorAfterMinutes`) opt a table into a **freshness check** —
+`columns` is descriptive-only metadata (a `description` per column, shown
+by `cli('list')`); `tests` runs the exact same generic checks (below) a
+model's own `tests` runs, just against a source table's relation instead
+of a model's. None of the three affect `{{ source(...) }}`'s own
+resolution — they only matter to `cli('sources')`, which is what actually
+runs them (see [docs/cli.md](cli.md#clisources--check-declared-sources)):
+
+```
+cli("sources")                  check every declared source table
+cli("sources --select stripe")  check just one source (or "stripe.payments" for one table)
+```
+
+`cli('list')` also reports every declared source (name, resolved
+relation, and which of freshness/columns/tests are configured) alongside
+the nodes it would run — a source is invisible to `cli('run')`'s own node
+list, so `list` is the one place it's visible without actually running a
+check.
+
 ## Tests
 
 A model can declare `tests`, an optional array run against the relation
@@ -470,13 +597,13 @@ in-memory row array you can filter.
 A `table` with *no* tests declared materializes directly, same as
 always — nothing to check, nothing to gain from staging.
 
-`{{ ref() }}`, `{{ config() }}` and `{{ var() }}` are the only built-in
-`{{ }}` calls implemented so far, alongside the `{% set %}` and `{% for %}`
-block constructs and your own `{% macro %}`s (see above) — no `if` yet.
-Referencing a name that isn't a declared model, an undefined `{% set %}`/
-`var()`, or a `{{ }}` call that's neither a built-in nor a declared macro,
-is an error, not something silently passed through as literal text into
-SQL that runs with your live BigQuery credentials.
+`{{ ref() }}`, `{{ source() }}`, `{{ config() }}` and `{{ var() }}` are the
+only built-in `{{ }}` calls implemented so far, alongside the `{% set %}`
+and `{% for %}` block constructs and your own `{% macro %}`s (see above) —
+no `if` yet. Referencing a name that isn't a declared model/source, an
+undefined `{% set %}`/`var()`, or a `{{ }}` call that's neither a built-in
+nor a declared macro, is an error, not something silently passed through
+as literal text into SQL that runs with your live BigQuery credentials.
 
 A model's SQL must be a single statement — no `;`-separated scripts, same
 restriction `move`'s BigQuery connector places on its own SQL (models can

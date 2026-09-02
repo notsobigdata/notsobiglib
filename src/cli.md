@@ -349,14 +349,69 @@ globals themselves stay separate (see the comment above
 `resolveCompileManifestConfig()`) - only the parsing logic was duplicated,
 not the config surface.
 
+## `cli('sources')` - a fourth verb that isn't node-shaped (2026-09-01)
+
+`{{ source(...) }}` (model.js, see its own dev notes) lets a model name a
+BigQuery table this project doesn't itself load or build - dbt's
+`source.yml` equivalent. Checking it (freshness, column-level tests)
+needed a `cli()` verb, but a source was deliberately designed to never be
+a node (no `kind`, not in `EXECUTORS`, invisible to `discoverNodes()`) -
+see model.js's `notsobigdataModels.sources` comment for why. That
+"never a node" decision is what shapes every choice below; this file's
+whole pipeline (`discoverNodes` → `assertDependenciesExist` →
+`applySelection` → `orderNodes` → `runNodes`) exists to order and run
+*nodes*, and a source was never going to be one.
+
+**`sources` diverges out of `cli()` before `discoverNodes()` runs at
+all** - even earlier than `debug` does (which still needs the node list,
+just skips `orderNodes()`/`runNodes()`'s dependency-order machinery). A
+project with zero `move`/`model` nodes but a declared
+`notsobigdataModels.sources` block should still be able to run
+`cli('sources')` - gating it behind "found at least one node" (the check
+`cli()` already throws on, right after `discoverNodes()`) would make that
+an artificial error with nothing to do with sources at all.
+
+**`--select`/`--exclude` needed their own matcher, not `resolveSelector()`.**
+`resolveSelector()` answers "does this token match a node's kind or
+name" - a source has neither. `sourceEntryMatchesToken()` instead matches
+a bare source name (every table under it) or a dotted `source.table` (one
+table) - two different questions, so reusing `resolveSelector()` and
+special-casing sources inside it would have tangled two independent
+selector grammars into one function for no shared benefit; `parseCommand()`
+itself needed zero changes, since `--select`/`--exclude` were already just
+generic comma-separated token lists.
+
+**Status vocabulary is `ok`/`warn`/`error`/`skipped`, a fourth list
+alongside `NODE_RESULT_STATUSES`/`DEBUG_CHECK_STATUSES`** - not reusing
+either: a source check is never `success`/`planned` (not a node result),
+and `warn` (freshness past `warnAfterMinutes` but not yet
+`errorAfterMinutes`) has no equivalent in `debug`'s five statuses either.
+`formatSourceStatusCounts()` reuses the shared `formatStatusList()` helper
+both existing formatters already reduce to, so a fourth vocabulary cost
+one array + one one-line wrapper, not a fourth bespoke counting loop.
+
+**`ok` ignores `warn`, matching dbt's own `source freshness` posture** -
+`checks.every(status !== 'error')`, not `=== 'ok'`. A stale-but-not-critical
+source is worth surfacing (it's in the report and logged as `WARN`, a new
+log-line prefix alongside the existing `OK`/`FAIL`/`SKIP`) without making
+every `cli('sources')` call during a slow-but-tolerable freshness window
+read as broken.
+
+**`cli('list')`'s new `sources` field reuses `flattenSources()`
+(model.js) a second time**, purely for enumeration - no BigQuery call, so
+it costs `list` nothing beyond what it already does for nodes. This is the
+one place a source is visible without asking `cli('sources')` to actually
+check anything, matching `list`'s existing "resolve + order, execute
+nothing" contract exactly.
+
 ## Adding a kind
 
 1. Write the module (see `model.js` for the slot that's already waiting).
 2. Add it to `EXECUTORS` here.
 3. Add it to `build.sh`'s `MODULES` manifest.
 4. Document it: a `docs/<kind>.md` reference plus a link from README.md
-   (see CLAUDE.md's "About documentation"); add fixtures to
-   `notsobigdata-tests/`.
+   (see CLAUDE.md's "About documentation"); add fixtures via a companion
+   PR to the sibling [`notsobigtests`](https://github.com/notsobigdata/notsobigtests) repo.
 
 `usage()`, `resolveSelector`'s error text and `hello()` all read the kind
 list from `knownKinds()`, so they pick up the new kind with no edit.
