@@ -13,6 +13,18 @@ function testSelectByKind() {
   assert.strictEqual(report.nodes.length, 2, 'expected both move fixtures selected by kind');
 }
 
+// testSelectByKind alone can't distinguish real filtering from a selector
+// that's a no-op, since both fixtures happen to be kind 'move' - a
+// regressed --select that ignored its argument entirely would still
+// report length 2. Selecting by node name pins that down: only one of
+// the two fixtures should come back, and it must be the one named.
+function testSelectByName() {
+  var ctx = harness.loadContext([fixture('two-move-nodes.js')]);
+  var report = ctx.NotSoBigData.cli('list --select moveA');
+  assert.strictEqual(report.nodes.length, 1, 'expected --select by node name to return exactly that node');
+  assert.strictEqual(report.nodes[0].name, 'moveA', 'expected the selected node to be moveA');
+}
+
 function testDependencyOrder() {
   var ctx = harness.loadContext([fixture('chained-nodes.js')]);
   var report = ctx.NotSoBigData.cli('list');
@@ -26,5 +38,6 @@ function testDependencyOrder() {
 
 module.exports = {
   testSelectByKind: testSelectByKind,
+  testSelectByName: testSelectByName,
   testDependencyOrder: testDependencyOrder
 };
