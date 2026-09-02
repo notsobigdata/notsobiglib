@@ -2106,6 +2106,7 @@ function modelIncremental(config, compiled, relation, registry) {
 
   // First build or full-refresh: CREATE OR REPLACE TABLE (same semantics as
   // a regular table materialization). insert_overwrite adds PARTITION BY.
+  // MARKER: 2026-09-02 20:25 - FIXED VERSION using TIMESTAMP_TRUNC/field directly
   if (!exists || config.fullRefresh) {
     var partitionClause = '';
     if (strategy === 'insert_overwrite' && config.partitionBy) {

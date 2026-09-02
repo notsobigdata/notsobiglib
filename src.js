@@ -3612,12 +3612,17 @@ var NotSoBigData = (function () {
 
     // First build or full-refresh: CREATE OR REPLACE TABLE (same semantics as
     // a regular table materialization). insert_overwrite adds PARTITION BY.
+    // MARKER: 2026-09-02 20:25 - FIXED VERSION using TIMESTAMP_TRUNC/field directly
     if (!exists || config.fullRefresh) {
       var partitionClause = '';
       if (strategy === 'insert_overwrite' && config.partitionBy) {
-        partitionClause = ' PARTITION BY ' +
-          config.partitionBy.granularity + '(' + quoteIdentifier(config.partitionBy.field) + ') ' +
-          'OPTIONS(require_partition_filter=false)';
+        var partitionExpr = quoteIdentifier(config.partitionBy.field);
+        // DATE column with DAY granularity: use field directly
+        // Otherwise: TIMESTAMP_TRUNC(CAST(field AS TIMESTAMP), granularity)
+        if (config.partitionBy.dataType !== 'DATE' || config.partitionBy.granularity !== 'DAY') {
+          partitionExpr = 'TIMESTAMP_TRUNC(CAST(' + partitionExpr + ' AS TIMESTAMP), ' + config.partitionBy.granularity + ')';
+        }
+        partitionClause = ' PARTITION BY ' + partitionExpr + ' OPTIONS(require_partition_filter=false)';
       }
       var statement = 'CREATE OR REPLACE TABLE ' + relation + partitionClause + ' AS\n' + compiled;
       runBigQueryQueryJob({ query: statement, useLegacySql: false }, config.projectId);
