@@ -1173,27 +1173,31 @@ function pushSourceCheck(checks, entry, check, status, message) {
 // explicitly" posture runNodes()'s own 'skipped' status already takes for
 // a blocked node, so a human reading the report can tell "nothing
 // configured" apart from "configured and passing" at a glance.
+// Shared shape behind both checks below: skip with a reason if not
+// configured, otherwise run and report 'error' on a thrown exception -
+// pulled out since freshness and tests differed only in that predicate,
+// skip message, and run body, not in this control flow.
+function runSourceCheck(checks, entry, check, configured, skipMessage, run) {
+  if (!configured) {
+    pushSourceCheck(checks, entry, check, 'skipped', skipMessage);
+    return;
+  }
+  try {
+    run();
+  } catch (error) {
+    pushSourceCheck(checks, entry, check, 'error', error.message);
+  }
+}
+
 function checkSourceEntry(checks, entry, registry) {
-  if (entry.freshness) {
-    try {
-      var freshness = checkSourceFreshness(entry);
-      pushSourceCheck(checks, entry, 'freshness', freshness.status, freshness.message);
-    } catch (error) {
-      pushSourceCheck(checks, entry, 'freshness', 'error', error.message);
-    }
-  } else {
-    pushSourceCheck(checks, entry, 'freshness', 'skipped', 'no loadedAtField/freshness configured.');
-  }
-  if (entry.tests && entry.tests.length) {
-    try {
-      var testResult = runSourceTests(entry, registry);
-      pushSourceCheck(checks, entry, 'tests', 'ok', testResult.ran + ' test(s) passed.');
-    } catch (error) {
-      pushSourceCheck(checks, entry, 'tests', 'error', error.message);
-    }
-  } else {
-    pushSourceCheck(checks, entry, 'tests', 'skipped', 'no tests declared.');
-  }
+  runSourceCheck(checks, entry, 'freshness', !!entry.freshness, 'no loadedAtField/freshness configured.', function () {
+    var freshness = checkSourceFreshness(entry);
+    pushSourceCheck(checks, entry, 'freshness', freshness.status, freshness.message);
+  });
+  runSourceCheck(checks, entry, 'tests', !!(entry.tests && entry.tests.length), 'no tests declared.', function () {
+    var testResult = runSourceTests(entry, registry);
+    pushSourceCheck(checks, entry, 'tests', 'ok', testResult.ran + ' test(s) passed.');
+  });
 }
 
 // The cli('sources') implementation, called directly from cli()'s own

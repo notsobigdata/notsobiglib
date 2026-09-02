@@ -301,10 +301,30 @@ var BUILTIN_TEMPLATE_CALLS = ['ref', 'config', 'var', 'source'];
 // same as "not declared at all". Only a specific model *entry* being
 // malformed is deferred to resolveModelConfig below, once we know a
 // caller actually wants that entry.
+// Cached by identity of the raw notsobigdataModels global, not by value -
+// cheap (a === check) and correct, since nothing in this file mutates that
+// global mid-execution, so the same object reference means "nothing to
+// re-parse". Needed once sources/folders parsing joined the walk this
+// function already did: expandModelNodes() reads the registry once for a
+// whole run, same as before, but model()/compileModel() (the two per-node
+// EXECUTORS) each still call this fresh - before sources/folders existed
+// that was a cheap re-read, now it's a full re-validation of every declared
+// source table's tests on every single model node. A fresh Apps Script
+// execution always starts with this module-level cache empty, so this
+// never leaks state across separate cli() calls in separate executions.
+var cachedModelsRegistryRaw;
+var cachedModelsRegistryResult;
+var modelsRegistryCachePrimed = false;
+
 function readModelsRegistry() {
   var raw = readOptionalGlobal('notsobigdataModels');
+  if (modelsRegistryCachePrimed && raw === cachedModelsRegistryRaw) {
+    return cachedModelsRegistryResult;
+  }
   if (raw === undefined) {
-    return { defaults: {}, models: {}, vars: {}, macroFiles: [], sources: {}, folders: {} };
+    modelsRegistryCachePrimed = true;
+    cachedModelsRegistryRaw = raw;
+    return (cachedModelsRegistryResult = { defaults: {}, models: {}, vars: {}, macroFiles: [], sources: {}, folders: {} });
   }
   if (!isPlainObject(raw)) {
     throw new Error('model(): notsobigdataModels must be an object - got ' + (Array.isArray(raw) ? 'an array' : typeof raw) + '.');
@@ -346,7 +366,6 @@ function readModelsRegistry() {
     });
     macroFiles = raw.macros;
   }
-  var sources = readSourcesEntry(raw.sources, defaults, models);
   // Each folder is a partial config template - same shape as a model
   // entry, no key whitelist - merged into a model's config between the
   // registry-wide defaults above and the model entry's own keys (see
@@ -355,6 +374,11 @@ function readModelsRegistry() {
   // model. Named "folders" rather than dbt's "groups" deliberately: dbt
   // groups are node ownership/access control, a different concept this
   // isn't borrowing.
+  //
+  // Parsed before sources below: a source table's "relationships" test
+  // resolves its "to" via resolveModelConfig(), which needs registry.folders
+  // whenever the target model declares one (see readSourcesEntry()'s own
+  // comment on the registry shim it builds).
   var folders = {};
   if (raw.folders !== undefined) {
     if (!isPlainObject(raw.folders)) {
@@ -367,7 +391,10 @@ function readModelsRegistry() {
     });
     folders = raw.folders;
   }
-  return { defaults: defaults, models: models, vars: vars, macroFiles: macroFiles, sources: sources, folders: folders };
+  var sources = readSourcesEntry(raw.sources, defaults, models, folders);
+  modelsRegistryCachePrimed = true;
+  cachedModelsRegistryRaw = raw;
+  return (cachedModelsRegistryResult = { defaults: defaults, models: models, vars: vars, macroFiles: macroFiles, sources: sources, folders: folders });
 }
 
 // notsobigdataModels.sources - dbt's source.yml analog, declaring a
@@ -398,7 +425,7 @@ function readModelsRegistry() {
 // just whichever model happens to reference it.
 var SOURCE_LEVEL_DEFAULT_KEYS = ['projectId', 'dataset'];
 
-function readSourcesEntry(raw, registryDefaults, models) {
+function readSourcesEntry(raw, registryDefaults, models, folders) {
   if (raw === undefined) {
     return {};
   }
@@ -466,11 +493,12 @@ function readSourcesEntry(raw, registryDefaults, models) {
         if (warnAfterMinutes === undefined && errorAfterMinutes === undefined) {
           throw new Error(prefix + ' "freshness" needs at least one of "warnAfterMinutes"/"errorAfterMinutes".');
         }
-        [['warnAfterMinutes', warnAfterMinutes], ['errorAfterMinutes', errorAfterMinutes]].forEach(function (pair) {
-          if (pair[1] !== undefined && (typeof pair[1] !== 'number' || !(pair[1] > 0))) {
-            throw new Error(prefix + ' "freshness.' + pair[0] + '" must be a positive number.');
-          }
-        });
+        if (warnAfterMinutes !== undefined && (typeof warnAfterMinutes !== 'number' || !(warnAfterMinutes > 0))) {
+          throw new Error(prefix + ' "freshness.warnAfterMinutes" must be a positive number.');
+        }
+        if (errorAfterMinutes !== undefined && (typeof errorAfterMinutes !== 'number' || !(errorAfterMinutes > 0))) {
+          throw new Error(prefix + ' "freshness.errorAfterMinutes" must be a positive number.');
+        }
         if (warnAfterMinutes !== undefined && errorAfterMinutes !== undefined && !(errorAfterMinutes > warnAfterMinutes)) {
           throw new Error(prefix + ' "freshness.errorAfterMinutes" must be greater than "freshness.warnAfterMinutes".');
         }
@@ -493,9 +521,10 @@ function readSourcesEntry(raw, registryDefaults, models) {
         // the identical shape (check/column/values/to/field, or a custom
         // query) a model's own tests[] already validates, right down to a
         // "relationships" test's "to" needing to name a declared model.
-        // Only models and defaults are needed for that resolution, both
-        // already computed above in this same readModelsRegistry() call.
-        validateModelTests(tableRaw.tests, prefix, { models: models, defaults: registryDefaults });
+        // That resolution goes through resolveModelConfig(), which also
+        // needs folders whenever the target model declares one - all three
+        // are already computed above in this same readModelsRegistry() call.
+        validateModelTests(tableRaw.tests, prefix, { models: models, defaults: registryDefaults, folders: folders });
         table.tests = tableRaw.tests;
       }
       tables[tableName] = table;
