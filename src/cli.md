@@ -98,9 +98,11 @@ globals throws, so a bare `globalThis[key]` would break discovery entirely.
   After `orderNodes()` produces a flat topological sort, `buildLevelGroups()`
   assigns each node a level (0 = no dependencies, 1 = only depends on level-0
   nodes, etc.) and groups them into an array of arrays. For `run`, this enables
-  parallel execution within each level (via refactored BigQuery submit/poll APIs
-  in move.js); for `list`/`compile`, the flat array is used as-is (no functional
-  change). `runNodes()` accepts either shape.
+  parallel execution within each level: `submitModelJobsForLevel()` submits all
+  BigQuery queries in a model level in parallel, then `pollModelJobsInParallel()`
+  polls all results round-robin until complete. Non-model or mixed levels run
+  sequentially (backward compat). For `list`/`compile`, the flat array is used
+  as-is (no functional change). `runNodes()` accepts either shape.
 
 ## The run manifest
 
