@@ -1813,7 +1813,7 @@ var NotSoBigData = (function () {
   // reason: a registry-wide "every model's default sqlFile lives under
   // this prefix" is a real shape, and folders (below) reuse this same key
   // name to set it per group instead of project-wide.
-  var MODEL_DEFAULT_KEYS = ['projectId', 'dataset', 'materialized', 'dependsOn', 'modelDir', 'incrementalStrategy', 'uniqueKey', 'partitionBy'];
+  var MODEL_DEFAULT_KEYS = ['projectId', 'dataset', 'materialized', 'dependsOn', 'modelDir', 'incrementalStrategy', 'uniqueKey', 'partitionBy', 'on_schema_change'];
 
   // The keys a {{ config(...) }} call inside a model's own SQL may set - see
   // extractConfigOverrides below. Kept separate from MODEL_DEFAULT_KEYS (even
@@ -1823,11 +1823,11 @@ var NotSoBigData = (function () {
   // itself may override inline" - projectId/dataset/dependsOn are registry
   // routing concerns a model's own SQL has no business changing, even once a
   // second config()-settable key beyond materialized eventually shows up.
-  // incrementalStrategy and uniqueKey are settable via config() inside SQL
+  // incrementalStrategy, uniqueKey, and on_schema_change are settable via config() inside SQL
   // (as comma-separated strings: uniqueKey='a,b'), but partitionBy (a structured
   // object { field, dataType, granularity }) is not - string-only parsing stays
   // in MODEL_CONFIG_KEYS, structured config stays registry-only.
-  var MODEL_CONFIG_KEYS = ['materialized', 'incrementalStrategy', 'uniqueKey'];
+  var MODEL_CONFIG_KEYS = ['materialized', 'incrementalStrategy', 'uniqueKey', 'on_schema_change'];
 
   // The {{ name(...) }} calls compileModelSql() gives a built-in meaning -
   // see readMacroDefinitions() below. A user-authored macro reusing one of
@@ -2934,6 +2934,16 @@ var NotSoBigData = (function () {
     return strategy;
   }
 
+  // For incremental models: resolve on_schema_change behavior (ignore/fail/append_new_columns/sync_all_columns,
+  // default ignore). Called only when materialized is 'incremental'.
+  function resolveOnSchemaChange(config) {
+    var onSchemaChange = config.on_schema_change || 'ignore';
+    if (onSchemaChange !== 'ignore' && onSchemaChange !== 'fail' && onSchemaChange !== 'append_new_columns' && onSchemaChange !== 'sync_all_columns') {
+      throw new Error('model(): "' + config.name + '" has on_schema_change "' + onSchemaChange + '" - expected "ignore", "fail", "append_new_columns", or "sync_all_columns".');
+    }
+    return onSchemaChange;
+  }
+
   // Validates that an incremental model's config has the required keys for its
   // chosen strategy. merge needs uniqueKey, insert_overwrite needs partitionBy.
   // append has no required keys.
@@ -2949,6 +2959,13 @@ var NotSoBigData = (function () {
       if (!config.partitionBy.field || !config.partitionBy.dataType || !config.partitionBy.granularity) {
         throw new Error('model(): "' + config.name + '" has partitionBy but is missing field, dataType, or granularity.');
       }
+    }
+  }
+
+  // on_schema_change is only valid for incremental models. Reject it on any other materialization.
+  function validateOnSchemaChangeConfig(config) {
+    if (config.on_schema_change && config.materialized !== 'incremental') {
+      throw new Error('model(): "' + config.name + '" sets on_schema_change but is not an incremental model - on_schema_change is only valid for materialized="incremental".');
     }
   }
 
@@ -3316,6 +3333,11 @@ var NotSoBigData = (function () {
         validateModelTests(config.tests, 'model(): "' + name + '"', registry);
         validateSetUsage(config.sql, 'model(): "' + name + '"');
         validateVarUsage(templateMatches, registry, 'model(): "' + name + '"');
+        validateOnSchemaChangeConfig(config);
+        // Validate on_schema_change value if set
+        if (config.on_schema_change) {
+          resolveOnSchemaChange(config);
+        }
         // Every {{ ref(...) }} name must resolve to something - a declared
         // model (unchanged, handled by model()'s own resolveRef at compile
         // time) or a bigquery-target move node (resolved right here, once,

@@ -118,7 +118,7 @@ a dbt model's own `config()` block has with `dbt_project.yml`. The call
 itself never appears in the SQL that actually runs against BigQuery; it's
 read once during discovery and stripped out of the compiled statement.
 
-Only `materialized` is supported today — an unrecognized key (or a second
+Supported keys are `materialized`, `incrementalStrategy`, `uniqueKey`, and `on_schema_change` (for incremental models only). An unrecognized key (or a second
 `{{ config(...) }}` call in the same model, which has no obvious precedence
 over the first) is a discovery-time error, caught by `cli('list')` the same
 way a bad `tests` entry is.
@@ -617,6 +617,55 @@ composite. `partitionBy` for `insert_overwrite` is a structured object
 column), `dataType` (BigQuery type: `'DATE'`, `'TIMESTAMP'`, `'INT64'`,
 etc.), and `granularity` (`'day'`, `'month'`, `'hour'`, etc. — see [BigQuery
 PARTITION BY syntax](https://cloud.google.com/bigquery/docs/partitioned-tables#partition_decorators)).
+
+### Handling schema changes: `on_schema_change`
+
+An incremental model's target table can drift from what the model's SQL
+currently produces — columns get added, removed, or change type. `on_schema_change`
+controls what happens when that mismatch is detected during an incremental
+merge/insert, dbt-style. It accepts four values:
+
+- `'ignore'` (the default) — run the merge/insert as-is, even if the schema
+  has drifted. Only new/changed rows get updated; any column mismatch is
+  left alone until a full refresh.
+- `'fail'` — raise an error if the schema has drifted. Forces you to decide
+  whether to ignore it or run a full refresh. Useful to catch unexpected
+  schema divergence before it compounds.
+- `'append_new_columns'` — if the query produces columns the target table
+  doesn't have, add them. Useful when a model slowly gains new columns over
+  time, but removes nothing. Existing rows in removed columns keep their old
+  values.
+- `'sync_all_columns'` — synchronize the full schema: add new columns from
+  the query, remove columns the query no longer produces, change types to
+  match. Closest to dbt's own `sync_all_columns`, though still assumes the
+  incremental merge/insert itself is correct and only fixes the table to
+  match what's being inserted.
+
+Set it via the registry or inline:
+
+```javascript
+var notsobigdataModels = {
+  models: {
+    orders_incremental: {
+      materialized: 'incremental',
+      incrementalStrategy: 'merge',
+      uniqueKey: 'order_id',
+      on_schema_change: 'fail'  // catch any schema drift
+    }
+  }
+};
+```
+
+Or inline in SQL:
+
+```sql
+{{ config(materialized='incremental', incrementalStrategy='merge', uniqueKey='order_id', on_schema_change='sync_all_columns') }}
+select order_id, customer_id, total, updated_at, new_field
+from source_table
+```
+
+`on_schema_change` is ignored for full refreshes (`cli('run --full-refresh')`),
+since a `CREATE OR REPLACE` table always matches the query schema exactly.
 
 ## Tests
 

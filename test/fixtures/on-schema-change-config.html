@@ -1,0 +1,4 @@
+<script type="text/sql">
+{{ config(materialized='incremental', incrementalStrategy='merge', uniqueKey='id', on_schema_change='sync_all_columns') }}
+select id, name from source_table
+</script>
