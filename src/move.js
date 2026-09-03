@@ -367,6 +367,34 @@ function assertReadOnlySelect(sql, messagePrefix) {
   assertSingleStatementStripped(stripped, messagePrefix);
 }
 
+// Submits a BigQuery query job (Jobs.query) and returns job metadata without
+// waiting for completion. Use pollBigQueryJob() to wait for results in parallel
+// with other jobs, or runBigQueryQueryJob() for the synchronous, single-job path.
+function submitBigQueryQuery(queryRequest, projectId) {
+  var queryResults = BigQuery.Jobs.query(queryRequest, projectId);
+  return {
+    projectId: projectId,
+    jobId: queryResults.jobReference.jobId,
+    initialResults: queryResults,
+    maxResults: queryRequest.maxResults
+  };
+}
+
+// Polls a submitted BigQuery query job to completion. jobInfo is the object
+// returned by submitBigQueryQuery(). Returns the completed queryResults object.
+function pollBigQueryJob(jobInfo) {
+  var queryResults = jobInfo.initialResults;
+  var projectId = jobInfo.projectId;
+  var jobId = jobInfo.jobId;
+  var pollParams = jobInfo.maxResults ? { maxResults: jobInfo.maxResults } : undefined;
+  while (!queryResults.jobComplete) {
+    queryResults = pollParams
+      ? BigQuery.Jobs.getQueryResults(projectId, jobId, pollParams)
+      : BigQuery.Jobs.getQueryResults(projectId, jobId);
+  }
+  return queryResults;
+}
+
 // Runs a BigQuery query job (Jobs.query) to completion and returns
 // whichever response - the initial Jobs.query call, or the last
 // getQueryResults poll - ended up job-complete. A caller that wants more
@@ -381,15 +409,8 @@ function assertReadOnlySelect(sql, messagePrefix) {
 // that stopped applying the moment a job needed more than one poll to
 // finish would defeat that.
 function runBigQueryQueryJob(queryRequest, projectId) {
-  var queryResults = BigQuery.Jobs.query(queryRequest, projectId);
-  var jobId = queryResults.jobReference.jobId;
-  var pollParams = queryRequest.maxResults ? { maxResults: queryRequest.maxResults } : undefined;
-  while (!queryResults.jobComplete) {
-    queryResults = pollParams
-      ? BigQuery.Jobs.getQueryResults(projectId, jobId, pollParams)
-      : BigQuery.Jobs.getQueryResults(projectId, jobId);
-  }
-  return queryResults;
+  var jobInfo = submitBigQueryQuery(queryRequest, projectId);
+  return pollBigQueryJob(jobInfo);
 }
 
 // Reads from BigQuery via the Advanced BigQuery Service - either a whole

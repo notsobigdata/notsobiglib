@@ -377,6 +377,34 @@ var NotSoBigData = (function () {
     assertSingleStatementStripped(stripped, messagePrefix);
   }
 
+  // Submits a BigQuery query job (Jobs.query) and returns job metadata without
+  // waiting for completion. Use pollBigQueryJob() to wait for results in parallel
+  // with other jobs, or runBigQueryQueryJob() for the synchronous, single-job path.
+  function submitBigQueryQuery(queryRequest, projectId) {
+    var queryResults = BigQuery.Jobs.query(queryRequest, projectId);
+    return {
+      projectId: projectId,
+      jobId: queryResults.jobReference.jobId,
+      initialResults: queryResults,
+      maxResults: queryRequest.maxResults
+    };
+  }
+
+  // Polls a submitted BigQuery query job to completion. jobInfo is the object
+  // returned by submitBigQueryQuery(). Returns the completed queryResults object.
+  function pollBigQueryJob(jobInfo) {
+    var queryResults = jobInfo.initialResults;
+    var projectId = jobInfo.projectId;
+    var jobId = jobInfo.jobId;
+    var pollParams = jobInfo.maxResults ? { maxResults: jobInfo.maxResults } : undefined;
+    while (!queryResults.jobComplete) {
+      queryResults = pollParams
+        ? BigQuery.Jobs.getQueryResults(projectId, jobId, pollParams)
+        : BigQuery.Jobs.getQueryResults(projectId, jobId);
+    }
+    return queryResults;
+  }
+
   // Runs a BigQuery query job (Jobs.query) to completion and returns
   // whichever response - the initial Jobs.query call, or the last
   // getQueryResults poll - ended up job-complete. A caller that wants more
@@ -391,15 +419,8 @@ var NotSoBigData = (function () {
   // that stopped applying the moment a job needed more than one poll to
   // finish would defeat that.
   function runBigQueryQueryJob(queryRequest, projectId) {
-    var queryResults = BigQuery.Jobs.query(queryRequest, projectId);
-    var jobId = queryResults.jobReference.jobId;
-    var pollParams = queryRequest.maxResults ? { maxResults: queryRequest.maxResults } : undefined;
-    while (!queryResults.jobComplete) {
-      queryResults = pollParams
-        ? BigQuery.Jobs.getQueryResults(projectId, jobId, pollParams)
-        : BigQuery.Jobs.getQueryResults(projectId, jobId);
-    }
-    return queryResults;
+    var jobInfo = submitBigQueryQuery(queryRequest, projectId);
+    return pollBigQueryJob(jobInfo);
   }
 
   // Reads from BigQuery via the Advanced BigQuery Service - either a whole
@@ -4379,6 +4400,96 @@ var NotSoBigData = (function () {
     return ordered;
   }
 
+  // Submits all model queries in a level in parallel and returns an array of
+  // {nodeName, jobInfo} so they can be polled together. Called only when every
+  // node in a level is kind 'model' and command is 'run'.
+  function submitModelJobsForLevel(nodes) {
+    var jobs = [];
+    nodes.forEach(function (node) {
+      var sql = node.config.sql;
+      assertSingleStatement(sql, 'model(): "' + node.name + '"');
+      var registry = readModelsRegistry();
+      var compiled = compileModelSql(sql, buildRefResolver(node.config, registry), buildSourceResolver(node.config, registry), registry, node.config);
+      var jobInfo = submitBigQueryQuery({ query: 'CREATE OR REPLACE ' + resolveMaterialized(node.config).toUpperCase() + ' ' + qualifiedRelation(node.config) + ' AS\n' + compiled, useLegacySql: false }, node.config.projectId);
+      jobs.push({ nodeName: node.name, nodeConfig: node.config, jobInfo: jobInfo, registry: registry });
+    });
+    return jobs;
+  }
+
+  // Polls all submitted model jobs until complete, returning results in the
+  // same order as the jobs array. Each result is {nodeName, result, elapsed}.
+  function pollModelJobsInParallel(jobs, verbose) {
+    var results = [];
+    var jobStatus = emptyMap();
+    jobs.forEach(function (job) {
+      jobStatus[job.nodeName] = { complete: false, result: null, elapsed: null, startedAt: new Date().getTime() };
+      Logger.log('START ' + job.nodeName + ' (model)');
+    });
+    var allComplete = false;
+    while (!allComplete) {
+      var anyProgress = false;
+      jobs.forEach(function (job) {
+        if (!jobStatus[job.nodeName].complete) {
+          try {
+            var pollResult = pollBigQueryJob(job.jobInfo);
+            jobStatus[job.nodeName].complete = true;
+            jobStatus[job.nodeName].result = pollResult;
+            jobStatus[job.nodeName].elapsed = new Date().getTime() - jobStatus[job.nodeName].startedAt;
+            anyProgress = true;
+            if (verbose) {
+              Logger.log('OK    ' + job.nodeName + ' (model) - ' + jobStatus[job.nodeName].elapsed + 'ms');
+            }
+          } catch (error) {
+            jobStatus[job.nodeName].complete = true;
+            jobStatus[job.nodeName].error = error.message;
+            jobStatus[job.nodeName].elapsed = new Date().getTime() - jobStatus[job.nodeName].startedAt;
+            anyProgress = true;
+            Logger.log('FAIL  ' + job.nodeName + ' (model) - ' + error.message);
+          }
+        }
+      });
+      allComplete = jobs.every(function (job) { return jobStatus[job.nodeName].complete; });
+      if (!allComplete && !anyProgress) {
+        Utilities.sleep(100);
+      }
+    }
+    return jobStatus;
+  }
+
+  // Groups a topologically-ordered node list into levels (array of arrays).
+  // Each level contains all nodes that can run in parallel - a node's level
+  // is 1 + max(level of its dependsOn). Levels[0] = all nodes with no deps,
+  // Levels[1] = all that only depend on Level[0], etc. Used to parallelize
+  // model() execution within each level.
+  function buildLevelGroups(orderedNodes) {
+    var nodesByName = emptyMap();
+    var levelByName = emptyMap();
+    orderedNodes.forEach(function (node) {
+      nodesByName[node.name] = node;
+    });
+    orderedNodes.forEach(function (node) {
+      var maxDepLevel = -1;
+      node.dependsOn.forEach(function (depName) {
+        if (has(levelByName, depName)) {
+          maxDepLevel = Math.max(maxDepLevel, levelByName[depName]);
+        }
+      });
+      levelByName[node.name] = maxDepLevel + 1;
+    });
+    var maxLevel = -1;
+    Object.keys(levelByName).forEach(function (name) {
+      maxLevel = Math.max(maxLevel, levelByName[name]);
+    });
+    var levels = [];
+    for (var i = 0; i <= maxLevel; i++) {
+      levels.push([]);
+    }
+    orderedNodes.forEach(function (node) {
+      levels[levelByName[node.name]].push(node);
+    });
+    return levels;
+  }
+
   // Runs the ordered nodes, one at a time.
   //
   // A failure does not abort the run. The failed node is recorded, every
@@ -4423,10 +4534,61 @@ var NotSoBigData = (function () {
   // compile failure the same way a real run failure is treated - it blocks
   // dependents transitively via the same `blocked` map, rather than needing
   // a parallel skip mechanism just for this mode.
-  function runNodes(nodes, command, verbose) {
+  //
+  // Accepts either a flat array of nodes (backward compat) or an array of
+  // arrays (levels from buildLevelGroups). Flat arrays are wrapped as a
+  // single level for uniform handling.
+  function runNodes(nodesOrLevels, command, verbose) {
+    var levels = (nodesOrLevels.length > 0 && Array.isArray(nodesOrLevels[0]))
+      ? nodesOrLevels
+      : [nodesOrLevels];
     var results = [];
     var blocked = emptyMap();
-    nodes.forEach(function (node) {
+    var verbose = resolveLoggingConfig().verbose;
+    levels.forEach(function (nodes) {
+      // For 'run' command with a level of all-models: parallel submit+poll.
+      // Otherwise: sequential execution (backward compat).
+      var allModels = command === 'run' && nodes.length > 0 && nodes.every(function (n) { return n.kind === 'model'; });
+      if (allModels) {
+        // Check if any node is blocked before attempting parallel submit.
+        var blockedInLevel = nodes.filter(function (node) {
+          var blockers = node.dependsOn.filter(function (dependency) { return has(blocked, dependency); });
+          if (blockers.length) {
+            blocked[node.name] = true;
+            results.push({ name: node.name, kind: node.kind, status: 'skipped', blockedBy: blockers });
+            Logger.log('SKIP  ' + nodeLabel(node) + ' - waiting on ' + blockers.join(', '));
+            return true;
+          }
+          if (node.discoveryError) {
+            blocked[node.name] = true;
+            results.push({ name: node.name, kind: node.kind, status: 'failed', error: node.discoveryError });
+            Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + node.discoveryError);
+            return true;
+          }
+          return false;
+        });
+        var unblocked = nodes.filter(function (n) { return blockedInLevel.indexOf(n) === -1; });
+        if (unblocked.length > 0) {
+          // Submit all unblocked models in this level in parallel.
+          var jobs = submitModelJobsForLevel(unblocked);
+          // Poll all jobs in parallel (round-robin).
+          var jobStatus = pollModelJobsInParallel(jobs, verbose);
+          // Collect results.
+          unblocked.forEach(function (node) {
+            var status = jobStatus[node.name];
+            var elapsed = status.elapsed;
+            if (status.error) {
+              blocked[node.name] = true;
+              results.push({ name: node.name, kind: node.kind, status: 'failed', ms: elapsed, error: status.error });
+            } else {
+              results.push({ name: node.name, kind: node.kind, status: 'success', ms: elapsed, result: status.result });
+            }
+          });
+        }
+        return; // Skip the sequential forEach below for this level.
+      }
+      // Sequential execution (default for non-model or non-run).
+      nodes.forEach(function (node) {
       // A node can arrive already known to be broken - model.js's
       // expandModelNodes() sets this when a model's own sqlFile/tag
       // configuration is bad, discovered while building the graph, well
@@ -4487,6 +4649,7 @@ var NotSoBigData = (function () {
         results.push({ name: node.name, kind: node.kind, status: 'failed', ms: new Date().getTime() - startedAt, error: error.message });
         Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + error.message);
       }
+      });
     });
     return results;
   }
@@ -5279,7 +5442,10 @@ var NotSoBigData = (function () {
       return { ok: debugOk, command: 'debug', checks: checks, ignored: discovered.ignored };
     }
     var ordered = orderNodes(selected);
-    var results = runNodes(ordered, parsed.command, resolveLoggingConfig().verbose);
+    // For 'run', group by levels to enable parallel execution within each level;
+    // for 'list'/'compile', keep flat for backward compat (no functional difference).
+    var nodesToRun = parsed.command === 'run' ? buildLevelGroups(ordered) : ordered;
+    var results = runNodes(nodesToRun, parsed.command, resolveLoggingConfig().verbose);
     var ok = results.every(function (result) { return result.status !== 'failed' && result.status !== 'skipped'; });
     Logger.log('DONE  cli("' + input + '") - ' + formatStatusCounts(results) + ' (' + results.length + ' total).');
     var report = {
