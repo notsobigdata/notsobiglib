@@ -131,6 +131,7 @@ function usage() {
     '  cli("run --select move")       run only nodes of a given kind',
     '  cli("run --select a,b")        run only the named nodes',
     '  cli("run --exclude a")         run everything except the named nodes',
+    '  cli("run --target prod")       run with prod target config (models/moves with targets)',
     '  cli("list")                    show what would run, in order, without running it (includes declared sources)',
     '  cli("compile")                 resolve model SQL ({{ ref()/source()/var()/config() }}) without running anything',
     '  cli("debug")                   check OAuth scopes/services for each node\'s connector, without writing anything',
@@ -141,15 +142,20 @@ function usage() {
     '',
     'Nodes are plain objects declared as top-level "var"s, marked with a',
     '"kind" (one of: ' + knownKinds().join(', ') + '). Their name defaults to',
-    'the variable name, and "dependsOn" lists the names they must run after.'
+    'the variable name, and "dependsOn" lists the names they must run after.',
+    '',
+    'Targets let you declare environment-specific configs (e.g. --target prod):',
+    'models: targets: {prod: {dataset: \'x\'}, dev: {dataset: \'y\'}}',
+    'moves:  targets: {prod: {target: {...}}, dev: {target: {...}}}'
   ].join('\n');
 }
 
-// Turns a command string into { command, select, exclude }. Deliberately
+// Turns a command string into { command, select, exclude, target }. Deliberately
 // a tiny hand-rolled parser rather than anything clever: the whole
-// grammar is one verb plus two optional list flags, and both
-// "--select a,b" and "--select=a,b" are accepted because both spellings
-// are muscle memory for anyone who has used a real CLI.
+// grammar is one verb plus four optional flags (--select, --exclude, --target,
+// --full-refresh), and both "--select a,b" and "--select=a,b" are accepted
+// because both spellings are muscle memory for anyone who has used a real CLI.
+// --full-refresh is a value-less boolean flag, only legal on run/compile.
 function parseCommand(input) {
   var text = typeof input === 'string' ? input.trim() : '';
   if (!text) {
@@ -165,7 +171,7 @@ function parseCommand(input) {
   if (COMMANDS.indexOf(command) === -1) {
     throw new Error('cli(): unknown command "' + command + '".\n\n' + usage());
   }
-  var parsed = { command: command, select: [], exclude: [] };
+  var parsed = { command: command, select: [], exclude: [], target: null, fullRefresh: false };
   while (tokens.length) {
     var token = tokens.shift();
     var flag = token;
@@ -175,22 +181,43 @@ function parseCommand(input) {
       flag = token.slice(0, equalsAt);
       value = token.slice(equalsAt + 1);
     }
-    if (flag !== '--select' && flag !== '--exclude') {
-      throw new Error('cli(): unknown option "' + flag + '". Expected "--select" or "--exclude".\n\n' + usage());
+    if (flag !== '--select' && flag !== '--exclude' && flag !== '--target' && flag !== '--full-refresh') {
+      throw new Error('cli(): unknown option "' + flag + '". Expected "--select", "--exclude", "--target", or "--full-refresh".\n\n' + usage());
     }
-    if (value === null) {
+    if (flag === '--full-refresh') {
+      // --full-refresh is a value-less boolean flag
+      if (value !== null) {
+        throw new Error('cli(): "--full-refresh" does not take a value.');
+      }
+      if (command !== 'run' && command !== 'compile') {
+        throw new Error('cli(): "--full-refresh" is only valid for "run" and "compile", not for "' + command + '".');
+      }
+      parsed.fullRefresh = true;
+    } else if (value === null) {
       value = tokens.length && tokens[0].indexOf('--') !== 0 ? tokens.shift() : '';
     }
-    var list = value.split(',')
-      .map(function (item) { return item.trim(); })
-      .filter(function (item) { return !!item; });
-    if (!list.length) {
-      throw new Error('cli(): "' + flag + '" needs a comma-separated value, e.g. ' + flag + ' orders,customers.');
+    if (flag !== '--full-refresh') {
+      if (flag === '--target') {
+        if (!value) {
+          throw new Error('cli(): "--target" needs a value, e.g. --target prod.');
+        }
+        if (parsed.target !== null) {
+          throw new Error('cli(): "--target" can only be specified once.');
+        }
+        parsed.target = value;
+      } else {
+        var list = value.split(',')
+          .map(function (item) { return item.trim(); })
+          .filter(function (item) { return !!item; });
+        if (!list.length) {
+          throw new Error('cli(): "' + flag + '" needs a comma-separated value, e.g. ' + flag + ' orders,customers.');
+        }
+        // Both flags are "--" plus the key they fill, and flag was validated
+        // above, so this is the key rather than a lookup that could miss.
+        var key = flag.slice(2);
+        parsed[key] = parsed[key].concat(list);
+      }
     }
-    // Both flags are "--" plus the key they fill, and flag was validated
-    // above, so this is the key rather than a lookup that could miss.
-    var key = flag.slice(2);
-    parsed[key] = parsed[key].concat(list);
   }
   return parsed;
 }
@@ -1240,6 +1267,54 @@ function listSourcesForReport() {
   });
 }
 
+// Applies target overlay to all nodes - both models and moves that have
+// declared targets. If a node has a targets object with an entry matching
+// the active target name, overlays those config keys onto the node's config.
+// This runs after discovery but before selection/ordering/execution, so
+// a targeted config is visible to every downstream step. For a move node,
+// a targets overlay is opt-in - only a move with a targets key gets one.
+// For a model node, target resolution happens inside model.js after
+// discovery via applyModelTargets() below.
+function applyTargetOverlay(nodes, targetName) {
+  if (!targetName) {
+    return;
+  }
+  // Apply targets to move nodes
+  nodes.forEach(function (node) {
+    if (node.kind === 'model') {
+      return;
+    }
+    if (!isPlainObject(node.config.targets)) {
+      return;
+    }
+    if (!has(node.config.targets, targetName)) {
+      throw new Error('cli(): target "' + targetName + '" is not declared on move node "' + node.name + '". Known targets: ' + Object.keys(node.config.targets).join(', ') + '.');
+    }
+    var targetConfig = node.config.targets[targetName];
+    if (isPlainObject(targetConfig)) {
+      Object.keys(targetConfig).forEach(function (key) {
+        node.config[key] = targetConfig[key];
+      });
+    }
+  });
+  // Apply targets to model nodes via model.js
+  applyModelTargets(nodes, targetName);
+}
+
+// Applies --full-refresh to every incremental model node. Mirroring
+// applyTargetOverlay()'s pattern, this sets config.fullRefresh on every
+// model node when the --full-refresh flag was provided.
+function applyFullRefresh(nodes, fullRefresh) {
+  if (!fullRefresh) {
+    return;
+  }
+  nodes.forEach(function (node) {
+    if (node.kind === 'model') {
+      node.config.fullRefresh = true;
+    }
+  });
+}
+
 // The single public entrypoint. Takes one command string and returns
 // either a run report (for "run"/"list"/"compile") or a message string
 // (for "hello"/"help").
@@ -1278,6 +1353,8 @@ function cli(input) {
     throw new Error('cli(): found no declared nodes. Config objects must be declared as top-level "var"s marked with a "kind" - one declared inside a function is invisible to cli(). Run cli("hello") to see what the library can find.');
   }
   assertDependenciesExist(discovered.nodes);
+  applyTargetOverlay(discovered.nodes, parsed.target);
+  applyFullRefresh(discovered.nodes, parsed.fullRefresh);
   var selected = applySelection(discovered.nodes, parsed.select, parsed.exclude);
   if (!selected.length) {
     throw new Error('cli(): the selection matched no nodes. Run cli("list") to see everything available.');

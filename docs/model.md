@@ -50,10 +50,10 @@ project-wide defaults; anything a model sets on its own entry (like
 model only. `sqlFile` defaults to `<model name>.html` when omitted —
 `stg_orders` above could have left it out entirely.
 
-`materialized` is `'view'` (the default) or `'table'`, materialized with
-BigQuery's own atomic `CREATE OR REPLACE {VIEW|TABLE} ... AS SELECT` — no
-temp-table swap dance required. Incremental materialization isn't
-implemented yet.
+`materialized` is `'view'` (the default), `'table'`, or `'incremental'`,
+materialized with BigQuery's own atomic `CREATE OR REPLACE {VIEW|TABLE} ... AS
+SELECT` (or an incremental merge/insert for incremental models) — no
+temp-table swap dance required. See "Incremental models" below for full details.
 
 ### Grouping models with folders
 
@@ -118,7 +118,7 @@ a dbt model's own `config()` block has with `dbt_project.yml`. The call
 itself never appears in the SQL that actually runs against BigQuery; it's
 read once during discovery and stripped out of the compiled statement.
 
-Only `materialized` is supported today — an unrecognized key (or a second
+Supported keys are `materialized`, `incrementalStrategy`, `uniqueKey`, and `on_schema_change` (for incremental models only). An unrecognized key (or a second
 `{{ config(...) }}` call in the same model, which has no obvious precedence
 over the first) is a discovery-time error, caught by `cli('list')` the same
 way a bad `tests` entry is.
@@ -522,6 +522,151 @@ the nodes it would run — a source is invisible to `cli('run')`'s own node
 list, so `list` is the one place it's visible without actually running a
 check.
 
+## Incremental models
+
+`materialized` also accepts `'incremental'`, dbt's third materialization
+shape — useful when a model's source data is large but only a small slice
+of it changes per run. Instead of recomputing the whole dataset every run,
+an incremental model updates only the new/changed rows, via one of three
+strategies: `merge` (upsert by a unique key), `insert_overwrite` (delete
+touched partitions, insert new data), or `append` (insert without dedup).
+
+This is the config shape:
+
+```javascript
+var notsobigdataModels = {
+  projectId: 'my-project', dataset: 'analytics',
+  models: {
+    // MERGE strategy: upsert by unique_key
+    orders_incremental: {
+      materialized: 'incremental',
+      incrementalStrategy: 'merge',
+      uniqueKey: 'order_id',
+      sqlFile: 'orders_incremental.html'
+    },
+    // INSERT_OVERWRITE strategy: partition-based, requires partitionBy
+    events_daily: {
+      materialized: 'incremental',
+      incrementalStrategy: 'insert_overwrite',
+      partitionBy: { field: 'event_date', dataType: 'DATE', granularity: 'day' },
+      sqlFile: 'events_daily.html'
+    },
+    // APPEND strategy: simplest, no config needed
+    logs: {
+      materialized: 'incremental',
+      incrementalStrategy: 'append',
+      sqlFile: 'logs.html'
+    }
+  }
+};
+```
+
+Or inline, via `{{ config(...) }}`:
+
+```sql
+{{ config(materialized='incremental', incrementalStrategy='merge', uniqueKey='order_id') }}
+select order_id, customer_id, total from source_table
+```
+
+The key thing that makes incremental worthwhile is **filtering to only
+new/changed rows** inside the model's own SQL. Use `{% if is_incremental()
+%}...{% endif %}` to switch between a full scan (first run) and an
+incremental scan (subsequent runs):
+
+```sql
+{{ config(materialized='incremental', incrementalStrategy='merge', uniqueKey='order_id') }}
+
+select order_id, customer_id, total, updated_at
+from raw_orders
+{% if is_incremental() %}
+  where updated_at > (select max(updated_at) from {{ this }})
+{% endif %}
+```
+
+On the first run, `is_incremental()` evaluates to false — no rows match
+the `where` clause (it references `{{ this }}`, which doesn't exist yet),
+so the full dataset loads into the table. On subsequent runs, `is_incremental()`
+is true, the condition filters to only rows updated since the last run,
+and the merge strategy upserts them by `order_id`, updating existing rows
+and inserting new ones.
+
+`{{ this }}` is the fully-qualified name of the target relation —
+equivalent to `` `project-id`.dataset.model_name ``. It's only available
+inside incremental models (a reference in a view or table raises an error).
+
+First run (relation doesn't exist) or **`cli('run --full-refresh')`** always
+does a full rebuild (`CREATE OR REPLACE TABLE`), even on an incremental
+model — useful after schema changes or if the incremental logic gets out
+of sync. `--full-refresh` is a boolean flag with no value:
+
+```
+cli('run --full-refresh')                    # full refresh everything
+cli('run --full-refresh --select orders')   # full refresh only this model
+```
+
+Tests on an incremental model (see "Tests" below) run **after** the
+incremental mutation against the real relation, not staged first — there's
+nothing to stage for an incremental merge/insert. If a test fails, the
+bad rows are already in the table (same as any production error), so fix
+the model or the source data and re-run.
+
+`uniqueKey` for `merge` is a string or an array — either the column name
+alone (`'order_id'`) or as comma-separated (`'order_id, order_date'`) if
+composite. `partitionBy` for `insert_overwrite` is a structured object
+(settable only in the registry, not inline) with `field` (the partition
+column), `dataType` (BigQuery type: `'DATE'`, `'TIMESTAMP'`, `'INT64'`,
+etc.), and `granularity` (`'day'`, `'month'`, `'hour'`, etc. — see [BigQuery
+PARTITION BY syntax](https://cloud.google.com/bigquery/docs/partitioned-tables#partition_decorators)).
+
+### Handling schema changes: `on_schema_change`
+
+An incremental model's target table can drift from what the model's SQL
+currently produces — columns get added, removed, or change type. `on_schema_change`
+controls what happens when that mismatch is detected during an incremental
+merge/insert, dbt-style. It accepts four values:
+
+- `'ignore'` (the default) — run the merge/insert as-is, even if the schema
+  has drifted. Only new/changed rows get updated; any column mismatch is
+  left alone until a full refresh.
+- `'fail'` — raise an error if the schema has drifted. Forces you to decide
+  whether to ignore it or run a full refresh. Useful to catch unexpected
+  schema divergence before it compounds.
+- `'append_new_columns'` — if the query produces columns the target table
+  doesn't have, add them. Useful when a model slowly gains new columns over
+  time, but removes nothing. Existing rows in removed columns keep their old
+  values.
+- `'sync_all_columns'` — synchronize the full schema: add new columns from
+  the query, remove columns the query no longer produces, change types to
+  match. Closest to dbt's own `sync_all_columns`, though still assumes the
+  incremental merge/insert itself is correct and only fixes the table to
+  match what's being inserted.
+
+Set it via the registry or inline:
+
+```javascript
+var notsobigdataModels = {
+  models: {
+    orders_incremental: {
+      materialized: 'incremental',
+      incrementalStrategy: 'merge',
+      uniqueKey: 'order_id',
+      on_schema_change: 'fail'  // catch any schema drift
+    }
+  }
+};
+```
+
+Or inline in SQL:
+
+```sql
+{{ config(materialized='incremental', incrementalStrategy='merge', uniqueKey='order_id', on_schema_change='sync_all_columns') }}
+select order_id, customer_id, total, updated_at, new_field
+from source_table
+```
+
+`on_schema_change` is ignored for full refreshes (`cli('run --full-refresh')`),
+since a `CREATE OR REPLACE` table always matches the query schema exactly.
+
 ## Tests
 
 A model can declare `tests`, an optional array run against the relation
@@ -598,12 +743,12 @@ A `table` with *no* tests declared materializes directly, same as
 always — nothing to check, nothing to gain from staging.
 
 `{{ ref() }}`, `{{ source() }}`, `{{ config() }}` and `{{ var() }}` are the
-only built-in `{{ }}` calls implemented so far, alongside the `{% set %}`
-and `{% for %}` block constructs and your own `{% macro %}`s (see above) —
-no `if` yet. Referencing a name that isn't a declared model/source, an
-undefined `{% set %}`/`var()`, or a `{{ }}` call that's neither a built-in
-nor a declared macro, is an error, not something silently passed through
-as literal text into SQL that runs with your live BigQuery credentials.
+only built-in `{{ }}` calls implemented so far, alongside the `{% set %}`,
+`{% for %}`, and `{% if is_incremental() %}` block constructs and your own
+`{% macro %}`s (see above). Referencing a name that isn't a declared
+model/source, an undefined `{% set %}`/`var()`, or a `{{ }}` call that's neither
+a built-in nor a declared macro, is an error, not something silently passed
+through as literal text into SQL that runs with your live BigQuery credentials.
 
 A model's SQL must be a single statement — no `;`-separated scripts, same
 restriction `move`'s BigQuery connector places on its own SQL (models can
