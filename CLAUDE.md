@@ -209,57 +209,20 @@ generalized version of either of these.
 
 ## About testing
 
-Testing here has two layers: a fast, headless Node layer for the
-`cli()` commands that never touch a live resource by design, and a
-human-run Apps Script layer for everything that does.
+For each and every possible combination that each module provide, we need to create a test in order to test it in a Google Apps Script project.
+Since Google Apps script has its own runtime (or something like this) every test should be triggered by a human, but prepared but you.
 
-### Layer 1 — Node, headless, `list`/`compile`/`hello`/`help`
-
-`cli()` is the library's one public entrypoint (`return { cli: cli }`,
-the footer `build.sh` writes), and four of its seven commands are
-dry-run by construction: `list` resolves and orders nodes without
-executing anything, `compile` renders a model's SQL without touching
-BigQuery, `hello` and `help` touch nothing at all. Between them they
-exercise discovery, `--select`/`--exclude`, dependency ordering, the
-`model` registry's expansion into nodes, and the `{{ ref() }}`/
-`{% for %}`/`{% set %}`/`{{ config() }}` macro parser — most of the
-logic that actually has bugs worth catching before a human ever opens
-the Apps Script editor.
-
-`test/harness.js` loads `src.js` into a Node `vm` context alongside a
-~15-line shim (`Logger.log` as a no-op, `HtmlService.createHtmlOutputFromFile`
-reading a local fixture file instead of a GAS project file) and then
-runs one or more fixture files — plain `.js` files declaring top-level
-`var` nodes, exactly like a GAS project file — into that same context,
-so `cli()`'s `globalThis`-scanning discovery sees them exactly as it
-would in Apps Script. `test/*.test.js` files use this harness plus
-plain `assert`; `node test/run.js` finds and runs every `*.test.js`
-file. No framework, no `package.json`, no dependency — the same "no
-tooling required" posture `build.sh` has. **Node itself is a dev/test-
-only tool here — the library still ships and runs as a single
-`eval()`'d file in Apps Script; nothing in `test/` is part of what a
-consumer installs.**
-
-TDD applies for real on this layer: a change to discovery, ordering,
-selection, model registry expansion, or the macro parser gets a failing
-`test/*.test.js` written first, `node test/run.js` run to confirm it
-fails, then the `src/*.js` change, then the same command to confirm it
-passes. `./build.sh` must run before the test does if the change
-touched `src/*.js` — the harness loads the committed `src.js`, not the
-`src/` modules directly.
-
-### Layer 2 — Apps Script, human-run, `run`/`debug`/`sources`
-
-The other three commands need a live resource: `run` actually reads/
-writes Sheets/Drive/BigQuery, `debug` probes real connector
-permissions, `sources` checks freshness against real data. None of that
-is fakeable in Node without faking the thing under test, so this layer
-stays what it already was: a companion example Apps Script project in
-its own sibling repo, [`notsobigtests`](https://github.com/notsobigdata/notsobigtests),
-managed with `clasp`, that pulls in `src.js` and exercises every
-documented node kind/connector/`cli()` command combination against real
-resources. A human runs it from the Apps Script editor (or `clasp run`)
-and reports back pass/fail — there is no way to run this headless.
+In practice this means maintaining a companion example Apps Script project
+in its own sibling repo, [`notsobigtests`](https://github.com/notsobigdata/notsobigtests),
+managed with the `clasp` CLI — already installed locally — that pulls in
+`src.js` and exercises every documented node kind / connector / cli()
+command combination against real Sheets/Drive/BigQuery resources. Because
+`cli()` discovers nodes by scanning the global scope, every fixture config
+in that project is a top-level `var`, and each test selects its own node
+(`cli('run --select <node>')`) — a bare `cli('run')` there would fire
+every fixture at once. A human runs it from the Apps Script editor (or
+`clasp run`) and reports back pass/fail; there is no automated CI for
+this since the GAS runtime can't run headless in this setup.
 
 `notsobigtests` is its own repo, with its own git history and its own PR
 review — not a folder inside this one. The one file not committed there
@@ -269,42 +232,30 @@ which is personal to whoever's Google account owns it, so it can't be
 shared across contributors. Each contributor runs `clasp create` or
 `clasp clone` once to generate their own local `.clasp.json` pointing at
 their own deployment, then `clasp push -f` to deploy the tracked code
-there.
+there. A PR here that adds a new node kind, connector, or cli() command
+needs a **companion PR in `notsobigtests`** adding the matching fixture —
+link the two PRs from each other's description, since they can no longer
+be the same diff once testing lives in a separate repo — see `/ship`'s
+workflow.
 
-**Write the fixture before the `src/` change, not after.** A PR that
-adds a node kind, connector, or `cli()` command needs a companion PR in
-`notsobigtests` either way (link the two PRs from each other's
-description — see "About devops stuff" below) — write that fixture,
-describing the expected `cli('run --select <node>')` result, *before*
-touching `src/`, the same test-first discipline as Layer 1, just
-without an automated red/green loop to run it through. This can't tell
-you you're wrong until a human runs it, but it forces the same "define
-the behavior before writing the code" thinking Layer 1 gets for free.
+**Pointing `notsobigtests` at the branch under test is a Script Property,
+not a code edit.** `js/00-bootstrap.js` builds the `eval()` URL from
+`SRC_REF` (`PropertiesService.getScriptProperties().getProperty('SRC_REF')`),
+not a hardcoded ref — so testing a feature PR before it merges means
+setting `SRC_REF` to that branch name (e.g. `feat/move-bigquery-source`) in
+the Apps Script editor, running the fixtures, and pointing it back at
+`main` (or the active `release/N`) afterward. This is a per-run human step,
+not something either repo's docs previously called out end to end —
+`notsobigtests`' own PROJECT.md documents the file's mechanics but not this
+workflow-level habit, so it's worth remembering here too: an empty/stale
+`SRC_REF` silently tests the wrong version of the library rather than
+failing loudly.
 
-Because `cli()` discovers nodes by scanning the global scope, every
-fixture config in that project is a top-level `var`, and each test
-selects its own node (`cli('run --select <node>')`) — a bare
-`cli('run')` there would fire every fixture at once.
-
-**Pointing `notsobigtests` at the branch under test is a Script
-Property, not a code edit.** `js/00-bootstrap.js` builds the `eval()`
-URL from `SRC_REF`
-(`PropertiesService.getScriptProperties().getProperty('SRC_REF')`), not
-a hardcoded ref — so testing a feature PR before it merges means
-setting `SRC_REF` to that branch name (e.g. `feat/move-bigquery-source`)
-in the Apps Script editor, running the fixtures, and pointing it back
-at `main` (or the active `release/N`) afterward. This is a per-run human
-step, not something either repo's docs previously called out end to end
-— `notsobigtests`' own PROJECT.md documents the file's mechanics but
-not this workflow-level habit, so it's worth remembering here too: an
-empty/stale `SRC_REF` silently tests the wrong version of the library
-rather than failing loudly.
-
-Both the test Apps Script project itself and any fixture files it
-depends on (test Sheets, sample CSV/XLSX/JSON files, etc.) live
-together inside a single Google Drive folder named after the library
-(`notsobigdata`), so everything the test project touches is co-located
-and easy to find/clean up.
+Both the test Apps Script project itself and any fixture files it depends
+on (test Sheets, sample CSV/XLSX/JSON files, etc.) live together inside a
+single Google Drive folder named after the library (`notsobigdata`), so
+everything the test project touches is co-located and easy to find/clean
+up.
 
 **Drive-target tests that create a new file must clean up after
 themselves.** Any fixture whose `target` has no `fileId` (Drive
@@ -317,8 +268,8 @@ behind: `notsobigdata-load-test.csv/.json/.xlsx` and
 before anyone noticed (2026-08-06). The fix belongs in the test project,
 not the library — `loadDrive*` already returns the id of the file it
 wrote, attached to the run result as `.loadResult` (see `src/move.md`) —
-so any fixture that tests file *creation* should assert on the result
-and then trash the file it just made:
+so any fixture that tests file *creation* should assert on the result and
+then trash the file it just made:
 
 ``` javascript
     var report = NotSoBigData.cli('run --select loadNewTest');
@@ -333,78 +284,14 @@ testing overwrite/upsert, not creation — they reuse the same file every
 run and must **not** be trashed, or the next run's overwrite has nothing
 left to write to.
 
-Any identifying or sensitive value the test project needs —
-spreadsheet/file IDs, BigQuery project IDs, dataset/schema/table names,
-folder IDs, and anything else that points at a real resource rather
-than describing the library's behavior — must be stored in GAS's
-built-in Script Properties (`PropertiesService.getScriptProperties()`),
-never hardcoded inline in the test project's code. This matters more now
-that `notsobigtests` is a committed, public repo of its own: Script
-Properties keep its code free of real resource identifiers.
-
-### Feature branch workflow: Layer 1 + Layer 2
-
-When a feature (new kind, connector, or `cli()` command) needs both Layer 1
-and Layer 2 testing, follow this sequence:
-
-**1. Create feature branch in notsobiglib**
-```bash
-cd notsobiglib
-git checkout -b feat/your-feature-name
-# implement the feature in src/*.js
-```
-
-**2. Layer 1: Run Node tests until green**
-```bash
-./build.sh
-node test/run.js  # all tests pass
-```
-
-**3. Push the feature branch to GitHub**
-```bash
-git push origin feat/your-feature-name
-```
-
-**4. Create fixtures in notsobigtests**
-- Add `.html` fixture files in `html/` (models, SQL, etc.)
-- Add test functions in `js/` (test file matching the pattern `14*-tests-model-*.js`)
-- Add your test category to `TEST_CATEGORIES` in `js/90-test-registry.js`
-
-**5. Deploy to Apps Script via clasp**
-```bash
-cd notsobigtests
-clasp push -f
-```
-
-**6. Set SRC_REF to the feature branch**
-In the Apps Script editor, set Script Properties:
-```
-SRC_REF: 'feat/your-feature-name'
-```
-
-**7. Run Layer 2 tests in Apps Script**
-```javascript
-runAllTests('your-test-category')
-// or run a specific test:
-runAllTests('testYourFeatureName')
-```
-
-If tests pass, note any BigQuery artifacts created (tables, datasets). If tests
-fail, fix the issue in notsobiglib, push the branch again, and re-run step 7.
-
-**8. Reset SRC_REF and clean up**
-Set `SRC_REF` back to `main` (or the active release branch) in Apps Script.
-Delete any test tables/files in BigQuery/Drive that won't be reused by future
-Layer 2 runs (see "Drive-target tests" section above for the cleanup pattern).
-
-**9. Open PR and merge in notsobiglib**
-```bash
-gh pr create
-# human review & merge
-```
-
-The feature is now live on `main` and Layer 2 tests in `notsobigtests` will run
-against it from then on (SRC_REF points to `main`).
+Any identifying or sensitive value the test project needs — spreadsheet/file
+IDs, BigQuery project IDs, dataset/schema/table names, folder IDs, and
+anything else that points at a real resource rather than describing the
+library's behavior — must be stored in GAS's built-in Script Properties
+(`PropertiesService.getScriptProperties()`), never hardcoded inline in the
+test project's code. This matters more now that `notsobigtests` is a
+committed, public repo of its own: Script Properties keep its code free
+of real resource identifiers.
 
 ## About documentation
 
@@ -439,152 +326,80 @@ written — a summary line elsewhere (e.g. a stale "currently only X" aside)
 is exactly the kind of thing a change can leave behind unnoticed otherwise.
 
 ## About devops stuff
+We should create a new branch and use git semantic and git flow to implement new changes do the repo
 
-Conventional Commits + git-flow-style branches. Branch names and commit
-messages use a `type/description` (branch) / `type: description`
+Concretely: Conventional Commits + git-flow-style branches. Branch names
+and commit messages use a `type/description` (branch) / `type: description`
 (commit) convention, where `type` is one of `feat`, `fix`, `refactor`,
-`docs`, `test`, or `chore`. E.g. branch `feat/move-bigquery-source`,
-commit `feat: add BigQuery source support to the move kind`. Never
-commit directly to `main` — always a feature branch and a PR, even for
-small or doc-only changes like edits to README.md. This applies to
-everything git actually tracks — which now includes this file. Only
-what's still listed in `.gitignore` (`.claude/`) stays untracked and is
-edited directly, with no branch/PR involved.
+`docs`, `test`, or `chore`. E.g. branch `feat/move-bigquery-source`, commit
+`feat: add BigQuery source support to the move kind`. Never commit directly to
+main — always a feature branch and a PR, even for small or doc-only changes
+like edits to the README.md file. This applies to everything git actually
+tracks — which now includes this file. Only what's still listed in
+`.gitignore` (`.claude/`) stays untracked and is edited directly, with no
+branch/PR involved. (`notsobigtests` has its own equivalent `.clasp.json`
+exemption in its own `.gitignore`, now that it's a separate repo.)
 
 Branches are three-tier: feature branches (`feat/`, `fix/`, `refactor/`,
-`docs/`, `test/`, `chore/`) branch off the current `release/N` branch
-and merge into it via PR; `release/N` itself later merges into `main`
-via PR. There is always at most one active (unmerged) `release/*`
-branch at a time — resolve it with `git branch -a --list '*release/*'`
-(a `release/*` branch is deleted the instant it merges, so any that
-still exists is active by definition; don't cross-check against `git
-branch --merged main`, which is trivially true for a release branch
-with zero commits ahead yet). This exists to split review cost by risk:
-`security-review` runs on every feature PR since it's cheap and this
-library gets `eval()`'d with live OAuth access, while heavier quality
-checks (`simplify`, an independent review) are batched once per release
-instead of once per feature PR.
+`docs/`, `test/`, `chore/`) branch off the current `release/N` branch and
+merge into it via PR; `release/N` itself later merges into `main` via PR.
+There is always at most one active (unmerged) `release/*` branch at a
+time. This exists to split review cost by risk: `security-review` runs on
+every feature PR since it's cheap and this library gets `eval()`'d with
+live OAuth access, while heavier quality checks (`simplify`, an
+independent fresh-agent review) are batched once per release instead of
+once per feature PR — see `/release` below.
 
-### Working through a change: which skill, when
+### Workflow commands
 
-None of this is a slash command anymore — the workflow below is a
-sequence of superpowers skills, invoked directly, with the
-project-specific bookkeeping (which branch, which repo, what gets asked
-before merging) as explicit steps around them, since no generic skill
-knows this project's shape.
+Three custom Claude Code commands (`.claude/commands/`) implement this
+workflow end to end, split at the points where a human has to get
+involved:
 
-**1. Plan — `superpowers:brainstorming`.** Before touching code: re-read
-this file for current conventions, then resolve the active `release/N`
-branch as above (none active → stop and cut one first: confirm `main`
-is clean and up to date, name it one past the highest `release/*`
-number `git log main --merges --oneline | grep -oE 'release/[0-9]+'`
-has ever shown — that history survives branch deletion, a live branch
-listing doesn't — create and push it). Most changes are brainstorming's
-*bounded* path: the flow already exists in this repo, so a short design
-in chat (branch name, what changes, which docs need updating alongside
-the code, anything touching credential handling/`eval`/`UrlFetchApp`/
-SQL templating worth flagging now) is enough. A new node `kind` or a
-change that reshapes `cli()`'s own interface is brainstorming's
-*architectural* path instead — write the spec, then
-`superpowers:writing-plans` before implementing.
+- **`/release start` / `/release finish`** — cuts a new `release/N`
+  branch off `main` for `/ship` to target, or finishes one: runs
+  `simplify` and one fresh independent code review pass against the whole
+  release's diff (batched together, once, instead of per feature PR),
+  folds findings back in, and opens the `release/N → main` PR.
+- **`/ship <change description>`** — plans the change, implements it
+  together with any doc updates it requires, rebuilds `src.js` with
+  `./build.sh` and verifies it with `./build.sh --check`, self-reviews (via
+  the `security-review` skill only — see above for why `simplify` and the
+  independent review moved to `/release`), opens a PR against the active
+  release branch with a didactic explanation of what changed and why, and
+  updates the companion Apps Script test project. It stops there and
+  never merges — Google Apps Script can't be tested headless, so a human
+  always runs the new/changed combination by hand first (see "About
+  testing" above).
+- **`/merge-pr [PR number]`** — merges one PR (a feature branch into its
+  release branch, or a release branch into `main`) after explicitly
+  confirming the human ran the GAS tests and they passed. Always asks
+  before merging (regular merge, not squash) and never assumes a prior
+  "tests passed" from earlier in the conversation.
 
-**2. Implement.** Branch off the active `release/N` (never off `main`
-directly). Code and docs land in the same pass, not as a follow-up —
-see "About documentation" below for which doc tracks what. A bugfix
-goes through `superpowers:systematic-debugging` before a fix is
-proposed, not after. A change to discovery/ordering/selection/
-model-registry expansion/macro-parsing gets its Node test written first
-(see "About testing"'s Layer 1); a change that only touches a
-connector's real I/O gets its `notsobigtests` fixture written first
-instead (Layer 2). Run `./build.sh` and commit the regenerated `src.js`
-alongside the module changes — a new module also needs adding to
-`build.sh`'s `MODULES` manifest.
-
-**3. Self-review.** `superpowers:verification-before-completion` covers
-both gates: `./build.sh --check` must pass (`src.js` matches `src/`)
-and `node test/run.js` must pass (if the change touched anything
-Layer 1 covers). Then `security-review` against the diff — this
-library gets `eval()`'d into a user's Apps Script project with live
-OAuth access to their Drive/Sheets/BigQuery, so credential handling,
-the `{{ ref() }}` SQL templating, and anything touching `UrlFetchApp`
-get real scrutiny. `simplify` and an independent review are
-deliberately **not** run here — see step 5.
-
-**4. Open the PR — stop before merge.** Push the branch (ask first —
-this is externally visible) and open the PR against the active
-`release/N` (`gh pr create --base release/N`), never `main`. The
-description has two parts: a standard summary/test plan, and a
-didactic walkthrough aimed at a data/analytics background reader, not a
-software engineer — bridge new concepts to things they already know
-(SQL, dbt's `ref()`, spreadsheet formulas, BigQuery), explain *why*
-this shape was chosen, scope the depth to what's actually new. If this
-change adds a node kind/connector/`cli()` command, open the companion
-PR in `notsobigtests` now too (its own `PROJECT.md` "Contributing" has
-the convention — it mirrors this one), cross-linked both ways, and run
-`clasp push -f` from `~/projetos/notsobig_org/notsobigtests` to
-actually deploy the fixture — do this without asking, it only touches
-the human's own personal test project. Skip that push quietly if that
-repo's `.clasp.json` doesn't exist yet (per-contributor, gitignored,
-needs `clasp create`/`clasp clone` first — the human's own setup step).
-If the change touched `setupScriptProperties()` (most commonly a
-`SRC_REF` pointing at this branch), say so explicitly. **This never
-merges.** Google Apps Script can't be tested headless — a human runs
-the change by hand in the Apps Script editor first, every time, no
-exception this chain of skills can create.
-
-**5. Finish the release — `simplify` + independent review,
-`superpowers:receiving-code-review`.** Once the release branch has the
-changes it needs: show what's included (the feature PRs/commits merged
-into it since it branched from `main`), then run `simplify` and a
-fresh, unbriefed independent code review
-(`superpowers:requesting-code-review`) **in parallel** against the
-whole release-branch-vs-`main` diff — this is the batching this
-two-tier branch model exists for, once per release instead of once per
-feature PR. Fold findings back with `superpowers:receiving-code-review`
-— judge each one, don't accept by default — and flag to the user which
-GAS scenarios need re-verifying by hand if a fix changed runtime
-behavior (those fix commits weren't individually GAS-tested the way
-the original feature PRs were). Open the PR from the release branch
-into `main` (`gh pr create --base main`), summarizing by aggregating
-the individual feature PRs' didactic explanations rather than repeating
-them. Stop before merging, same rule as step 4.
-
-**6. Merge — human confirmation, every time, no skill.** Resolving and
-showing the PR (title, branches, diff summary) is mechanical. The one
-question that is never skipped, never inferred from earlier
-conversation, asked fresh every single time: *did the Google Apps
-Script tests pass?* If the base branch is `main` (a release merge),
-this also covers any fix commits step 5 added on top of individual
-feature-branch testing. No → stop. Yes → show the exact merge command
-(`gh pr merge --merge` — regular merge, never squash) and get final
-confirmation before running it. After merging: delete the merged
-branch (local + remote), sync the local base branch, report what
-happened — routine cleanup, no separate confirmation needed. If the
-merge was into `main`: note the merge commit SHA and ask whether any
-pinned downstream consumer (see "Downstream consumers pinned to a
-release" below) should bump to it — a separate decision every time,
-never automatic. Never merge a branch that skipped its required review
-stage: a feature branch must have gone through steps 1-3, a release
-branch through step 5.
+All three commands ask before any externally visible action (pushing,
+opening a PR, merging) and favor more confirmation checkpoints over fewer,
+since part of the point of this workflow is understanding the changes an
+agent makes, not just approving them.
 
 ### Downstream consumers pinned to a release
 
 Not every sibling repo tracks `main`. [`notsobigjaffle`](https://github.com/notsobigdata/notsobigjaffle)
-(a demo project, see its own CLAUDE.md) `eval()`s `src.js` from a
-specific commit **SHA** rather than `main`, by design — it shouldn't
-move just because this library does.
+(a demo project, see its own CLAUDE.md) `eval()`s `src.js` from a specific
+commit **SHA** rather than `main`, by design — it shouldn't move just
+because this library does.
 
 **Pin to a commit SHA on `main`, never to a `release/*` branch name.**
-Step 6 above deletes a release branch the instant it merges, so a URL
-built from `release/N` 404s the moment that release ships — this bit
-`notsobigjaffle` for real (pinned at `release/11`, three releases
-stale, silently 404ing since release/11 merged). A commit SHA is
-permanent regardless of what happens to branches afterward, and needs
-no new tagging convention.
+`/merge-pr` deletes a release branch the instant it merges (see that
+command's step 5), so a URL built from `release/N` 404s the moment that
+release ships — this bit `notsobigjaffle` for real (pinned at
+`release/11`, three releases stale, silently 404ing since release/11
+merged). A commit SHA is permanent regardless of what happens to branches
+afterward, and needs no new tagging convention.
 
-Step 6 asks, right after a release-branch-into-`main` merge, whether to
-bump a pinned consumer to the SHA just landed — but that's a prompt,
-not an enforcement mechanism. A consumer can still drift silently
-between releases if the answer is "not now"; if you suspect one has,
-check its `eval()` URL's SHA against `git log main --oneline` here by
-hand rather than assuming it's current.
+`/merge-pr` step 6 asks, right after a release-branch-into-`main` merge,
+whether to bump a pinned consumer to the SHA just landed — but that's a
+prompt, not an enforcement mechanism. A consumer can still drift silently
+between releases if the answer is "not now"; if you suspect one has, check
+its `eval()` URL's SHA against `git log main --oneline` here by hand
+rather than assuming it's current.
