@@ -471,6 +471,40 @@ function orderNodes(nodes) {
   return ordered;
 }
 
+// Groups a topologically-ordered node list into levels (array of arrays).
+// Each level contains all nodes that can run in parallel - a node's level
+// is 1 + max(level of its dependsOn). Levels[0] = all nodes with no deps,
+// Levels[1] = all that only depend on Level[0], etc. Used to parallelize
+// model() execution within each level.
+function buildLevelGroups(orderedNodes) {
+  var nodesByName = emptyMap();
+  var levelByName = emptyMap();
+  orderedNodes.forEach(function (node) {
+    nodesByName[node.name] = node;
+  });
+  orderedNodes.forEach(function (node) {
+    var maxDepLevel = -1;
+    node.dependsOn.forEach(function (depName) {
+      if (has(levelByName, depName)) {
+        maxDepLevel = Math.max(maxDepLevel, levelByName[depName]);
+      }
+    });
+    levelByName[node.name] = maxDepLevel + 1;
+  });
+  var maxLevel = -1;
+  Object.keys(levelByName).forEach(function (name) {
+    maxLevel = Math.max(maxLevel, levelByName[name]);
+  });
+  var levels = [];
+  for (var i = 0; i <= maxLevel; i++) {
+    levels.push([]);
+  }
+  orderedNodes.forEach(function (node) {
+    levels[levelByName[node.name]].push(node);
+  });
+  return levels;
+}
+
 // Runs the ordered nodes, one at a time.
 //
 // A failure does not abort the run. The failed node is recorded, every
@@ -515,10 +549,18 @@ function orderNodes(nodes) {
 // compile failure the same way a real run failure is treated - it blocks
 // dependents transitively via the same `blocked` map, rather than needing
 // a parallel skip mechanism just for this mode.
-function runNodes(nodes, command, verbose) {
+//
+// Accepts either a flat array of nodes (backward compat) or an array of
+// arrays (levels from buildLevelGroups). Flat arrays are wrapped as a
+// single level for uniform handling.
+function runNodes(nodesOrLevels, command, verbose) {
+  var levels = (nodesOrLevels.length > 0 && Array.isArray(nodesOrLevels[0]))
+    ? nodesOrLevels
+    : [nodesOrLevels];
   var results = [];
   var blocked = emptyMap();
-  nodes.forEach(function (node) {
+  levels.forEach(function (nodes) {
+    nodes.forEach(function (node) {
     // A node can arrive already known to be broken - model.js's
     // expandModelNodes() sets this when a model's own sqlFile/tag
     // configuration is bad, discovered while building the graph, well
@@ -579,6 +621,7 @@ function runNodes(nodes, command, verbose) {
       results.push({ name: node.name, kind: node.kind, status: 'failed', ms: new Date().getTime() - startedAt, error: error.message });
       Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + error.message);
     }
+    });
   });
   return results;
 }
@@ -1371,7 +1414,10 @@ function cli(input) {
     return { ok: debugOk, command: 'debug', checks: checks, ignored: discovered.ignored };
   }
   var ordered = orderNodes(selected);
-  var results = runNodes(ordered, parsed.command, resolveLoggingConfig().verbose);
+  // For 'run', group by levels to enable parallel execution within each level;
+  // for 'list'/'compile', keep flat for backward compat (no functional difference).
+  var nodesToRun = parsed.command === 'run' ? buildLevelGroups(ordered) : ordered;
+  var results = runNodes(nodesToRun, parsed.command, resolveLoggingConfig().verbose);
   var ok = results.every(function (result) { return result.status !== 'failed' && result.status !== 'skipped'; });
   Logger.log('DONE  cli("' + input + '") - ' + formatStatusCounts(results) + ' (' + results.length + ' total).');
   var report = {
