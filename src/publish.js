@@ -174,6 +174,9 @@ function computeAggregate(rows, agg, field) {
 // v1's schema - add a "locale"/"currencyCode" config key if a real report
 // needs anything else, rather than guessing at one now.
 function formatValue(value, format) {
+  if (format === 'string') {
+    return String(value);
+  }
   if (format === 'integer') {
     return Math.round(value).toLocaleString('en-US');
   }
@@ -181,6 +184,55 @@ function formatValue(value, format) {
     return '$' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
   return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// mode: 'raw' - one output row per source row, column order/labels exactly
+// as configured. Non-'string' formats coerce through Number() first (row
+// values from fetchTableRows are always strings, same as
+// computeAggregate's own "Number(row[field]) || 0" coercion for
+// kpis/charts) - 'string' format is left raw so ids/dates/free text pass
+// through unchanged rather than becoming NaN/0.
+function buildRawTablePayload(table, rows) {
+  var columns = table.columns.map(function (column) {
+    return { key: column.field, label: column.label || column.field };
+  });
+  var tableRows = rows.map(function (row) {
+    return table.columns.map(function (column) {
+      var format = column.format || 'string';
+      var raw = row[column.field];
+      return formatValue(format === 'string' ? raw : (Number(raw) || 0), format);
+    });
+  });
+  return { id: table.id, title: table.title, pageSize: table.pageSize || 25, columns: columns, rows: tableRows };
+}
+
+// mode: 'aggregated' - identical grouping to charts' own groupBy handling
+// above; the groupBy value itself is left as the raw string BigQuery
+// returned (not run through formatValue), matching how charts already
+// render chart.data[].groupValue directly with no formatting step.
+function buildAggregatedTablePayload(table, rows) {
+  var groups = emptyMap();
+  var order = [];
+  rows.forEach(function (row) {
+    var key = row[table.groupBy];
+    if (!has(groups, key)) {
+      groups[key] = [];
+      order.push(key);
+    }
+    groups[key].push(row);
+  });
+  var columns = [{ key: table.groupBy, label: table.groupBy }].concat(table.metrics.map(function (metric) {
+    return { key: metric.label, label: metric.label };
+  }));
+  var tableRows = order.map(function (key) {
+    var groupRows = groups[key];
+    var cells = table.metrics.map(function (metric) {
+      var value = computeAggregate(groupRows, metric.agg, metric.field);
+      return formatValue(value, metric.format || 'string');
+    });
+    return [key].concat(cells);
+  });
+  return { id: table.id, title: table.title, pageSize: table.pageSize || 25, columns: columns, rows: tableRows };
 }
 
 function buildReportPayload(config, rows) {
@@ -204,7 +256,10 @@ function buildReportPayload(config, rows) {
     });
     return { id: chart.id, title: chart.title, data: data };
   });
-  return { kpis: kpis, charts: charts };
+  var tables = (config.tables || []).map(function (table) {
+    return table.mode === 'raw' ? buildRawTablePayload(table, rows) : buildAggregatedTablePayload(table, rows);
+  });
+  return { kpis: kpis, charts: charts, tables: tables };
 }
 
 function escapeHtml(value) {

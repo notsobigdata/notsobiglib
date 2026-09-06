@@ -4011,6 +4011,12 @@ var NotSoBigData = (function () {
   // docs/superpowers/specs/2026-09-05-publish-kind-design.md for the full
   // design.
 
+  // Shared enum for every publish() value that gets formatted for display -
+  // kpis[] (always required), and tables[]'s raw columns/aggregated metrics
+  // (optional, default 'string') - one array, not a second enum living
+  // elsewhere, per the design spec's §3.
+  var PUBLISH_VALUE_FORMATS = ['string', 'currency', 'integer', 'decimal'];
+
   // Every check a publish node's config must pass before anything is
   // fetched or written - same "throw new Error('publish(): ...')"
   // convention move()/model() already use. Field-by-field, not a schema
@@ -4036,8 +4042,8 @@ var NotSoBigData = (function () {
       if (kpi.agg !== 'count' && !kpi.field) {
         throw new Error('publish(): kpi "' + kpi.label + '" has agg "' + kpi.agg + '", which requires "field".');
       }
-      if (['currency', 'integer', 'decimal'].indexOf(kpi.format) === -1) {
-        throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected "currency", "integer", or "decimal".');
+      if (PUBLISH_VALUE_FORMATS.indexOf(kpi.format) === -1) {
+        throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
       }
     });
     (config.charts || []).forEach(function (chart) {
@@ -4046,6 +4052,42 @@ var NotSoBigData = (function () {
       }
       if (chart.type && chart.type !== 'bar') {
         throw new Error('publish(): chart "' + chart.id + '" has type "' + chart.type + '" - only "bar" is supported.');
+      }
+    });
+    (config.tables || []).forEach(function (table) {
+      if (!table.id || !table.title || ['raw', 'aggregated'].indexOf(table.mode) === -1) {
+        throw new Error('publish(): every table needs "id", "title", and mode "raw" or "aggregated".');
+      }
+      if (table.mode === 'raw') {
+        if (!Array.isArray(table.columns) || !table.columns.length) {
+          throw new Error('publish(): table "' + table.id + '" has mode "raw", which requires a non-empty "columns" array.');
+        }
+        table.columns.forEach(function (column) {
+          if (!column.field) {
+            throw new Error('publish(): table "' + table.id + '" has a column missing "field".');
+          }
+          if (column.format && PUBLISH_VALUE_FORMATS.indexOf(column.format) === -1) {
+            throw new Error('publish(): table "' + table.id + '" column "' + column.field + '" has format "' + column.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
+          }
+        });
+      } else {
+        if (!table.groupBy) {
+          throw new Error('publish(): table "' + table.id + '" has mode "aggregated", which requires "groupBy".');
+        }
+        if (!Array.isArray(table.metrics) || !table.metrics.length) {
+          throw new Error('publish(): table "' + table.id + '" has mode "aggregated", which requires a non-empty "metrics" array.');
+        }
+        table.metrics.forEach(function (metric) {
+          if (!metric.label || !metric.agg) {
+            throw new Error('publish(): table "' + table.id + '" has a metric missing "label" or "agg".');
+          }
+          if (metric.agg !== 'count' && !metric.field) {
+            throw new Error('publish(): table "' + table.id + '" metric "' + metric.label + '" has agg "' + metric.agg + '", which requires "field".');
+          }
+          if (metric.format && PUBLISH_VALUE_FORMATS.indexOf(metric.format) === -1) {
+            throw new Error('publish(): table "' + table.id + '" metric "' + metric.label + '" has format "' + metric.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
+          }
+        });
       }
     });
   }
@@ -4137,6 +4179,9 @@ var NotSoBigData = (function () {
   // v1's schema - add a "locale"/"currencyCode" config key if a real report
   // needs anything else, rather than guessing at one now.
   function formatValue(value, format) {
+    if (format === 'string') {
+      return String(value);
+    }
     if (format === 'integer') {
       return Math.round(value).toLocaleString('en-US');
     }
@@ -4144,6 +4189,55 @@ var NotSoBigData = (function () {
       return '$' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
     return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  // mode: 'raw' - one output row per source row, column order/labels exactly
+  // as configured. Non-'string' formats coerce through Number() first (row
+  // values from fetchTableRows are always strings, same as
+  // computeAggregate's own "Number(row[field]) || 0" coercion for
+  // kpis/charts) - 'string' format is left raw so ids/dates/free text pass
+  // through unchanged rather than becoming NaN/0.
+  function buildRawTablePayload(table, rows) {
+    var columns = table.columns.map(function (column) {
+      return { key: column.field, label: column.label || column.field };
+    });
+    var tableRows = rows.map(function (row) {
+      return table.columns.map(function (column) {
+        var format = column.format || 'string';
+        var raw = row[column.field];
+        return formatValue(format === 'string' ? raw : (Number(raw) || 0), format);
+      });
+    });
+    return { id: table.id, title: table.title, pageSize: table.pageSize || 25, columns: columns, rows: tableRows };
+  }
+
+  // mode: 'aggregated' - identical grouping to charts' own groupBy handling
+  // above; the groupBy value itself is left as the raw string BigQuery
+  // returned (not run through formatValue), matching how charts already
+  // render chart.data[].groupValue directly with no formatting step.
+  function buildAggregatedTablePayload(table, rows) {
+    var groups = emptyMap();
+    var order = [];
+    rows.forEach(function (row) {
+      var key = row[table.groupBy];
+      if (!has(groups, key)) {
+        groups[key] = [];
+        order.push(key);
+      }
+      groups[key].push(row);
+    });
+    var columns = [{ key: table.groupBy, label: table.groupBy }].concat(table.metrics.map(function (metric) {
+      return { key: metric.label, label: metric.label };
+    }));
+    var tableRows = order.map(function (key) {
+      var groupRows = groups[key];
+      var cells = table.metrics.map(function (metric) {
+        var value = computeAggregate(groupRows, metric.agg, metric.field);
+        return formatValue(value, metric.format || 'string');
+      });
+      return [key].concat(cells);
+    });
+    return { id: table.id, title: table.title, pageSize: table.pageSize || 25, columns: columns, rows: tableRows };
   }
 
   function buildReportPayload(config, rows) {
@@ -4167,7 +4261,10 @@ var NotSoBigData = (function () {
       });
       return { id: chart.id, title: chart.title, data: data };
     });
-    return { kpis: kpis, charts: charts };
+    var tables = (config.tables || []).map(function (table) {
+      return table.mode === 'raw' ? buildRawTablePayload(table, rows) : buildAggregatedTablePayload(table, rows);
+    });
+    return { kpis: kpis, charts: charts, tables: tables };
   }
 
   function escapeHtml(value) {

@@ -234,6 +234,53 @@ function testPublishValidTablesProceedPastValidation() {
   assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
+// Pulls the embedded payload back out of a rendered report - non-greedy
+// up to the first ";" (not ";</script>") since that's exactly where
+// JSON.stringify(payload)'s own output ends, before anything else (e.g.
+// Task 3's pagination script) that might follow it in the same <script>
+// tag.
+function extractPayload(html) {
+  var match = html.match(/window\.__PUBLISH_PAYLOAD__ = (.+?);/);
+  assert.ok(match, 'expected an embedded __PUBLISH_PAYLOAD__ in: ' + html);
+  return JSON.parse(match[1]);
+}
+
+function testPublishBuildsRawAndAggregatedTablePayloads() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [
+    ['A', '10', 'o1'],
+    ['A', '20', 'o1'],
+    ['A', '5', 'o3'],
+    ['B', '5', 'o2']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  var rawTable = payload.tables.filter(function (t) { return t.id === 'recent_orders'; })[0];
+  assert.ok(rawTable, 'expected a recent_orders table in payload.tables');
+  assert.deepStrictEqual(rawTable.columns, [{ key: 'order_id', label: 'Order' }, { key: 'revenue', label: 'Revenue' }]);
+  assert.strictEqual(rawTable.pageSize, 2);
+  assert.deepStrictEqual(rawTable.rows, [
+    ['o1', '$10.00'], ['o1', '$20.00'], ['o3', '$5.00'], ['o2', '$5.00']
+  ]);
+
+  var aggTable = payload.tables.filter(function (t) { return t.id === 'by_category'; })[0];
+  assert.ok(aggTable, 'expected a by_category table in payload.tables');
+  assert.deepStrictEqual(aggTable.columns, [
+    { key: 'category', label: 'category' },
+    { key: 'Revenue', label: 'Revenue' },
+    { key: 'Orders', label: 'Orders' }
+  ]);
+  // A: sum(revenue) 10+20+5=35, count_distinct(order_id) over ['o1','o1','o3']=2
+  // B: sum(revenue) 5, count_distinct(order_id) over ['o2']=1
+  assert.deepStrictEqual(aggTable.rows, [
+    ['A', '$35.00', '2'],
+    ['B', '$5.00', '1']
+  ]);
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -252,5 +299,6 @@ module.exports = {
   testPublishAggregatedTableRequiresMetrics: testPublishAggregatedTableRequiresMetrics,
   testPublishAggregatedMetricRequiresFieldUnlessCount: testPublishAggregatedMetricRequiresFieldUnlessCount,
   testPublishTableFormatMustBeKnownEnum: testPublishTableFormatMustBeKnownEnum,
-  testPublishValidTablesProceedPastValidation: testPublishValidTablesProceedPastValidation
+  testPublishValidTablesProceedPastValidation: testPublishValidTablesProceedPastValidation,
+  testPublishBuildsRawAndAggregatedTablePayloads: testPublishBuildsRawAndAggregatedTablePayloads
 };
