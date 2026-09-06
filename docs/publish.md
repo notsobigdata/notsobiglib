@@ -138,7 +138,6 @@ charts: [
   unrelated charts are accidentally given the same `linkKey`, they will
   highlight each other on any coincidentally-matching value — the library
   has no way to detect that this wasn't intended.
-```
 
 ### `tables[]`
 
