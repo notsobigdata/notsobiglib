@@ -679,6 +679,22 @@ naming *any* declared node regardless of kind — both were already
 kind-agnostic enough for this before the feature existed. The only real
 gap was `resolveRef` only ever trying the models registry.
 
+**`resolveRefLocation()` is the same lookup, extracted for a second caller
+outside this file.** `publish.js`'s `publish` kind (see
+`docs/superpowers/specs/2026-09-05-publish-kind-design.md`) needs to
+resolve a `source.ref` to a BigQuery location too, but as structured
+`{projectId, dataset, table}` rather than a formatted relation string —
+it calls `BigQuery.Tabledata.list()` with the three components separately,
+never runs SQL. Rather than duplicate the "declared model, or a
+bigquery-target move node, or neither" lookup a second time,
+`resolveRefLocation(refName, registry, moveBigQueryTargets)` holds it once;
+`buildRefResolver()` above is now a thin wrapper that additionally formats
+the result via `qualifiedTableRef()` for SQL substitution.
+`indexMoveBigQueryTargets()` changed accordingly — it now indexes
+structured locations, not pre-formatted strings, since `buildRefResolver()`
+is the only caller that ever needed the string form and now formats it
+itself.
+
 **`relationships` tests' `to` deliberately did not get the same
 treatment.** A `relationships` test needs a `field` to join on and its own
 query shape (`MODEL_TEST_COMPILERS.relationships`) — "does every value in
