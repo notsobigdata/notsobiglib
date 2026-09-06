@@ -406,16 +406,21 @@ function testPublishChartClientJsDispatchesByType() {
 // Regression test for a rendering defect found in review: SVG/CSS gives a
 // stylesheet's `fill` property priority over a presentation attribute set
 // via .attr("fill", ...) - REPORT_CSS's ".chart-bar { fill: var(--teal); }"
-// would silently override any per-item color set with .attr("fill", ...),
-// so pie slices and stacked/grouped bar segments would all render in one
-// color despite the color scale. .style("fill", ...) sets an inline style,
-// which does win over the stylesheet. This can't be rendered/checked in a
-// browser here, so it's a plain string-presence check on the emitted
-// script, same ceiling CHART_CLIENT_JS's other regex-based tests accept -
-// three color-scaled call sites (pie slices, stacked bar segments, grouped
-// bar segments) must use .style("fill", not .attr("fill", a color(...)
-// call. The plain (non-series) bar path is untouched - it never sets a
-// per-item fill and keeps relying on .chart-bar's CSS fill.
+// would silently override any per-item fill set with .attr("fill", ...),
+// so pie slices, stacked/grouped bar segments, and the line chart's path
+// would all render filled instead of respecting the intended fill. Three
+// of the four call sites below are color-scaled (pie slices, stacked bar
+// segments, grouped bar segments - each picks a per-item color via
+// color(...)); the fourth (the line chart's path) isn't color-scaled at
+// all, it just needs fill suppressed to "none" so the stroke alone
+// renders - same underlying CSS-vs-attr priority bug, caught a second
+// time later in the same review pass. .style("fill", ...) sets an inline
+// style, which does win over the stylesheet, for both cases. This can't
+// be rendered/checked in a browser here, so it's a plain string-presence
+// check on the emitted script, same ceiling CHART_CLIENT_JS's other
+// regex-based tests accept. The plain (non-series) bar path is
+// untouched - it never sets a per-item fill and keeps relying on
+// .chart-bar's CSS fill.
 function testPublishChartClientJsUsesStyleForColorScaledFills() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'day', 'channel', 'revenue'], [['A', '1', 'online', '10']]);
@@ -425,8 +430,65 @@ function testPublishChartClientJsUsesStyleForColorScaledFills() {
   var html = getHtml();
 
   var styleFillCount = (html.match(/\.style\("fill"/g) || []).length;
-  assert.strictEqual(styleFillCount, 3, 'expected .style("fill" on all 3 color-scaled call sites (pie slices, stacked bars, grouped bars), got ' + styleFillCount + ' in: ' + html);
+  assert.strictEqual(styleFillCount, 4, 'expected .style("fill" on all 4 call sites (pie slices, stacked bars, grouped bars, and the line chart\'s fill:none path), got ' + styleFillCount + ' in: ' + html);
   assert.ok(!/\.attr\("fill", function \(d\) \{ return color\(/.test(html), 'expected no remaining .attr("fill", ...color(...)) calls (should be .style now), got: ' + html);
+  assert.ok(!/\.attr\("fill", "none"\)/.test(html), 'expected no remaining .attr("fill", "none") call on the line chart path (should be .style now), got: ' + html);
+}
+
+// Whole-branch review finding #3: the D3 CDN script tag had no
+// Subresource Integrity - a pinned version number pins a path, not the
+// bytes served at it, and this library gets eval()'d with live OAuth
+// access into a page that also embeds the user's full BigQuery result
+// set. SRI pins the exact bytes the browser will accept.
+function testPublishD3ScriptHasSubresourceIntegrity() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var scriptTagMatch = html.match(/<script src="https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/d3\/[^"]+"[^>]*><\/script>/);
+  assert.ok(scriptTagMatch, 'expected a D3 CDN <script> tag in: ' + html);
+  var scriptTag = scriptTagMatch[0];
+  assert.ok(scriptTag.indexOf('integrity="sha512-') !== -1, 'expected an integrity="sha512-..." attribute on the D3 script tag, got: ' + scriptTag);
+  assert.ok(scriptTag.indexOf('crossorigin="anonymous"') !== -1, 'expected a crossorigin="anonymous" attribute on the D3 script tag, got: ' + scriptTag);
+}
+
+// Whole-branch review finding #4: tables[] already rejects a duplicate
+// id before any other per-table check could mask it (see
+// testPublishDuplicateTableIdRejected above); charts[] had no equivalent
+// guard, even though CHART_CLIENT_JS's DOMContentLoaded handler resolves
+// a chart the exact same way tables do
+// (`payload.charts.filter(c => c.id === chartId)[0]`), so a duplicate
+// chart id would silently mis-bind a mount point rather than throwing at
+// config time.
+function testPublishDuplicateChartIdRejected() {
+  var result = runOne('duplicateChartIdPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/duplicate chart id "dup"/.test(result.error), 'expected a duplicate-chart-id error, got: ' + result.error);
+}
+
+// Whole-branch review finding #13: `var chartType = chart.type || 'bar';`
+// (the default-to-bar fallback for an omitted chart.type) had zero test
+// coverage. Proves both that validation accepts a chart with no "type"
+// key at all, and that buildChartPayload produces the plain
+// {groupValue, total} shape (not the series {groupValue, values} matrix)
+// for it, exactly like an explicit type: 'bar' would.
+function testPublishChartTypeOmittedDefaultsToBar() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10'], ['B', '20']]);
+
+  var result = ctx.NotSoBigData.cli('run --select chartTypeOmittedPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var chart = extractPayload(getHtml()).charts[0];
+
+  assert.strictEqual(chart.type, 'bar', 'expected an omitted chart.type to default to "bar" in the payload, got: ' + JSON.stringify(chart));
+  assert.strictEqual(chart.seriesKeys, undefined, 'expected no seriesKeys on a default-type chart, got: ' + JSON.stringify(chart));
+  var totalsByGroup = {};
+  chart.data.forEach(function (d) { totalsByGroup[d.groupValue] = d.total; });
+  assert.strictEqual(totalsByGroup.A, 10, 'expected plain {groupValue, total} shape for A, got: ' + JSON.stringify(chart.data));
+  assert.strictEqual(totalsByGroup.B, 20, 'expected plain {groupValue, total} shape for B, got: ' + JSON.stringify(chart.data));
 }
 
 function testPublishAggregationFixtureStillHasNoStacking() {
@@ -584,5 +646,8 @@ module.exports = {
   testPublishNoD3ScriptWithoutCharts: testPublishNoD3ScriptWithoutCharts,
   testPublishChartClientJsDispatchesByType: testPublishChartClientJsDispatchesByType,
   testPublishChartClientJsUsesStyleForColorScaledFills: testPublishChartClientJsUsesStyleForColorScaledFills,
-  testPublishAggregationFixtureStillHasNoStacking: testPublishAggregationFixtureStillHasNoStacking
+  testPublishAggregationFixtureStillHasNoStacking: testPublishAggregationFixtureStillHasNoStacking,
+  testPublishD3ScriptHasSubresourceIntegrity: testPublishD3ScriptHasSubresourceIntegrity,
+  testPublishDuplicateChartIdRejected: testPublishDuplicateChartIdRejected,
+  testPublishChartTypeOmittedDefaultsToBar: testPublishChartTypeOmittedDefaultsToBar
 };

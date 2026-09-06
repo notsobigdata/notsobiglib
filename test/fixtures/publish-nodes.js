@@ -297,3 +297,35 @@ var duplicateTableIdPublish = {
     { id: 'dup', title: 'Second', mode: 'raw', columns: [{ field: 'category' }] }
   ]
 };
+
+// Two charts sharing an id - same rationale as duplicateTableIdPublish
+// above: CHART_CLIENT_JS's DOMContentLoaded handler resolves a chart by
+// `payload.charts.filter(c => c.id === chartId)[0]`, so a duplicate chart
+// id would silently mis-bind a mount point to the wrong chart's data with
+// no error, rather than throwing at config time. Both entries here are
+// otherwise individually valid bar charts.
+var duplicateChartIdPublish = {
+  kind: 'publish',
+  name: 'duplicateChartIdPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'dup-chart-id.html' },
+  charts: [
+    { id: 'dup', type: 'bar', title: 'First', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'dup', type: 'bar', title: 'Second', groupBy: 'channel', metric: { agg: 'sum', field: 'revenue' } }
+  ]
+};
+
+// No "type" key at all - proves chart.type's default-to-'bar' fallback
+// (`var chartType = chart.type || 'bar';`) both passes validation and
+// produces the plain {groupValue, total} payload shape, not the series
+// {groupValue, values} shape - this default path had zero test coverage
+// before the whole-branch review caught it.
+var chartTypeOmittedPublish = {
+  kind: 'publish',
+  name: 'chartTypeOmittedPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'chart-type-omitted.html' },
+  charts: [{ id: 'by_category', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }]
+};

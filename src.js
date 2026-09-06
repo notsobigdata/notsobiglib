@@ -4028,6 +4028,16 @@ var NotSoBigData = (function () {
   // must load the exact D3 build it loaded the day it was generated.
   var D3_CDN_URL = 'https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js';
 
+  // Subresource Integrity for the exact D3_CDN_URL build above - pulled live
+  // from api.cdnjs.com/libraries/d3/7.9.0?fields=sri. A pinned version number
+  // pins a path, not the bytes served at it; this pins the bytes. Generated
+  // reports embed the user's full BigQuery result set in
+  // window.__PUBLISH_PAYLOAD__ on the same page this script loads into, and
+  // this library itself gets eval()'d with live OAuth access, so a swapped
+  // CDN response is worth defending against even though cdnjs is generally
+  // trusted.
+  var D3_CDN_INTEGRITY = 'sha512-vc58qvvBdrDR4etbxMdlTt4GBQk1qjvyORR2nrsPsFPyrs+/u5c3+1Ct6upOgdZoIl7eq6k3a1UPDSNAQi/32A==';
+
   // Every check a publish node's config must pass before anything is
   // fetched or written - same "throw new Error('publish(): ...')"
   // convention move()/model() already use. Field-by-field, not a schema
@@ -4057,7 +4067,14 @@ var NotSoBigData = (function () {
         throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
       }
     });
+    var seenChartIds = emptyMap();
     (config.charts || []).forEach(function (chart) {
+      if (chart.id && has(seenChartIds, chart.id)) {
+        throw new Error('publish(): duplicate chart id "' + chart.id + '".');
+      }
+      if (chart.id) {
+        seenChartIds[chart.id] = true;
+      }
       if (!chart.id || !chart.title || !chart.groupBy || !chart.metric || !chart.metric.agg) {
         throw new Error('publish(): every chart needs "id", "title", "groupBy", and "metric.agg".');
       }
@@ -4483,13 +4500,13 @@ var NotSoBigData = (function () {
     '  container.appendChild(list);',
     '}',
     'function drawBarChart(containerId, chart) {',
-    '  var width = 480, height = 240, margin = { top: 10, right: 40, bottom: 10, left: 160 };',
-    '  var svg = d3.select("#" + containerId).append("svg")',
+    '  var width = 480, height = Math.max(240, chart.data.length * 36), margin = { top: 10, right: 40, bottom: 10, left: 160 };',
+    '  var svg = d3.select(document.getElementById(containerId)).append("svg")',
     '    .attr("viewBox", "0 0 " + width + " " + height).attr("width", "100%").attr("height", height)',
     '    .attr("role", "img").attr("aria-label", chart.title);',
     '  var groupValues = chart.data.map(function (d) { return d.groupValue; });',
     '  var y = d3.scaleBand().domain(groupValues).range([margin.top, height - margin.bottom]).padding(0.2);',
-    '  var color = d3.scaleOrdinal().range(["#3F6659", "#B65A3C", "#6B6A61", "#DCE6E1"]);',
+    '  var color = d3.scaleOrdinal().range(["var(--teal)", "var(--coral)", "var(--ink-soft)", "var(--teal-soft)"]);',
     '  if (chart.seriesKeys && chart.seriesKeys.length) {',
     '    color.domain(chart.seriesKeys);',
     '    if (chart.stacking === "stacked") {',
@@ -4518,7 +4535,7 @@ var NotSoBigData = (function () {
     '    var x = d3.scaleLinear().domain([0, maxTotal]).range([margin.left, width - margin.right]);',
     '    svg.append("g").selectAll("rect").data(chart.data).join("rect")',
     '      .attr("class", "chart-bar").attr("y", function (d) { return y(d.groupValue); }).attr("x", margin.left)',
-    '      .attr("width", function (d) { return x(d.total) - margin.left; }).attr("height", y.bandwidth());',
+    '      .attr("width", function (d) { return Math.max(0, x(d.total) - margin.left); }).attr("height", y.bandwidth());',
     '    svg.append("g").selectAll("text").data(chart.data).join("text")',
     '      .attr("class", "chart-value").attr("x", function (d) { return x(d.total) + 6; })',
     '      .attr("y", function (d) { return y(d.groupValue) + y.bandwidth() / 2 + 4; }).text(function (d) { return d.total.toLocaleString("en-US"); });',
@@ -4528,14 +4545,14 @@ var NotSoBigData = (function () {
     '}',
     'function drawLineChart(containerId, chart) {',
     '  var width = 480, height = 240, margin = { top: 10, right: 20, bottom: 30, left: 50 };',
-    '  var svg = d3.select("#" + containerId).append("svg")',
+    '  var svg = d3.select(document.getElementById(containerId)).append("svg")',
     '    .attr("viewBox", "0 0 " + width + " " + height).attr("width", "100%").attr("height", height)',
     '    .attr("role", "img").attr("aria-label", chart.title);',
     '  var x = d3.scalePoint().domain(chart.data.map(function (d) { return d.groupValue; })).range([margin.left, width - margin.right]);',
     '  var maxTotal = d3.max(chart.data, function (d) { return d.total; }) || 1;',
     '  var y = d3.scaleLinear().domain([0, maxTotal]).range([height - margin.bottom, margin.top]);',
     '  var line = d3.line().x(function (d) { return x(d.groupValue); }).y(function (d) { return y(d.total); });',
-    '  svg.append("path").datum(chart.data).attr("class", "chart-bar").attr("fill", "none").attr("stroke", "#3F6659").attr("stroke-width", 2).attr("d", line);',
+    '  svg.append("path").datum(chart.data).attr("class", "chart-bar").style("fill", "none").attr("stroke", "#3F6659").attr("stroke-width", 2).attr("d", line);',
     '  svg.append("g").selectAll("circle").data(chart.data).join("circle")',
     '    .attr("class", "chart-bar").attr("cx", function (d) { return x(d.groupValue); }).attr("cy", function (d) { return y(d.total); }).attr("r", 3);',
     '  svg.append("g").selectAll("text").data(chart.data).join("text")',
@@ -4543,16 +4560,17 @@ var NotSoBigData = (function () {
     '}',
     'function drawPieChart(containerId, chart) {',
     '  var width = 320, height = 320, radius = Math.min(width, height) / 2 - 20;',
-    '  var svg = d3.select("#" + containerId).append("svg")',
+    '  var svg = d3.select(document.getElementById(containerId)).append("svg")',
     '    .attr("viewBox", "0 0 " + width + " " + height).attr("width", "100%").attr("height", height)',
     '    .attr("role", "img").attr("aria-label", chart.title)',
     '    .append("g").attr("transform", "translate(" + width / 2 + "," + height / 2 + ")");',
-    '  var color = d3.scaleOrdinal().range(["#3F6659", "#B65A3C", "#6B6A61", "#DCE6E1"]);',
+    '  var color = d3.scaleOrdinal().range(["var(--teal)", "var(--coral)", "var(--ink-soft)", "var(--teal-soft)"]);',
     '  var pieGen = d3.pie().value(function (d) { return d.total; });',
     '  var arcGen = d3.arc().innerRadius(chart.donut ? radius * 0.55 : 0).outerRadius(radius);',
-    '  svg.selectAll("path").data(pieGen(chart.data)).join("path")',
+    '  var pieData = pieGen(chart.data);',
+    '  svg.selectAll("path").data(pieData).join("path")',
     '    .attr("class", "chart-bar").style("fill", function (d) { return color(d.data.groupValue); }).attr("d", arcGen);',
-    '  svg.selectAll("text").data(pieGen(chart.data)).join("text")',
+    '  svg.selectAll("text").data(pieData).join("text")',
     '    .attr("class", "chart-label").attr("transform", function (d) { return "translate(" + arcGen.centroid(d) + ")"; })',
     '    .attr("text-anchor", "middle").text(function (d) { return d.data.groupValue; });',
     '}',
@@ -4591,7 +4609,7 @@ var NotSoBigData = (function () {
     if (payload.charts.length) {
       script += CHART_CLIENT_JS;
     }
-    var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '"></script>' : '';
+    var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
     return '<!doctype html><html><head><meta charset="utf-8">'
       + '<title>' + escapeHtml(config.target.fileName) + '</title>'
       + '<style>' + REPORT_CSS + '</style>' + d3Script + '</head><body>'
