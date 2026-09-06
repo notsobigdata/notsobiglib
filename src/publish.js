@@ -6,6 +6,12 @@
 // docs/superpowers/specs/2026-09-05-publish-kind-design.md for the full
 // design.
 
+// Shared enum for every publish() value that gets formatted for display -
+// kpis[] (always required), and tables[]'s raw columns/aggregated metrics
+// (optional, default 'string') - one array, not a second enum living
+// elsewhere, per the design spec's §3.
+var PUBLISH_VALUE_FORMATS = ['string', 'currency', 'integer', 'decimal'];
+
 // Every check a publish node's config must pass before anything is
 // fetched or written - same "throw new Error('publish(): ...')"
 // convention move()/model() already use. Field-by-field, not a schema
@@ -31,7 +37,7 @@ function validatePublishConfig(config) {
     if (kpi.agg !== 'count' && !kpi.field) {
       throw new Error('publish(): kpi "' + kpi.label + '" has agg "' + kpi.agg + '", which requires "field".');
     }
-    if (['currency', 'integer', 'decimal'].indexOf(kpi.format) === -1) {
+    if (PUBLISH_VALUE_FORMATS.indexOf(kpi.format) === -1) {
       throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected "currency", "integer", or "decimal".');
     }
   });
@@ -41,6 +47,42 @@ function validatePublishConfig(config) {
     }
     if (chart.type && chart.type !== 'bar') {
       throw new Error('publish(): chart "' + chart.id + '" has type "' + chart.type + '" - only "bar" is supported.');
+    }
+  });
+  (config.tables || []).forEach(function (table) {
+    if (!table.id || !table.title || ['raw', 'aggregated'].indexOf(table.mode) === -1) {
+      throw new Error('publish(): every table needs "id", "title", and mode "raw" or "aggregated".');
+    }
+    if (table.mode === 'raw') {
+      if (!Array.isArray(table.columns) || !table.columns.length) {
+        throw new Error('publish(): table "' + table.id + '" has mode "raw", which requires a non-empty "columns" array.');
+      }
+      table.columns.forEach(function (column) {
+        if (!column.field) {
+          throw new Error('publish(): table "' + table.id + '" has a column missing "field".');
+        }
+        if (column.format && PUBLISH_VALUE_FORMATS.indexOf(column.format) === -1) {
+          throw new Error('publish(): table "' + table.id + '" column "' + column.field + '" has format "' + column.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
+        }
+      });
+    } else {
+      if (!table.groupBy) {
+        throw new Error('publish(): table "' + table.id + '" has mode "aggregated", which requires "groupBy".');
+      }
+      if (!Array.isArray(table.metrics) || !table.metrics.length) {
+        throw new Error('publish(): table "' + table.id + '" has mode "aggregated", which requires a non-empty "metrics" array.');
+      }
+      table.metrics.forEach(function (metric) {
+        if (!metric.label || !metric.agg) {
+          throw new Error('publish(): table "' + table.id + '" has a metric missing "label" or "agg".');
+        }
+        if (metric.agg !== 'count' && !metric.field) {
+          throw new Error('publish(): table "' + table.id + '" metric "' + metric.label + '" has agg "' + metric.agg + '", which requires "field".');
+        }
+        if (metric.format && PUBLISH_VALUE_FORMATS.indexOf(metric.format) === -1) {
+          throw new Error('publish(): table "' + table.id + '" metric "' + metric.label + '" has format "' + metric.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
+        }
+      });
     }
   });
 }

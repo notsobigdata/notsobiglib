@@ -181,6 +181,59 @@ function testPublishDebugOnlyProbesDriveTarget() {
   assert.strictEqual(report.ok, true, 'expected cli(\'debug\') to report a correctly-configured publish node as ok, got: ' + JSON.stringify(report));
 }
 
+function testPublishTableModeMustBeRawOrAggregated() {
+  var result = runOne('badTableModePublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/mode "raw" or "aggregated"/.test(result.error), 'expected a table-mode error, got: ' + result.error);
+}
+
+function testPublishRawTableRequiresColumns() {
+  var result = runOne('badTableRawColumnsPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/requires a non-empty "columns"/.test(result.error), 'expected a raw-columns error, got: ' + result.error);
+}
+
+function testPublishRawTableColumnRequiresField() {
+  var result = runOne('badTableRawColumnFieldPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/missing "field"/.test(result.error), 'expected a column-field error, got: ' + result.error);
+}
+
+function testPublishAggregatedTableRequiresGroupBy() {
+  var result = runOne('badTableAggregatedGroupByPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/requires "groupBy"/.test(result.error), 'expected a groupBy error, got: ' + result.error);
+}
+
+function testPublishAggregatedTableRequiresMetrics() {
+  var result = runOne('badTableAggregatedMetricsPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/requires a non-empty "metrics"/.test(result.error), 'expected a metrics error, got: ' + result.error);
+}
+
+function testPublishAggregatedMetricRequiresFieldUnlessCount() {
+  var result = runOne('badTableMetricFieldPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/requires "field"/.test(result.error), 'expected a metric-field error, got: ' + result.error);
+}
+
+function testPublishTableFormatMustBeKnownEnum() {
+  var result = runOne('badTableFormatPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/expected one of string, currency, integer, decimal/.test(result.error), 'expected a format-enum error, got: ' + result.error);
+}
+
+function testPublishValidTablesProceedPastValidation() {
+  var result = runOne('tablesPublish');
+  // Same proof pattern as testPublishValidRefProceedsPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation - that BigQuery-shaped error is what proves tables[]
+  // validated cleanly.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -191,5 +244,13 @@ module.exports = {
   testPublishLayoutTypeOtherThanLinearRejected: testPublishLayoutTypeOtherThanLinearRejected,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
-  testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget
+  testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,
+  testPublishTableModeMustBeRawOrAggregated: testPublishTableModeMustBeRawOrAggregated,
+  testPublishRawTableRequiresColumns: testPublishRawTableRequiresColumns,
+  testPublishRawTableColumnRequiresField: testPublishRawTableColumnRequiresField,
+  testPublishAggregatedTableRequiresGroupBy: testPublishAggregatedTableRequiresGroupBy,
+  testPublishAggregatedTableRequiresMetrics: testPublishAggregatedTableRequiresMetrics,
+  testPublishAggregatedMetricRequiresFieldUnlessCount: testPublishAggregatedMetricRequiresFieldUnlessCount,
+  testPublishTableFormatMustBeKnownEnum: testPublishTableFormatMustBeKnownEnum,
+  testPublishValidTablesProceedPastValidation: testPublishValidTablesProceedPastValidation
 };
