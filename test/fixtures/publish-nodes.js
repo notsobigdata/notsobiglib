@@ -99,3 +99,117 @@ var badLayoutPublish = {
   layout: { type: 'board' },
   kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }]
 };
+
+// One raw table (columns: order_id, revenue) and one aggregated table
+// (groupBy: category, metrics: revenue sum + distinct orders), pageSize 2
+// on the raw table so Task 3's pagination tests have >1 page to work
+// with. Reused across Task 1 (validation pass-through), Task 2 (payload
+// correctness), and Task 3 (render/pagination) - one fixture per concern
+// this feature actually needs, not a fresh one per test.
+var tablesPublish = {
+  kind: 'publish',
+  name: 'tablesPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'tables.html' },
+  tables: [
+    {
+      id: 'recent_orders', title: 'Recent orders', mode: 'raw', pageSize: 2,
+      columns: [
+        { field: 'order_id', label: 'Order' },
+        { field: 'revenue', label: 'Revenue', format: 'currency' }
+      ]
+    },
+    {
+      id: 'by_category', title: 'Revenue by category', mode: 'aggregated',
+      groupBy: 'category',
+      metrics: [
+        { label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' },
+        { label: 'Orders', agg: 'count_distinct', field: 'order_id', format: 'integer' }
+      ]
+    }
+  ]
+};
+
+var badTableModePublish = {
+  kind: 'publish',
+  name: 'badTableModePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-mode.html' },
+  tables: [{ id: 'bad', title: 'Bad', mode: 'pivot', columns: [{ field: 'revenue' }] }]
+};
+
+var badTableRawColumnsPublish = {
+  kind: 'publish',
+  name: 'badTableRawColumnsPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-raw-columns.html' },
+  tables: [{ id: 'bad', title: 'Bad', mode: 'raw', columns: [] }]
+};
+
+var badTableRawColumnFieldPublish = {
+  kind: 'publish',
+  name: 'badTableRawColumnFieldPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-raw-column-field.html' },
+  tables: [{ id: 'bad', title: 'Bad', mode: 'raw', columns: [{ label: 'No field' }] }]
+};
+
+var badTableAggregatedGroupByPublish = {
+  kind: 'publish',
+  name: 'badTableAggregatedGroupByPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-groupby.html' },
+  tables: [{ id: 'bad', title: 'Bad', mode: 'aggregated', metrics: [{ label: 'Revenue', agg: 'sum', field: 'revenue' }] }]
+};
+
+var badTableAggregatedMetricsPublish = {
+  kind: 'publish',
+  name: 'badTableAggregatedMetricsPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-metrics.html' },
+  tables: [{ id: 'bad', title: 'Bad', mode: 'aggregated', groupBy: 'category', metrics: [] }]
+};
+
+var badTableMetricFieldPublish = {
+  kind: 'publish',
+  name: 'badTableMetricFieldPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-metric-field.html' },
+  tables: [{ id: 'bad', title: 'Bad', mode: 'aggregated', groupBy: 'category', metrics: [{ label: 'Revenue', agg: 'sum' }] }]
+};
+
+var badTableFormatPublish = {
+  kind: 'publish',
+  name: 'badTableFormatPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-format.html' },
+  tables: [{ id: 'bad', title: 'Bad', mode: 'raw', columns: [{ field: 'revenue', format: 'percent' }] }]
+};
+
+// Two tables sharing an id, each otherwise a valid 'raw' table - proves
+// the duplicate-id check fires before any other per-table validation
+// would mask it (see publish.test.js's
+// testPublishDuplicateTableIdRejected and the whole-branch review
+// finding it fixes: the client-side pager resolves a table by
+// `payload.tables.filter(t => t.id === tableId)[0]`, so a duplicate id
+// silently mis-binds pagination with no error, rather than throwing at
+// config time).
+var duplicateTableIdPublish = {
+  kind: 'publish',
+  name: 'duplicateTableIdPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'dup-table-id.html' },
+  tables: [
+    { id: 'dup', title: 'First', mode: 'raw', columns: [{ field: 'revenue' }] },
+    { id: 'dup', title: 'Second', mode: 'raw', columns: [{ field: 'category' }] }
+  ]
+};

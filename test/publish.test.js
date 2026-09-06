@@ -181,6 +181,163 @@ function testPublishDebugOnlyProbesDriveTarget() {
   assert.strictEqual(report.ok, true, 'expected cli(\'debug\') to report a correctly-configured publish node as ok, got: ' + JSON.stringify(report));
 }
 
+function testPublishTableModeMustBeRawOrAggregated() {
+  var result = runOne('badTableModePublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/mode "raw" or "aggregated"/.test(result.error), 'expected a table-mode error, got: ' + result.error);
+}
+
+function testPublishRawTableRequiresColumns() {
+  var result = runOne('badTableRawColumnsPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/requires a non-empty "columns"/.test(result.error), 'expected a raw-columns error, got: ' + result.error);
+}
+
+function testPublishRawTableColumnRequiresField() {
+  var result = runOne('badTableRawColumnFieldPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/missing "field"/.test(result.error), 'expected a column-field error, got: ' + result.error);
+}
+
+function testPublishAggregatedTableRequiresGroupBy() {
+  var result = runOne('badTableAggregatedGroupByPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/requires "groupBy"/.test(result.error), 'expected a groupBy error, got: ' + result.error);
+}
+
+function testPublishAggregatedTableRequiresMetrics() {
+  var result = runOne('badTableAggregatedMetricsPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/requires a non-empty "metrics"/.test(result.error), 'expected a metrics error, got: ' + result.error);
+}
+
+function testPublishAggregatedMetricRequiresFieldUnlessCount() {
+  var result = runOne('badTableMetricFieldPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/requires "field"/.test(result.error), 'expected a metric-field error, got: ' + result.error);
+}
+
+function testPublishTableFormatMustBeKnownEnum() {
+  var result = runOne('badTableFormatPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/expected one of string, currency, integer, decimal/.test(result.error), 'expected a format-enum error, got: ' + result.error);
+}
+
+// Whole-branch review finding #1: two tables[] entries sharing an id
+// render fine on the static first page (each section keeps its own
+// server-rendered rows) but silently swap datasets the moment the
+// client-side pager's `payload.tables.filter(t => t.id === tableId)[0]`
+// resolves the wrong (first-match) table on "Next"/"Previous". Both
+// entries here are otherwise individually valid 'raw' tables, so this
+// also proves the duplicate-id check fires before any other per-table
+// check could mask it.
+function testPublishDuplicateTableIdRejected() {
+  var result = runOne('duplicateTableIdPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/duplicate table id "dup"/.test(result.error), 'expected a duplicate-table-id error, got: ' + result.error);
+}
+
+function testPublishValidTablesProceedPastValidation() {
+  var result = runOne('tablesPublish');
+  // Same proof pattern as testPublishValidRefProceedsPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation - that BigQuery-shaped error is what proves tables[]
+  // validated cleanly.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
+}
+
+// Pulls the embedded payload back out of a rendered report - non-greedy
+// up to the first ";" (not ";</script>") since that's exactly where
+// JSON.stringify(payload)'s own output ends, before anything else (e.g.
+// Task 3's pagination script) that might follow it in the same <script>
+// tag.
+function extractPayload(html) {
+  var match = html.match(/window\.__PUBLISH_PAYLOAD__ = (.+?);/);
+  assert.ok(match, 'expected an embedded __PUBLISH_PAYLOAD__ in: ' + html);
+  return JSON.parse(match[1]);
+}
+
+function testPublishBuildsRawAndAggregatedTablePayloads() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [
+    ['A', '10', 'o1'],
+    ['A', '20', 'o1'],
+    ['A', '5', 'o3'],
+    ['B', '5', 'o2']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  var rawTable = payload.tables.filter(function (t) { return t.id === 'recent_orders'; })[0];
+  assert.ok(rawTable, 'expected a recent_orders table in payload.tables');
+  assert.deepStrictEqual(rawTable.columns, [{ key: 'order_id', label: 'Order' }, { key: 'revenue', label: 'Revenue' }]);
+  assert.strictEqual(rawTable.pageSize, 2);
+  assert.deepStrictEqual(rawTable.rows, [
+    ['o1', '$10.00'], ['o1', '$20.00'], ['o3', '$5.00'], ['o2', '$5.00']
+  ]);
+
+  var aggTable = payload.tables.filter(function (t) { return t.id === 'by_category'; })[0];
+  assert.ok(aggTable, 'expected a by_category table in payload.tables');
+  assert.deepStrictEqual(aggTable.columns, [
+    { key: 'category', label: 'category' },
+    { key: 'Revenue', label: 'Revenue' },
+    { key: 'Orders', label: 'Orders' }
+  ]);
+  // A: sum(revenue) 10+20+5=35, count_distinct(order_id) over ['o1','o1','o3']=2
+  // B: sum(revenue) 5, count_distinct(order_id) over ['o2']=1
+  assert.deepStrictEqual(aggTable.rows, [
+    ['A', '$35.00', '2'],
+    ['B', '$5.00', '1']
+  ]);
+}
+
+function testPublishRawTableRendersFirstPageAndEmbedsFullData() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [
+    ['A', '10', 'o1'],
+    ['A', '20', 'o1'],
+    ['A', '5', 'o3'],
+    ['B', '5', 'o2']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var sectionMatch = html.match(/<section class="table-block" data-table-id="recent_orders">[\s\S]*?<\/section>/);
+  assert.ok(sectionMatch, 'expected the recent_orders table section in: ' + html);
+  var section = sectionMatch[0];
+
+  // pageSize is 2, 4 raw rows total -> exactly 2 <tr> in the static <tbody>.
+  var bodyMatch = section.match(/<tbody>([\s\S]*?)<\/tbody>/);
+  assert.ok(bodyMatch, 'expected a <tbody> in: ' + section);
+  var rowCount = (bodyMatch[1].match(/<tr>/g) || []).length;
+  assert.strictEqual(rowCount, 2, 'expected exactly pageSize (2) rows in the static first page, got ' + rowCount);
+  assert.ok(/Page 1 of 2/.test(section), 'expected a "Page 1 of 2" label in: ' + section);
+  assert.ok(/\$10\.00/.test(bodyMatch[1]) && /\$20\.00/.test(bodyMatch[1]), 'expected the first two formatted rows in the static page, got: ' + bodyMatch[1]);
+
+  // Full 4-row dataset still embedded for client-side pagination to read.
+  var payload = extractPayload(html);
+  var rawTable = payload.tables.filter(function (t) { return t.id === 'recent_orders'; })[0];
+  assert.strictEqual(rawTable.rows.length, 4, 'expected all 4 rows embedded in the payload for pagination, got ' + rawTable.rows.length);
+
+  assert.ok(/DOMContentLoaded/.test(html), 'expected the pagination script to be emitted when tables[] is non-empty');
+}
+
+function testPublishNoPaginationScriptWithoutTables() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
+
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(!/DOMContentLoaded/.test(html), 'expected no pagination script when config.tables is empty, got: ' + html);
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -191,5 +348,17 @@ module.exports = {
   testPublishLayoutTypeOtherThanLinearRejected: testPublishLayoutTypeOtherThanLinearRejected,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
-  testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget
+  testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,
+  testPublishTableModeMustBeRawOrAggregated: testPublishTableModeMustBeRawOrAggregated,
+  testPublishRawTableRequiresColumns: testPublishRawTableRequiresColumns,
+  testPublishRawTableColumnRequiresField: testPublishRawTableColumnRequiresField,
+  testPublishAggregatedTableRequiresGroupBy: testPublishAggregatedTableRequiresGroupBy,
+  testPublishAggregatedTableRequiresMetrics: testPublishAggregatedTableRequiresMetrics,
+  testPublishAggregatedMetricRequiresFieldUnlessCount: testPublishAggregatedMetricRequiresFieldUnlessCount,
+  testPublishTableFormatMustBeKnownEnum: testPublishTableFormatMustBeKnownEnum,
+  testPublishDuplicateTableIdRejected: testPublishDuplicateTableIdRejected,
+  testPublishValidTablesProceedPastValidation: testPublishValidTablesProceedPastValidation,
+  testPublishBuildsRawAndAggregatedTablePayloads: testPublishBuildsRawAndAggregatedTablePayloads,
+  testPublishRawTableRendersFirstPageAndEmbedsFullData: testPublishRawTableRendersFirstPageAndEmbedsFullData,
+  testPublishNoPaginationScriptWithoutTables: testPublishNoPaginationScriptWithoutTables
 };

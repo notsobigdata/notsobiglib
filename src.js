@@ -4011,6 +4011,12 @@ var NotSoBigData = (function () {
   // docs/superpowers/specs/2026-09-05-publish-kind-design.md for the full
   // design.
 
+  // Shared enum for every publish() value that gets formatted for display -
+  // kpis[] (always required), and tables[]'s raw columns/aggregated metrics
+  // (optional, default 'string') - one array, not a second enum living
+  // elsewhere, per the design spec's §3.
+  var PUBLISH_VALUE_FORMATS = ['string', 'currency', 'integer', 'decimal'];
+
   // Every check a publish node's config must pass before anything is
   // fetched or written - same "throw new Error('publish(): ...')"
   // convention move()/model() already use. Field-by-field, not a schema
@@ -4036,8 +4042,8 @@ var NotSoBigData = (function () {
       if (kpi.agg !== 'count' && !kpi.field) {
         throw new Error('publish(): kpi "' + kpi.label + '" has agg "' + kpi.agg + '", which requires "field".');
       }
-      if (['currency', 'integer', 'decimal'].indexOf(kpi.format) === -1) {
-        throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected "currency", "integer", or "decimal".');
+      if (PUBLISH_VALUE_FORMATS.indexOf(kpi.format) === -1) {
+        throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
       }
     });
     (config.charts || []).forEach(function (chart) {
@@ -4046,6 +4052,49 @@ var NotSoBigData = (function () {
       }
       if (chart.type && chart.type !== 'bar') {
         throw new Error('publish(): chart "' + chart.id + '" has type "' + chart.type + '" - only "bar" is supported.');
+      }
+    });
+    var seenTableIds = emptyMap();
+    (config.tables || []).forEach(function (table) {
+      if (table.id && has(seenTableIds, table.id)) {
+        throw new Error('publish(): duplicate table id "' + table.id + '".');
+      }
+      if (table.id) {
+        seenTableIds[table.id] = true;
+      }
+      if (!table.id || !table.title || ['raw', 'aggregated'].indexOf(table.mode) === -1) {
+        throw new Error('publish(): every table needs "id", "title", and mode "raw" or "aggregated".');
+      }
+      if (table.mode === 'raw') {
+        if (!Array.isArray(table.columns) || !table.columns.length) {
+          throw new Error('publish(): table "' + table.id + '" has mode "raw", which requires a non-empty "columns" array.');
+        }
+        table.columns.forEach(function (column) {
+          if (!column.field) {
+            throw new Error('publish(): table "' + table.id + '" has a column missing "field".');
+          }
+          if (column.format && PUBLISH_VALUE_FORMATS.indexOf(column.format) === -1) {
+            throw new Error('publish(): table "' + table.id + '" column "' + column.field + '" has format "' + column.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
+          }
+        });
+      } else {
+        if (!table.groupBy) {
+          throw new Error('publish(): table "' + table.id + '" has mode "aggregated", which requires "groupBy".');
+        }
+        if (!Array.isArray(table.metrics) || !table.metrics.length) {
+          throw new Error('publish(): table "' + table.id + '" has mode "aggregated", which requires a non-empty "metrics" array.');
+        }
+        table.metrics.forEach(function (metric) {
+          if (!metric.label || !metric.agg) {
+            throw new Error('publish(): table "' + table.id + '" has a metric missing "label" or "agg".');
+          }
+          if (metric.agg !== 'count' && !metric.field) {
+            throw new Error('publish(): table "' + table.id + '" metric "' + metric.label + '" has agg "' + metric.agg + '", which requires "field".');
+          }
+          if (metric.format && PUBLISH_VALUE_FORMATS.indexOf(metric.format) === -1) {
+            throw new Error('publish(): table "' + table.id + '" metric "' + metric.label + '" has format "' + metric.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
+          }
+        });
       }
     });
   }
@@ -4107,6 +4156,23 @@ var NotSoBigData = (function () {
     return rows;
   }
 
+  // Groups rows by the value of `field`, preserving first-seen key order -
+  // shared by charts[] and tables[]'s aggregated mode so the grouping logic
+  // exists once.
+  function groupRowsBy(rows, field) {
+    var groups = emptyMap();
+    var order = [];
+    rows.forEach(function (row) {
+      var key = row[field];
+      if (!has(groups, key)) {
+        groups[key] = [];
+        order.push(key);
+      }
+      groups[key].push(row);
+    });
+    return { groups: groups, order: order };
+  }
+
   function computeAggregate(rows, agg, field) {
     if (agg === 'count') {
       return rows.length;
@@ -4137,6 +4203,9 @@ var NotSoBigData = (function () {
   // v1's schema - add a "locale"/"currencyCode" config key if a real report
   // needs anything else, rather than guessing at one now.
   function formatValue(value, format) {
+    if (format === 'string') {
+      return String(value);
+    }
     if (format === 'integer') {
       return Math.round(value).toLocaleString('en-US');
     }
@@ -4146,28 +4215,64 @@ var NotSoBigData = (function () {
     return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
+  // mode: 'raw' - one output row per source row, column order/labels exactly
+  // as configured. Non-'string' formats coerce through Number() first (row
+  // values from fetchTableRows are always strings, same as
+  // computeAggregate's own "Number(row[field]) || 0" coercion for
+  // kpis/charts) - 'string' format is left raw so ids/dates/free text pass
+  // through unchanged rather than becoming NaN/0.
+  function buildRawTablePayload(table, rows) {
+    var columns = table.columns.map(function (column) {
+      return { key: column.field, label: column.label || column.field };
+    });
+    var tableRows = rows.map(function (row) {
+      return table.columns.map(function (column) {
+        var format = column.format || 'string';
+        var raw = row[column.field];
+        return formatValue(format === 'string' ? raw : (Number(raw) || 0), format);
+      });
+    });
+    return { id: table.id, title: table.title, pageSize: table.pageSize || 25, columns: columns, rows: tableRows };
+  }
+
+  // mode: 'aggregated' - identical grouping to charts' own groupBy handling
+  // above; the groupBy value itself is left as the raw string BigQuery
+  // returned (not run through formatValue), matching how charts already
+  // render chart.data[].groupValue directly with no formatting step.
+  function buildAggregatedTablePayload(table, rows) {
+    var grouped = groupRowsBy(rows, table.groupBy);
+    var groups = grouped.groups;
+    var order = grouped.order;
+    var columns = [{ key: table.groupBy, label: table.groupBy }].concat(table.metrics.map(function (metric) {
+      return { key: metric.label, label: metric.label };
+    }));
+    var tableRows = order.map(function (key) {
+      var groupRows = groups[key];
+      var cells = table.metrics.map(function (metric) {
+        var value = computeAggregate(groupRows, metric.agg, metric.field);
+        return formatValue(value, metric.format || 'string');
+      });
+      return [key].concat(cells);
+    });
+    return { id: table.id, title: table.title, pageSize: table.pageSize || 25, columns: columns, rows: tableRows };
+  }
+
   function buildReportPayload(config, rows) {
     var kpis = (config.kpis || []).map(function (kpi) {
       var value = computeAggregate(rows, kpi.agg, kpi.field);
       return { label: kpi.label, value: value, formatted: formatValue(value, kpi.format) };
     });
     var charts = (config.charts || []).map(function (chart) {
-      var groups = emptyMap();
-      var order = [];
-      rows.forEach(function (row) {
-        var key = row[chart.groupBy];
-        if (!has(groups, key)) {
-          groups[key] = [];
-          order.push(key);
-        }
-        groups[key].push(row);
-      });
-      var data = order.map(function (key) {
-        return { groupValue: key, total: computeAggregate(groups[key], chart.metric.agg, chart.metric.field) };
+      var grouped = groupRowsBy(rows, chart.groupBy);
+      var data = grouped.order.map(function (key) {
+        return { groupValue: key, total: computeAggregate(grouped.groups[key], chart.metric.agg, chart.metric.field) };
       });
       return { id: chart.id, title: chart.title, data: data };
     });
-    return { kpis: kpis, charts: charts };
+    var tables = (config.tables || []).map(function (table) {
+      return table.mode === 'raw' ? buildRawTablePayload(table, rows) : buildAggregatedTablePayload(table, rows);
+    });
+    return { kpis: kpis, charts: charts, tables: tables };
   }
 
   function escapeHtml(value) {
@@ -4218,7 +4323,81 @@ var NotSoBigData = (function () {
     '.chart { border-top: 1px solid var(--paper-line); padding-top: 16px; margin-top: 16px; }',
     '.chart h2 { font-size: 14px; }',
     '.chart-label, .chart-value { font-family: var(--mono); font-size: 12px; fill: var(--ink); }',
-    '.chart-bar { fill: var(--teal); }'
+    '.chart-bar { fill: var(--teal); }',
+    '.table-block { border-top: 1px solid var(--paper-line); padding-top: 16px; margin-top: 16px; }',
+    '.table-block h2 { font-size: 14px; }',
+    '.table-block table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }',
+    '.table-block th, .table-block td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); font-variant-numeric: tabular-nums; }',
+    '.table-pager { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-family: var(--mono); font-size: 12px; }',
+    '.table-pager button { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 8px; cursor: pointer; }',
+    '.table-pager button:disabled { color: var(--ink-soft); cursor: default; }'
+  ].join('\n');
+
+  // Static first page (readable with zero JS, same as the KPI cards/SVG
+  // chart above) plus inert-without-JS pager controls. table.rows already
+  // holds every row, pre-formatted (see buildRawTablePayload/
+  // buildAggregatedTablePayload) - only the first pageSize rows render here;
+  // the rest reaches the browser via the existing __PUBLISH_PAYLOAD__ embed,
+  // for TABLE_PAGINATION_JS below to page through.
+  function renderTableSection(table) {
+    var firstPageRows = table.rows.slice(0, table.pageSize);
+    var pageCount = Math.max(1, Math.ceil(table.rows.length / table.pageSize));
+    var headerCells = table.columns.map(function (column) {
+      return '<th>' + escapeHtml(column.label) + '</th>';
+    }).join('');
+    var bodyRows = firstPageRows.map(function (row) {
+      return '<tr>' + row.map(function (cell) { return '<td>' + escapeHtml(cell) + '</td>'; }).join('') + '</tr>';
+    }).join('');
+    return '<section class="table-block" data-table-id="' + escapeHtml(table.id) + '">'
+      + '<h2>' + escapeHtml(table.title) + '</h2>'
+      + '<table><thead><tr>' + headerCells + '</tr></thead><tbody>' + bodyRows + '</tbody></table>'
+      + '<div class="table-pager">'
+      + '<button type="button" class="table-prev" disabled>Previous</button>'
+      + '<span class="table-page-label">Page 1 of ' + pageCount + '</span>'
+      + '<button type="button" class="table-next"' + (pageCount <= 1 ? ' disabled' : '') + '>Next</button>'
+      + '</div></section>';
+  }
+
+  // One generic paginator for every table.table-block on the page - reads
+  // columns/rows/pageSize back off window.__PUBLISH_PAYLOAD__ by
+  // data-table-id, never re-computes or re-formats a value (everything's
+  // already a formatted string in the payload). Builds <tr>/<td> via
+  // createElement + textContent only, per this repo's rule against
+  // innerHTML/string-concatenated markup on payload-sourced data - see the
+  // design spec's Render section.
+  var TABLE_PAGINATION_JS = [
+    'document.addEventListener("DOMContentLoaded", function () {',
+    '  var payload = window.__PUBLISH_PAYLOAD__;',
+    '  Array.prototype.forEach.call(document.querySelectorAll(".table-block"), function (section) {',
+    '    var tableId = section.getAttribute("data-table-id");',
+    '    var table = payload.tables.filter(function (t) { return t.id === tableId; })[0];',
+    '    if (!table) { return; }',
+    '    var page = 0;',
+    '    var pageCount = Math.max(1, Math.ceil(table.rows.length / table.pageSize));',
+    '    var tbody = section.querySelector("tbody");',
+    '    var prevBtn = section.querySelector(".table-prev");',
+    '    var nextBtn = section.querySelector(".table-next");',
+    '    var pageLabel = section.querySelector(".table-page-label");',
+    '    function render() {',
+    '      while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }',
+    '      var start = page * table.pageSize;',
+    '      table.rows.slice(start, start + table.pageSize).forEach(function (row) {',
+    '        var tr = document.createElement("tr");',
+    '        row.forEach(function (cell) {',
+    '          var td = document.createElement("td");',
+    '          td.textContent = cell;',
+    '          tr.appendChild(td);',
+    '        });',
+    '        tbody.appendChild(tr);',
+    '      });',
+    '      pageLabel.textContent = "Page " + (page + 1) + " of " + pageCount;',
+    '      prevBtn.disabled = page === 0;',
+    '      nextBtn.disabled = page >= pageCount - 1;',
+    '    }',
+    '    prevBtn.addEventListener("click", function () { if (page > 0) { page -= 1; render(); } });',
+    '    nextBtn.addEventListener("click", function () { if (page < pageCount - 1) { page += 1; render(); } });',
+    '  });',
+    '});'
   ].join('\n');
 
   function renderReportHtml(payload, config) {
@@ -4229,11 +4408,16 @@ var NotSoBigData = (function () {
     var chartSections = payload.charts.map(function (chart) {
       return '<section class="chart"><h2>' + escapeHtml(chart.title) + '</h2>' + renderBarChartSvg(chart) + '</section>';
     }).join('');
+    var tableSections = payload.tables.map(renderTableSection).join('');
+    var script = 'window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';';
+    if (payload.tables.length) {
+      script += TABLE_PAGINATION_JS;
+    }
     return '<!doctype html><html><head><meta charset="utf-8">'
       + '<title>' + escapeHtml(config.target.fileName) + '</title>'
       + '<style>' + REPORT_CSS + '</style></head><body>'
-      + '<main><div class="kpis">' + kpiCards + '</div>' + chartSections + '</main>'
-      + '<script>window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';</script>'
+      + '<main><div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections + '</main>'
+      + '<script>' + script + '</script>'
       + '</body></html>';
   }
 
