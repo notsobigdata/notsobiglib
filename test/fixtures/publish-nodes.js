@@ -87,7 +87,91 @@ var badChartTypePublish = {
   source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
   target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-chart-type.html' },
   kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }],
-  charts: [{ id: 'by_category', type: 'line', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }]
+  charts: [{ id: 'by_category', type: 'scatter', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var chartSeriesOnNonBarPublish = {
+  kind: 'publish',
+  name: 'chartSeriesOnNonBarPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'chart-series-on-non-bar.html' },
+  charts: [{ id: 'trend', type: 'line', title: 'Trend', groupBy: 'day', series: 'channel', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var chartDonutOnNonPiePublish = {
+  kind: 'publish',
+  name: 'chartDonutOnNonPiePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'chart-donut-on-non-pie.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', donut: true, metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var chartBadStackingPublish = {
+  kind: 'publish',
+  name: 'chartBadStackingPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'chart-bad-stacking.html' },
+  charts: [{ id: 'by_category_channel', type: 'bar', title: 'By category/channel', groupBy: 'category', series: 'channel', stacking: 'overlapping', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+// Proves the widened enum (bar/line/pie) plus series+stacking and donut
+// all pass validation - fails only at the un-shimmed BigQuery call, same
+// proof pattern as testPublishValidRefProceedsPastValidation.
+var chartsV2Publish = {
+  kind: 'publish',
+  name: 'chartsV2Publish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'charts-v2.html' },
+  charts: [
+    { id: 'trend', type: 'line', title: 'Trend', groupBy: 'day', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'share', type: 'pie', title: 'Share', groupBy: 'category', donut: true, metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'by_category_channel', type: 'bar', title: 'By category/channel', groupBy: 'category', series: 'channel', stacking: 'stacked', metric: { agg: 'sum', field: 'revenue' } }
+  ]
+};
+
+var lineChartPublish = {
+  kind: 'publish',
+  name: 'lineChartPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'line-chart.html' },
+  charts: [{ id: 'trend', type: 'line', title: 'Trend', groupBy: 'day', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var lineChartDatePublish = {
+  kind: 'publish',
+  name: 'lineChartDatePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'line-chart-date.html' },
+  charts: [{ id: 'trend', type: 'line', title: 'Trend', groupBy: 'order_date', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var seriesChartPublish = {
+  kind: 'publish',
+  name: 'seriesChartPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'series-chart.html' },
+  charts: [{ id: 'by_category_channel', type: 'bar', title: 'By category/channel', groupBy: 'category', series: 'channel', stacking: 'stacked', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+// Regression test for cell-key collision: values with spaces must not
+// cross-contaminate. E.g. groupKey='New York', seriesKey='Paid Search'
+// vs groupKey='New', seriesKey='York Paid Search' would both produce
+// cellKey='New York Paid Search' with string concatenation - a silent
+// data corruption. Nested maps prevent collision.
+var seriesChartWithSpacesPublish = {
+  kind: 'publish',
+  name: 'seriesChartWithSpacesPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'series-chart-spaces.html' },
+  charts: [{ id: 'by_location_channel', type: 'bar', title: 'By location/channel', groupBy: 'location', series: 'channel_type', stacking: 'grouped', metric: { agg: 'sum', field: 'revenue' } }]
 };
 
 var badLayoutPublish = {
@@ -212,4 +296,36 @@ var duplicateTableIdPublish = {
     { id: 'dup', title: 'First', mode: 'raw', columns: [{ field: 'revenue' }] },
     { id: 'dup', title: 'Second', mode: 'raw', columns: [{ field: 'category' }] }
   ]
+};
+
+// Two charts sharing an id - same rationale as duplicateTableIdPublish
+// above: CHART_CLIENT_JS's DOMContentLoaded handler resolves a chart by
+// `payload.charts.filter(c => c.id === chartId)[0]`, so a duplicate chart
+// id would silently mis-bind a mount point to the wrong chart's data with
+// no error, rather than throwing at config time. Both entries here are
+// otherwise individually valid bar charts.
+var duplicateChartIdPublish = {
+  kind: 'publish',
+  name: 'duplicateChartIdPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'dup-chart-id.html' },
+  charts: [
+    { id: 'dup', type: 'bar', title: 'First', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'dup', type: 'bar', title: 'Second', groupBy: 'channel', metric: { agg: 'sum', field: 'revenue' } }
+  ]
+};
+
+// No "type" key at all - proves chart.type's default-to-'bar' fallback
+// (`var chartType = chart.type || 'bar';`) both passes validation and
+// produces the plain {groupValue, total} payload shape, not the series
+// {groupValue, values} shape - this default path had zero test coverage
+// before the whole-branch review caught it.
+var chartTypeOmittedPublish = {
+  kind: 'publish',
+  name: 'chartTypeOmittedPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'chart-type-omitted.html' },
+  charts: [{ id: 'by_category', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }]
 };

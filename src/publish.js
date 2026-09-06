@@ -12,6 +12,27 @@
 // elsewhere, per the design spec's §3.
 var PUBLISH_VALUE_FORMATS = ['string', 'currency', 'integer', 'decimal'];
 
+// The chart types charts[] accepts - see the design spec's §2. 'bar' also
+// accepts an optional series/stacking pair for grouped/stacked bars; that
+// isn't a separate type, just an optional second dimension on 'bar'.
+var CHART_TYPES = ['bar', 'line', 'pie'];
+
+// Pinned exact version, never a floating tag - see CLAUDE.md's
+// "Downstream consumers pinned to a release" for the same reasoning
+// applied to a different kind of pin: a file reopened a year from now
+// must load the exact D3 build it loaded the day it was generated.
+var D3_CDN_URL = 'https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js';
+
+// Subresource Integrity for the exact D3_CDN_URL build above - pulled live
+// from api.cdnjs.com/libraries/d3/7.9.0?fields=sri. A pinned version number
+// pins a path, not the bytes served at it; this pins the bytes. Generated
+// reports embed the user's full BigQuery result set in
+// window.__PUBLISH_PAYLOAD__ on the same page this script loads into, and
+// this library itself gets eval()'d with live OAuth access, so a swapped
+// CDN response is worth defending against even though cdnjs is generally
+// trusted.
+var D3_CDN_INTEGRITY = 'sha512-vc58qvvBdrDR4etbxMdlTt4GBQk1qjvyORR2nrsPsFPyrs+/u5c3+1Ct6upOgdZoIl7eq6k3a1UPDSNAQi/32A==';
+
 // Every check a publish node's config must pass before anything is
 // fetched or written - same "throw new Error('publish(): ...')"
 // convention move()/model() already use. Field-by-field, not a schema
@@ -41,12 +62,29 @@ function validatePublishConfig(config) {
       throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
     }
   });
+  var seenChartIds = emptyMap();
   (config.charts || []).forEach(function (chart) {
+    if (chart.id && has(seenChartIds, chart.id)) {
+      throw new Error('publish(): duplicate chart id "' + chart.id + '".');
+    }
+    if (chart.id) {
+      seenChartIds[chart.id] = true;
+    }
     if (!chart.id || !chart.title || !chart.groupBy || !chart.metric || !chart.metric.agg) {
       throw new Error('publish(): every chart needs "id", "title", "groupBy", and "metric.agg".');
     }
-    if (chart.type && chart.type !== 'bar') {
-      throw new Error('publish(): chart "' + chart.id + '" has type "' + chart.type + '" - only "bar" is supported.');
+    var chartType = chart.type || 'bar';
+    if (CHART_TYPES.indexOf(chartType) === -1) {
+      throw new Error('publish(): chart "' + chart.id + '" has type "' + chartType + '" - expected one of ' + CHART_TYPES.join(', ') + '.');
+    }
+    if ((chart.series || chart.stacking) && chartType !== 'bar') {
+      throw new Error('publish(): chart "' + chart.id + '" has "series"/"stacking", which only "bar" charts support.');
+    }
+    if (chart.stacking && ['grouped', 'stacked'].indexOf(chart.stacking) === -1) {
+      throw new Error('publish(): chart "' + chart.id + '" has stacking "' + chart.stacking + '" - expected "grouped" or "stacked".');
+    }
+    if (chart.donut !== undefined && chartType !== 'pie') {
+      throw new Error('publish(): chart "' + chart.id + '" has "donut", which only "pie" charts support.');
     }
   });
   var seenTableIds = emptyMap();
@@ -252,17 +290,80 @@ function buildAggregatedTablePayload(table, rows) {
   return { id: table.id, title: table.title, pageSize: table.pageSize || 25, columns: columns, rows: tableRows };
 }
 
+// Numeric-aware ascending compare for line charts' groupValue ordering -
+// numeric if both sides parse as numbers (covers plain numbers and
+// ISO-format date strings' *year* component alone would sort wrong
+// numerically, which is exactly why non-numeric strings fall through to
+// plain string compare: 'YYYY-MM-DD' sorts correctly as a string already).
+function compareGroupValues(a, b) {
+  var numA = Number(a);
+  var numB = Number(b);
+  if (!isNaN(numA) && !isNaN(numB) && a !== '' && b !== '') {
+    return numA - numB;
+  }
+  return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+}
+
+// One chart's payload - either the plain {groupValue, total} shape every
+// chart type has used since v1 (bar/pie, and line which additionally
+// sorts it), or, when chart.series is set, a dense {groupValue, values}
+// matrix: every seriesKeys entry present in every group's `values`, zero
+// where the source rows had no matching combination. Dense on purpose -
+// Task 3's client-side d3.stack() code never has to special-case a
+// missing combination.
+function buildChartPayload(chart, rows) {
+  var chartType = chart.type || 'bar';
+  if (chart.series) {
+    var seriesSeen = emptyMap();
+    var seriesKeys = [];
+    var groupSeen = emptyMap();
+    var groupKeys = [];
+    var cellRows = emptyMap();
+    rows.forEach(function (row) {
+      var groupKey = row[chart.groupBy];
+      var seriesKey = row[chart.series];
+      if (!has(groupSeen, groupKey)) {
+        groupSeen[groupKey] = true;
+        groupKeys.push(groupKey);
+      }
+      if (!has(seriesSeen, seriesKey)) {
+        seriesSeen[seriesKey] = true;
+        seriesKeys.push(seriesKey);
+      }
+      if (!cellRows[groupKey]) {
+        cellRows[groupKey] = emptyMap();
+      }
+      if (!cellRows[groupKey][seriesKey]) {
+        cellRows[groupKey][seriesKey] = [];
+      }
+      cellRows[groupKey][seriesKey].push(row);
+    });
+    var data = groupKeys.map(function (groupKey) {
+      var values = emptyMap();
+      seriesKeys.forEach(function (seriesKey) {
+        values[seriesKey] = computeAggregate((cellRows[groupKey] && cellRows[groupKey][seriesKey]) || [], chart.metric.agg, chart.metric.field);
+      });
+      return { groupValue: groupKey, values: values };
+    });
+    return { id: chart.id, title: chart.title, type: chartType, series: chart.series, stacking: chart.stacking || 'grouped', seriesKeys: seriesKeys, data: data };
+  }
+  var grouped = groupRowsBy(rows, chart.groupBy);
+  var data = grouped.order.map(function (key) {
+    return { groupValue: key, total: computeAggregate(grouped.groups[key], chart.metric.agg, chart.metric.field) };
+  });
+  if (chartType === 'line') {
+    data.sort(function (a, b) { return compareGroupValues(a.groupValue, b.groupValue); });
+  }
+  return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data };
+}
+
 function buildReportPayload(config, rows) {
   var kpis = (config.kpis || []).map(function (kpi) {
     var value = computeAggregate(rows, kpi.agg, kpi.field);
     return { label: kpi.label, value: value, formatted: formatValue(value, kpi.format) };
   });
   var charts = (config.charts || []).map(function (chart) {
-    var grouped = groupRowsBy(rows, chart.groupBy);
-    var data = grouped.order.map(function (key) {
-      return { groupValue: key, total: computeAggregate(grouped.groups[key], chart.metric.agg, chart.metric.field) };
-    });
-    return { id: chart.id, title: chart.title, data: data };
+    return buildChartPayload(chart, rows);
   });
   var tables = (config.tables || []).map(function (table) {
     return table.mode === 'raw' ? buildRawTablePayload(table, rows) : buildAggregatedTablePayload(table, rows);
@@ -277,26 +378,6 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-}
-
-// One bar per chart.data entry, widths scaled against the largest total
-// in the chart - a template-string SVG, not <canvas> and not a charting
-// library, per the design spec's "zero dependency" principle.
-function renderBarChartSvg(chart) {
-  var width = 480;
-  var barHeight = 28;
-  var gap = 8;
-  var labelWidth = 160;
-  var maxTotal = chart.data.reduce(function (max, d) { return Math.max(max, d.total); }, 0) || 1;
-  var height = chart.data.length * (barHeight + gap);
-  var bars = chart.data.map(function (d, index) {
-    var y = index * (barHeight + gap);
-    var barWidth = Math.max(0, Math.round((width - labelWidth) * (d.total / maxTotal)));
-    return '<text x="0" y="' + (y + barHeight / 2 + 4) + '" class="chart-label">' + escapeHtml(d.groupValue) + '</text>'
-      + '<rect x="' + labelWidth + '" y="' + y + '" width="' + barWidth + '" height="' + barHeight + '" class="chart-bar"></rect>'
-      + '<text x="' + (labelWidth + barWidth + 6) + '" y="' + (y + barHeight / 2 + 4) + '" class="chart-value">' + d.total.toLocaleString('en-US') + '</text>';
-  }).join('');
-  return '<svg viewBox="0 0 ' + width + ' ' + (height || barHeight) + '" width="100%" height="' + (height || barHeight) + '" role="img" aria-label="' + escapeHtml(chart.title) + '">' + bars + '</svg>';
 }
 
 // Fixed design tokens - see the design spec's "Design tokens" section.
@@ -395,22 +476,138 @@ var TABLE_PAGINATION_JS = [
   '});'
 ].join('\n');
 
+// Client-side chart draw dispatch, mirroring TABLE_PAGINATION_JS's
+// authoring pattern (an array of literal JS-source lines, joined once).
+// buildReportPayload (Task 2) already computed every number; this only
+// draws it. Reuses REPORT_CSS's existing .chart-bar/.chart-label/
+// .chart-value class names on the elements D3 creates, so the fixed
+// design tokens apply without any CSS change - see the design spec §5.
+var CHART_CLIENT_JS = [
+  'function renderChartFallback(containerId, chart) {',
+  '  var container = document.getElementById(containerId);',
+  '  var list = document.createElement("ul");',
+  '  (chart.data || []).forEach(function (d) {',
+  '    var li = document.createElement("li");',
+  '    var value = d.total !== undefined ? d.total : Object.keys(d.values || {}).reduce(function (sum, k) { return sum + d.values[k]; }, 0);',
+  '    li.textContent = d.groupValue + ": " + value.toLocaleString("en-US");',
+  '    list.appendChild(li);',
+  '  });',
+  '  container.appendChild(list);',
+  '}',
+  'function drawBarChart(containerId, chart) {',
+  '  var width = 480, height = Math.max(240, chart.data.length * 36), margin = { top: 10, right: 40, bottom: 10, left: 160 };',
+  '  var svg = d3.select(document.getElementById(containerId)).append("svg")',
+  '    .attr("viewBox", "0 0 " + width + " " + height).attr("width", "100%").attr("height", height)',
+  '    .attr("role", "img").attr("aria-label", chart.title);',
+  '  var groupValues = chart.data.map(function (d) { return d.groupValue; });',
+  '  var y = d3.scaleBand().domain(groupValues).range([margin.top, height - margin.bottom]).padding(0.2);',
+  '  var color = d3.scaleOrdinal().range(["var(--teal)", "var(--coral)", "var(--ink-soft)", "var(--teal-soft)"]);',
+  '  if (chart.seriesKeys && chart.seriesKeys.length) {',
+  '    color.domain(chart.seriesKeys);',
+  '    if (chart.stacking === "stacked") {',
+  '      var stackRows = chart.data.map(function (d) { var row = { groupValue: d.groupValue }; chart.seriesKeys.forEach(function (k) { row[k] = d.values[k]; }); return row; });',
+  '      var stacked = d3.stack().keys(chart.seriesKeys)(stackRows);',
+  '      var maxTotal = d3.max(stackRows, function (row) { return chart.seriesKeys.reduce(function (sum, k) { return sum + row[k]; }, 0); }) || 1;',
+  '      var x = d3.scaleLinear().domain([0, maxTotal]).range([margin.left, width - margin.right]);',
+  '      svg.append("g").selectAll("g").data(stacked).join("g")',
+  '        .attr("class", "chart-bar").style("fill", function (d) { return color(d.key); })',
+  '        .selectAll("rect").data(function (d) { return d; }).join("rect")',
+  '        .attr("y", function (d) { return y(d.data.groupValue); }).attr("x", function (d) { return x(d[0]); })',
+  '        .attr("width", function (d) { return x(d[1]) - x(d[0]); }).attr("height", y.bandwidth());',
+  '    } else {',
+  '      var maxValue = d3.max(chart.data, function (d) { return d3.max(chart.seriesKeys, function (k) { return d.values[k]; }); }) || 1;',
+  '      var x = d3.scaleLinear().domain([0, maxValue]).range([margin.left, width - margin.right]);',
+  '      var y1 = d3.scaleBand().domain(chart.seriesKeys).range([0, y.bandwidth()]).padding(0.05);',
+  '      svg.append("g").selectAll("g").data(chart.data).join("g")',
+  '        .attr("transform", function (d) { return "translate(0," + y(d.groupValue) + ")"; })',
+  '        .selectAll("rect").data(function (d) { return chart.seriesKeys.map(function (k) { return { key: k, value: d.values[k] }; }); }).join("rect")',
+  '        .attr("class", "chart-bar").style("fill", function (d) { return color(d.key); })',
+  '        .attr("y", function (d) { return y1(d.key); }).attr("x", margin.left)',
+  '        .attr("width", function (d) { return x(d.value) - margin.left; }).attr("height", y1.bandwidth());',
+  '    }',
+  '  } else {',
+  '    var maxTotal = d3.max(chart.data, function (d) { return d.total; }) || 1;',
+  '    var x = d3.scaleLinear().domain([0, maxTotal]).range([margin.left, width - margin.right]);',
+  '    svg.append("g").selectAll("rect").data(chart.data).join("rect")',
+  '      .attr("class", "chart-bar").attr("y", function (d) { return y(d.groupValue); }).attr("x", margin.left)',
+  '      .attr("width", function (d) { return Math.max(0, x(d.total) - margin.left); }).attr("height", y.bandwidth());',
+  '    svg.append("g").selectAll("text").data(chart.data).join("text")',
+  '      .attr("class", "chart-value").attr("x", function (d) { return x(d.total) + 6; })',
+  '      .attr("y", function (d) { return y(d.groupValue) + y.bandwidth() / 2 + 4; }).text(function (d) { return d.total.toLocaleString("en-US"); });',
+  '  }',
+  '  svg.append("g").selectAll("text.chart-label").data(groupValues).join("text")',
+  '    .attr("class", "chart-label").attr("x", 0).attr("y", function (d) { return y(d) + y.bandwidth() / 2 + 4; }).text(function (d) { return d; });',
+  '}',
+  'function drawLineChart(containerId, chart) {',
+  '  var width = 480, height = 240, margin = { top: 10, right: 20, bottom: 30, left: 50 };',
+  '  var svg = d3.select(document.getElementById(containerId)).append("svg")',
+  '    .attr("viewBox", "0 0 " + width + " " + height).attr("width", "100%").attr("height", height)',
+  '    .attr("role", "img").attr("aria-label", chart.title);',
+  '  var x = d3.scalePoint().domain(chart.data.map(function (d) { return d.groupValue; })).range([margin.left, width - margin.right]);',
+  '  var maxTotal = d3.max(chart.data, function (d) { return d.total; }) || 1;',
+  '  var y = d3.scaleLinear().domain([0, maxTotal]).range([height - margin.bottom, margin.top]);',
+  '  var line = d3.line().x(function (d) { return x(d.groupValue); }).y(function (d) { return y(d.total); });',
+  '  svg.append("path").datum(chart.data).attr("class", "chart-bar").style("fill", "none").attr("stroke", "#3F6659").attr("stroke-width", 2).attr("d", line);',
+  '  svg.append("g").selectAll("circle").data(chart.data).join("circle")',
+  '    .attr("class", "chart-bar").attr("cx", function (d) { return x(d.groupValue); }).attr("cy", function (d) { return y(d.total); }).attr("r", 3);',
+  '  svg.append("g").selectAll("text").data(chart.data).join("text")',
+  '    .attr("class", "chart-label").attr("x", function (d) { return x(d.groupValue); }).attr("y", height - 8).attr("text-anchor", "middle").text(function (d) { return d.groupValue; });',
+  '}',
+  'function drawPieChart(containerId, chart) {',
+  '  var width = 320, height = 320, radius = Math.min(width, height) / 2 - 20;',
+  '  var svg = d3.select(document.getElementById(containerId)).append("svg")',
+  '    .attr("viewBox", "0 0 " + width + " " + height).attr("width", "100%").attr("height", height)',
+  '    .attr("role", "img").attr("aria-label", chart.title)',
+  '    .append("g").attr("transform", "translate(" + width / 2 + "," + height / 2 + ")");',
+  '  var color = d3.scaleOrdinal().range(["var(--teal)", "var(--coral)", "var(--ink-soft)", "var(--teal-soft)"]);',
+  '  var pieGen = d3.pie().value(function (d) { return d.total; });',
+  '  var arcGen = d3.arc().innerRadius(chart.donut ? radius * 0.55 : 0).outerRadius(radius);',
+  '  var pieData = pieGen(chart.data);',
+  '  svg.selectAll("path").data(pieData).join("path")',
+  '    .attr("class", "chart-bar").style("fill", function (d) { return color(d.data.groupValue); }).attr("d", arcGen);',
+  '  svg.selectAll("text").data(pieData).join("text")',
+  '    .attr("class", "chart-label").attr("transform", function (d) { return "translate(" + arcGen.centroid(d) + ")"; })',
+  '    .attr("text-anchor", "middle").text(function (d) { return d.data.groupValue; });',
+  '}',
+  'document.addEventListener("DOMContentLoaded", function () {',
+  '  var payload = window.__PUBLISH_PAYLOAD__;',
+  '  Array.prototype.forEach.call(document.querySelectorAll(".chart"), function (section) {',
+  '    var chartId = section.getAttribute("data-chart-id");',
+  '    var chart = payload.charts.filter(function (c) { return c.id === chartId; })[0];',
+  '    if (!chart) { return; }',
+  '    var containerId = "chart-" + chartId;',
+  '    if (typeof d3 === "undefined") {',
+  '      renderChartFallback(containerId, chart);',
+  '      return;',
+  '    }',
+  '    if (chart.type === "line") { drawLineChart(containerId, chart); }',
+  '    else if (chart.type === "pie") { drawPieChart(containerId, chart); }',
+  '    else { drawBarChart(containerId, chart); }',
+  '  });',
+  '});'
+].join('\n');
+
 function renderReportHtml(payload, config) {
   var kpiCards = payload.kpis.map(function (kpi) {
     return '<div class="kpi"><div class="kpi-label">' + escapeHtml(kpi.label) + '</div>'
       + '<div class="kpi-value">' + escapeHtml(kpi.formatted) + '</div></div>';
   }).join('');
   var chartSections = payload.charts.map(function (chart) {
-    return '<section class="chart"><h2>' + escapeHtml(chart.title) + '</h2>' + renderBarChartSvg(chart) + '</section>';
+    return '<section class="chart" data-chart-id="' + escapeHtml(chart.id) + '"><h2>' + escapeHtml(chart.title) + '</h2>'
+      + '<div class="chart-canvas" id="chart-' + escapeHtml(chart.id) + '"></div></section>';
   }).join('');
   var tableSections = payload.tables.map(renderTableSection).join('');
   var script = 'window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';';
   if (payload.tables.length) {
     script += TABLE_PAGINATION_JS;
   }
+  if (payload.charts.length) {
+    script += CHART_CLIENT_JS;
+  }
+  var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
   return '<!doctype html><html><head><meta charset="utf-8">'
     + '<title>' + escapeHtml(config.target.fileName) + '</title>'
-    + '<style>' + REPORT_CSS + '</style></head><body>'
+    + '<style>' + REPORT_CSS + '</style>' + d3Script + '</head><body>'
     + '<main><div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections + '</main>'
     + '<script>' + script + '</script>'
     + '</body></html>';

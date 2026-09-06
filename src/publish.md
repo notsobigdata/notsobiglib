@@ -61,3 +61,38 @@ only its own `buildXTablePayload` function producing this same shape,
 never a second render/pagination path. See
 `docs/superpowers/specs/2026-09-06-publish-table-block-design.md`'s §4
 for the fuller rationale.
+
+## Why D3 over Chart.js/p5.js/a declarative grammar
+
+Considered and rejected during brainstorming (see
+`docs/superpowers/specs/2026-09-06-publish-d3-charts-design.md`'s §3
+for the full rationale): Chart.js renders to `<canvas>`, which would
+mean re-implementing `REPORT_CSS`'s existing styling as JS config per
+chart instead of reusing the `.chart-bar`/`.chart-label`/`.chart-value`
+classes that already exist; p5.js has no chart primitives (scales,
+axes, `pie()`/`stack()`) at all, so it would mean building those from
+scratch, more work than D3 for no benefit; a declarative grammar
+library (e.g. Observable Plot) was speculative for a fixed set of 4
+chart types and had shakier native pie/donut support than D3's own
+`d3-shape` module. D3 also renders actual SVG/DOM elements, so
+`CHART_CLIENT_JS`'s draw functions apply the same class names
+`renderBarChartSvg` used to hand-write, and `REPORT_CSS` needed no
+changes.
+
+`buildChartPayload` stays pure and server-side in this phase — no
+aggregation happens in the browser. Cross-chart interactivity (Phase
+2, not designed yet) is the point where the browser will need to
+re-aggregate against a shared filter/selection state; this phase
+deliberately doesn't build that machinery early.
+
+**Set a per-item chart color with `.style('fill', ...)`, never
+`.attr('fill', ...)`.** `REPORT_CSS`'s `.chart-bar { fill: var(--teal); }`
+class rule always wins over a presentation attribute set via
+`.attr("fill", ...)` regardless of specificity, because a stylesheet rule
+beats a presentation attribute outright in SVG/CSS — only an inline style
+(`.style(...)`) outranks a stylesheet rule. This exact bug was caught
+twice during this branch's review: once on the pie/stacked/grouped-bar
+color scales, then again on the plain line chart's `fill: none`. Any new
+call site that sets `fill` (or any other CSS property `.chart-bar`/
+`.chart-label`/`.chart-value` also declares) on a D3-created element must
+use `.style(...)`, not `.attr(...)`.
