@@ -3526,14 +3526,14 @@ var NotSoBigData = (function () {
   // why the previous "would double BigQuery compute" reasoning here didn't
   // hold).
   //
-  // The ref()-resolution closure both model() and compileModel() need:
-  // a name resolves against either a declared model (via
-  // resolveModelConfig()+qualifiedRelation()) or a bigquery-target move node
-  // (config.moveRefTargets, already resolved and validated once by
-  // expandModelNodes() at discovery time - see its own comment). Extracted
-  // out of model() rather than duplicated into compileModel() below, since
-  // the two functions differ only in what they do with the compiled SQL
-  // (run it vs. return it), not in how a ref() gets substituted.
+  // Not a model - must be a bigquery-target move node lookup, which is a
+  // cheap lookup, not a fresh resolution - same "redundant re-validation,
+  // cheap defense in depth" posture the model branch already has via
+  // resolveModelConfig's own throw. Unreachable in practice (discovery
+  // already rejects anything that wouldn't resolve here), but a node's own
+  // config could in principle be mutated between discovery and run, so this
+  // still throws rather than substituting undefined into a live BigQuery
+  // statement.
   //
   // The two-source ref() lookup (declared model, or a bigquery-target move
   // node) as structured data, extracted out of buildRefResolver() below so
@@ -3561,14 +3561,14 @@ var NotSoBigData = (function () {
     return null;
   }
 
-  // Not a model - must be a bigquery-target move node lookup, which is a
-  // cheap lookup, not a fresh resolution - same "redundant re-validation,
-  // cheap defense in depth" posture the model branch already has via
-  // resolveModelConfig's own throw. Unreachable in practice (discovery
-  // already rejects anything that wouldn't resolve here), but a node's own
-  // config could in principle be mutated between discovery and run, so this
-  // still throws rather than substituting undefined into a live BigQuery
-  // statement.
+  // The ref()-resolution closure both model() and compileModel() need:
+  // a name resolves against either a declared model (via
+  // resolveModelConfig()+qualifiedRelation()) or a bigquery-target move node
+  // (config.moveRefTargets, already resolved and validated once by
+  // expandModelNodes() at discovery time - see its own comment). Extracted
+  // out of model() rather than duplicated into compileModel() below, since
+  // the two functions differ only in what they do with the compiled SQL
+  // (run it vs. return it), not in how a ref() gets substituted.
   function buildRefResolver(config, registry) {
     return function (refName) {
       var location = resolveRefLocation(refName, registry, config.moveRefTargets);
@@ -4009,9 +4009,7 @@ var NotSoBigData = (function () {
   // target, or model) already materialized, and writes a self-contained
   // .html dashboard to Drive. See
   // docs/superpowers/specs/2026-09-05-publish-kind-design.md for the full
-  // design. This file starts with config validation and ref resolution
-  // only - fetchTableRows/buildReportPayload/renderReportHtml land in a
-  // later change, once this much is in place and tested.
+  // design.
 
   // Every check a publish node's config must pass before anything is
   // fetched or written - same "throw new Error('publish(): ...')"
@@ -4028,6 +4026,9 @@ var NotSoBigData = (function () {
     if (!config.target || config.target.type !== 'drive' || !config.target.folderId || !config.target.fileName) {
       throw new Error('publish(): config.target must be { type: "drive", folderId: "...", fileName: "..." }.');
     }
+    if (config.layout && config.layout.type !== 'linear') {
+      throw new Error('publish(): layout.type "' + config.layout.type + '" - only "linear" is supported.');
+    }
     (config.kpis || []).forEach(function (kpi) {
       if (!kpi.label || !kpi.agg) {
         throw new Error('publish(): every kpi needs "label" and "agg".');
@@ -4042,6 +4043,9 @@ var NotSoBigData = (function () {
     (config.charts || []).forEach(function (chart) {
       if (!chart.id || !chart.title || !chart.groupBy || !chart.metric || !chart.metric.agg) {
         throw new Error('publish(): every chart needs "id", "title", "groupBy", and "metric.agg".');
+      }
+      if (chart.type && chart.type !== 'bar') {
+        throw new Error('publish(): chart "' + chart.id + '" has type "' + chart.type + '" - only "bar" is supported.');
       }
     });
   }
@@ -4171,7 +4175,8 @@ var NotSoBigData = (function () {
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   // One bar per chart.data entry, widths scaled against the largest total
@@ -4186,7 +4191,7 @@ var NotSoBigData = (function () {
     var height = chart.data.length * (barHeight + gap);
     var bars = chart.data.map(function (d, index) {
       var y = index * (barHeight + gap);
-      var barWidth = Math.round((width - labelWidth) * (d.total / maxTotal));
+      var barWidth = Math.max(0, Math.round((width - labelWidth) * (d.total / maxTotal)));
       return '<text x="0" y="' + (y + barHeight / 2 + 4) + '" class="chart-label">' + escapeHtml(d.groupValue) + '</text>'
         + '<rect x="' + labelWidth + '" y="' + y + '" width="' + barWidth + '" height="' + barHeight + '" class="chart-bar"></rect>'
         + '<text x="' + (labelWidth + barWidth + 6) + '" y="' + (y + barHeight / 2 + 4) + '" class="chart-value">' + d.total.toLocaleString('en-US') + '</text>';
@@ -5367,6 +5372,15 @@ var NotSoBigData = (function () {
   function connectorTuplesForNode(node) {
     if (node.kind === 'model') {
       return [{ role: 'target', type: 'bigquery', config: { projectId: node.config.projectId, dataset: node.config.dataset } }];
+    }
+    // publish's config.source is { type: 'ref', ref: '<nodeName>' } - a
+    // reference to another declared node, not a connector - so there is
+    // nothing for DEBUG_PROBES to check there (probing "ref" the way
+    // sheets/drive/bigquery/etc. get probed would just be an "unknown
+    // connector type" error on every valid publish node). Only the drive
+    // target is a real connector to probe.
+    if (node.kind === 'publish') {
+      return [{ role: 'target', type: 'drive', config: node.config.target }];
     }
     var tuples = [];
     if (isPlainObject(node.config.source) && typeof node.config.source.type === 'string') {

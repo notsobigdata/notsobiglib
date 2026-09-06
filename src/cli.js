@@ -1131,6 +1131,15 @@ function connectorTuplesForNode(node) {
   if (node.kind === 'model') {
     return [{ role: 'target', type: 'bigquery', config: { projectId: node.config.projectId, dataset: node.config.dataset } }];
   }
+  // publish's config.source is { type: 'ref', ref: '<nodeName>' } - a
+  // reference to another declared node, not a connector - so there is
+  // nothing for DEBUG_PROBES to check there (probing "ref" the way
+  // sheets/drive/bigquery/etc. get probed would just be an "unknown
+  // connector type" error on every valid publish node). Only the drive
+  // target is a real connector to probe.
+  if (node.kind === 'publish') {
+    return [{ role: 'target', type: 'drive', config: node.config.target }];
+  }
   var tuples = [];
   if (isPlainObject(node.config.source) && typeof node.config.source.type === 'string') {
     tuples.push({ role: 'source', type: node.config.source.type, config: node.config.source });

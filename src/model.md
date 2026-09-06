@@ -680,7 +680,7 @@ kind-agnostic enough for this before the feature existed. The only real
 gap was `resolveRef` only ever trying the models registry.
 
 **`resolveRefLocation()` is the same lookup, extracted for a second caller
-outside this file.** `publish.js`'s `report` kind (see
+outside this file.** `publish.js`'s `publish` kind (see
 `docs/superpowers/specs/2026-09-05-publish-kind-design.md`) needs to
 resolve a `source.ref` to a BigQuery location too, but as structured
 `{projectId, dataset, table}` rather than a formatted relation string —

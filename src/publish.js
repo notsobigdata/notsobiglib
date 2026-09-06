@@ -4,9 +4,7 @@
 // target, or model) already materialized, and writes a self-contained
 // .html dashboard to Drive. See
 // docs/superpowers/specs/2026-09-05-publish-kind-design.md for the full
-// design. This file starts with config validation and ref resolution
-// only - fetchTableRows/buildReportPayload/renderReportHtml land in a
-// later change, once this much is in place and tested.
+// design.
 
 // Every check a publish node's config must pass before anything is
 // fetched or written - same "throw new Error('publish(): ...')"
@@ -23,6 +21,9 @@ function validatePublishConfig(config) {
   if (!config.target || config.target.type !== 'drive' || !config.target.folderId || !config.target.fileName) {
     throw new Error('publish(): config.target must be { type: "drive", folderId: "...", fileName: "..." }.');
   }
+  if (config.layout && config.layout.type !== 'linear') {
+    throw new Error('publish(): layout.type "' + config.layout.type + '" - only "linear" is supported.');
+  }
   (config.kpis || []).forEach(function (kpi) {
     if (!kpi.label || !kpi.agg) {
       throw new Error('publish(): every kpi needs "label" and "agg".');
@@ -37,6 +38,9 @@ function validatePublishConfig(config) {
   (config.charts || []).forEach(function (chart) {
     if (!chart.id || !chart.title || !chart.groupBy || !chart.metric || !chart.metric.agg) {
       throw new Error('publish(): every chart needs "id", "title", "groupBy", and "metric.agg".');
+    }
+    if (chart.type && chart.type !== 'bar') {
+      throw new Error('publish(): chart "' + chart.id + '" has type "' + chart.type + '" - only "bar" is supported.');
     }
   });
 }
@@ -166,7 +170,8 @@ function escapeHtml(value) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // One bar per chart.data entry, widths scaled against the largest total
@@ -181,7 +186,7 @@ function renderBarChartSvg(chart) {
   var height = chart.data.length * (barHeight + gap);
   var bars = chart.data.map(function (d, index) {
     var y = index * (barHeight + gap);
-    var barWidth = Math.round((width - labelWidth) * (d.total / maxTotal));
+    var barWidth = Math.max(0, Math.round((width - labelWidth) * (d.total / maxTotal)));
     return '<text x="0" y="' + (y + barHeight / 2 + 4) + '" class="chart-label">' + escapeHtml(d.groupValue) + '</text>'
       + '<rect x="' + labelWidth + '" y="' + y + '" width="' + barWidth + '" height="' + barHeight + '" class="chart-bar"></rect>'
       + '<text x="' + (labelWidth + barWidth + 6) + '" y="' + (y + barHeight / 2 + 4) + '" class="chart-value">' + d.total.toLocaleString('en-US') + '</text>';

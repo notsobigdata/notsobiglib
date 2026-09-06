@@ -1912,14 +1912,14 @@ function expandModelNodes(otherNodes) {
 // why the previous "would double BigQuery compute" reasoning here didn't
 // hold).
 //
-// The ref()-resolution closure both model() and compileModel() need:
-// a name resolves against either a declared model (via
-// resolveModelConfig()+qualifiedRelation()) or a bigquery-target move node
-// (config.moveRefTargets, already resolved and validated once by
-// expandModelNodes() at discovery time - see its own comment). Extracted
-// out of model() rather than duplicated into compileModel() below, since
-// the two functions differ only in what they do with the compiled SQL
-// (run it vs. return it), not in how a ref() gets substituted.
+// Not a model - must be a bigquery-target move node lookup, which is a
+// cheap lookup, not a fresh resolution - same "redundant re-validation,
+// cheap defense in depth" posture the model branch already has via
+// resolveModelConfig's own throw. Unreachable in practice (discovery
+// already rejects anything that wouldn't resolve here), but a node's own
+// config could in principle be mutated between discovery and run, so this
+// still throws rather than substituting undefined into a live BigQuery
+// statement.
 //
 // The two-source ref() lookup (declared model, or a bigquery-target move
 // node) as structured data, extracted out of buildRefResolver() below so
@@ -1947,14 +1947,14 @@ function resolveRefLocation(refName, registry, moveBigQueryTargets) {
   return null;
 }
 
-// Not a model - must be a bigquery-target move node lookup, which is a
-// cheap lookup, not a fresh resolution - same "redundant re-validation,
-// cheap defense in depth" posture the model branch already has via
-// resolveModelConfig's own throw. Unreachable in practice (discovery
-// already rejects anything that wouldn't resolve here), but a node's own
-// config could in principle be mutated between discovery and run, so this
-// still throws rather than substituting undefined into a live BigQuery
-// statement.
+// The ref()-resolution closure both model() and compileModel() need:
+// a name resolves against either a declared model (via
+// resolveModelConfig()+qualifiedRelation()) or a bigquery-target move node
+// (config.moveRefTargets, already resolved and validated once by
+// expandModelNodes() at discovery time - see its own comment). Extracted
+// out of model() rather than duplicated into compileModel() below, since
+// the two functions differ only in what they do with the compiled SQL
+// (run it vs. return it), not in how a ref() gets substituted.
 function buildRefResolver(config, registry) {
   return function (refName) {
     var location = resolveRefLocation(refName, registry, config.moveRefTargets);

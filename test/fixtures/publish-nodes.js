@@ -61,3 +61,41 @@ var xssPublish = {
   kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }],
   charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }]
 };
+
+// One kpi per agg/format combination plus a multi-group chart, exercising
+// buildReportPayload's real math - see publish.test.js's
+// testPublishAggregatesKpisAndChartsCorrectly.
+var aggregationPublish = {
+  kind: 'publish',
+  name: 'aggregationPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'aggregation.html' },
+  kpis: [
+    { label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' },
+    { label: 'Rows', agg: 'count', format: 'integer' },
+    { label: 'Distinct orders', agg: 'count_distinct', field: 'order_id', format: 'integer' },
+    { label: 'Avg revenue', agg: 'avg', field: 'revenue', format: 'decimal' }
+  ],
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var badChartTypePublish = {
+  kind: 'publish',
+  name: 'badChartTypePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-chart-type.html' },
+  kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }],
+  charts: [{ id: 'by_category', type: 'line', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var badLayoutPublish = {
+  kind: 'publish',
+  name: 'badLayoutPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-layout.html' },
+  layout: { type: 'board' },
+  kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }]
+};
