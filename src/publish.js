@@ -86,6 +86,9 @@ function validatePublishConfig(config) {
     if (chart.donut !== undefined && chartType !== 'pie') {
       throw new Error('publish(): chart "' + chart.id + '" has "donut", which only "pie" charts support.');
     }
+    if (chart.seriesLinkKey && !(chartType === 'bar' && chart.series)) {
+      throw new Error('publish(): chart "' + chart.id + '" has "seriesLinkKey", which only "bar" charts with "series" support.');
+    }
   });
   var seenTableIds = emptyMap();
   (config.tables || []).forEach(function (table) {
@@ -345,7 +348,7 @@ function buildChartPayload(chart, rows) {
       });
       return { groupValue: groupKey, values: values };
     });
-    return { id: chart.id, title: chart.title, type: chartType, series: chart.series, stacking: chart.stacking || 'grouped', seriesKeys: seriesKeys, data: data };
+    return { id: chart.id, title: chart.title, type: chartType, series: chart.series, stacking: chart.stacking || 'grouped', seriesKeys: seriesKeys, data: data, linkKey: chart.linkKey, seriesLinkKey: chart.seriesLinkKey };
   }
   var grouped = groupRowsBy(rows, chart.groupBy);
   var data = grouped.order.map(function (key) {
@@ -354,7 +357,7 @@ function buildChartPayload(chart, rows) {
   if (chartType === 'line') {
     data.sort(function (a, b) { return compareGroupValues(a.groupValue, b.groupValue); });
   }
-  return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data };
+  return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data, linkKey: chart.linkKey };
 }
 
 function buildReportPayload(config, rows) {
@@ -494,6 +497,48 @@ var CHART_CLIENT_JS = [
   '  });',
   '  container.appendChild(list);',
   '}',
+  'var currentSelection = null;',
+  'function chartSelectionFor(chart, groupValue, seriesValue) {',
+  '  var selection = {};',
+  '  if (chart.linkKey) { selection[chart.linkKey] = String(groupValue); }',
+  '  if (chart.seriesLinkKey && seriesValue !== undefined) { selection[chart.seriesLinkKey] = String(seriesValue); }',
+  '  return selection;',
+  '}',
+  'function selectionsEqual(a, b) {',
+  '  var aKeys = Object.keys(a);',
+  '  var bKeys = Object.keys(b);',
+  '  if (aKeys.length !== bKeys.length) { return false; }',
+  '  return aKeys.every(function (key) { return Object.prototype.hasOwnProperty.call(b, key) && b[key] === a[key]; });',
+  '}',
+  'function selectionMatches(chart, groupValue, seriesValue) {',
+  '  if (!currentSelection) { return true; }',
+  '  var ownKeys = [];',
+  '  if (chart.linkKey) { ownKeys.push(chart.linkKey); }',
+  '  if (chart.seriesLinkKey) { ownKeys.push(chart.seriesLinkKey); }',
+  '  var relevant = ownKeys.filter(function (key) { return Object.prototype.hasOwnProperty.call(currentSelection, key); });',
+  '  if (!relevant.length) { return true; }',
+  '  var elementSelection = chartSelectionFor(chart, groupValue, seriesValue);',
+  '  return relevant.every(function (key) { return elementSelection[key] === currentSelection[key]; });',
+  '}',
+  'function handleChartClick(chart, groupValue, seriesValue) {',
+  '  var clicked = chartSelectionFor(chart, groupValue, seriesValue);',
+  '  currentSelection = (currentSelection && selectionsEqual(currentSelection, clicked)) ? null : clicked;',
+  '  applyHighlight();',
+  '}',
+  'function applyHighlight() {',
+  '  var payload = window.__PUBLISH_PAYLOAD__;',
+  '  Array.prototype.forEach.call(document.querySelectorAll(".chart-canvas"), function (container) {',
+  '    var chartId = container.id.replace(/^chart-/, "");',
+  '    var chart = payload.charts.filter(function (c) { return c.id === chartId; })[0];',
+  '    if (!chart || !(chart.linkKey || chart.seriesLinkKey)) { return; }',
+  '    Array.prototype.forEach.call(container.querySelectorAll("[data-group-value]"), function (node) {',
+  '      var groupValue = node.getAttribute("data-group-value");',
+  '      var seriesValue = node.getAttribute("data-series-value");',
+  '      var isMatch = selectionMatches(chart, groupValue, seriesValue === null ? undefined : seriesValue);',
+  '      node.style.opacity = isMatch ? 1 : 0.25;',
+  '    });',
+  '  });',
+  '}',
   'function drawBarChart(containerId, chart) {',
   '  var width = 480, height = Math.max(240, chart.data.length * 36), margin = { top: 10, right: 40, bottom: 10, left: 160 };',
   '  var svg = d3.select(document.getElementById(containerId)).append("svg")',
@@ -502,6 +547,7 @@ var CHART_CLIENT_JS = [
   '  var groupValues = chart.data.map(function (d) { return d.groupValue; });',
   '  var y = d3.scaleBand().domain(groupValues).range([margin.top, height - margin.bottom]).padding(0.2);',
   '  var color = d3.scaleOrdinal().range(["var(--teal)", "var(--coral)", "var(--ink-soft)", "var(--teal-soft)"]);',
+  '  var interactive = !!(chart.linkKey || chart.seriesLinkKey);',
   '  if (chart.seriesKeys && chart.seriesKeys.length) {',
   '    color.domain(chart.seriesKeys);',
   '    if (chart.stacking === "stacked") {',
@@ -509,28 +555,52 @@ var CHART_CLIENT_JS = [
   '      var stacked = d3.stack().keys(chart.seriesKeys)(stackRows);',
   '      var maxTotal = d3.max(stackRows, function (row) { return chart.seriesKeys.reduce(function (sum, k) { return sum + row[k]; }, 0); }) || 1;',
   '      var x = d3.scaleLinear().domain([0, maxTotal]).range([margin.left, width - margin.right]);',
-  '      svg.append("g").selectAll("g").data(stacked).join("g")',
+  '      var segments = svg.append("g").selectAll("g").data(stacked).join("g")',
   '        .attr("class", "chart-bar").style("fill", function (d) { return color(d.key); })',
   '        .selectAll("rect").data(function (d) { return d; }).join("rect")',
   '        .attr("y", function (d) { return y(d.data.groupValue); }).attr("x", function (d) { return x(d[0]); })',
   '        .attr("width", function (d) { return x(d[1]) - x(d[0]); }).attr("height", y.bandwidth());',
+  '      if (interactive) {',
+  '        segments.attr("data-group-value", function (d) { return String(d.data.groupValue); }).style("cursor", "pointer");',
+  '        if (chart.seriesLinkKey) {',
+  '          segments.attr("data-series-value", function (d) { return String(d3.select(this.parentNode).datum().key); });',
+  '        }',
+  '        segments.on("click", function (event, d) {',
+  '          var seriesKey = d3.select(this.parentNode).datum().key;',
+  '          handleChartClick(chart, d.data.groupValue, chart.seriesLinkKey ? seriesKey : undefined);',
+  '        });',
+  '      }',
   '    } else {',
   '      var maxValue = d3.max(chart.data, function (d) { return d3.max(chart.seriesKeys, function (k) { return d.values[k]; }); }) || 1;',
   '      var x = d3.scaleLinear().domain([0, maxValue]).range([margin.left, width - margin.right]);',
   '      var y1 = d3.scaleBand().domain(chart.seriesKeys).range([0, y.bandwidth()]).padding(0.05);',
-  '      svg.append("g").selectAll("g").data(chart.data).join("g")',
+  '      var segments = svg.append("g").selectAll("g").data(chart.data).join("g")',
   '        .attr("transform", function (d) { return "translate(0," + y(d.groupValue) + ")"; })',
   '        .selectAll("rect").data(function (d) { return chart.seriesKeys.map(function (k) { return { key: k, value: d.values[k] }; }); }).join("rect")',
   '        .attr("class", "chart-bar").style("fill", function (d) { return color(d.key); })',
   '        .attr("y", function (d) { return y1(d.key); }).attr("x", margin.left)',
   '        .attr("width", function (d) { return x(d.value) - margin.left; }).attr("height", y1.bandwidth());',
+  '      if (interactive) {',
+  '        segments.attr("data-group-value", function (d) { return String(d3.select(this.parentNode).datum().groupValue); }).style("cursor", "pointer");',
+  '        if (chart.seriesLinkKey) {',
+  '          segments.attr("data-series-value", function (d) { return String(d.key); });',
+  '        }',
+  '        segments.on("click", function (event, d) {',
+  '          var groupValue = d3.select(this.parentNode).datum().groupValue;',
+  '          handleChartClick(chart, groupValue, chart.seriesLinkKey ? d.key : undefined);',
+  '        });',
+  '      }',
   '    }',
   '  } else {',
   '    var maxTotal = d3.max(chart.data, function (d) { return d.total; }) || 1;',
   '    var x = d3.scaleLinear().domain([0, maxTotal]).range([margin.left, width - margin.right]);',
-  '    svg.append("g").selectAll("rect").data(chart.data).join("rect")',
+  '    var bars = svg.append("g").selectAll("rect").data(chart.data).join("rect")',
   '      .attr("class", "chart-bar").attr("y", function (d) { return y(d.groupValue); }).attr("x", margin.left)',
   '      .attr("width", function (d) { return Math.max(0, x(d.total) - margin.left); }).attr("height", y.bandwidth());',
+  '    if (interactive) {',
+  '      bars.attr("data-group-value", function (d) { return String(d.groupValue); }).style("cursor", "pointer")',
+  '        .on("click", function (event, d) { handleChartClick(chart, d.groupValue, undefined); });',
+  '    }',
   '    svg.append("g").selectAll("text").data(chart.data).join("text")',
   '      .attr("class", "chart-value").attr("x", function (d) { return x(d.total) + 6; })',
   '      .attr("y", function (d) { return y(d.groupValue) + y.bandwidth() / 2 + 4; }).text(function (d) { return d.total.toLocaleString("en-US"); });',
@@ -548,8 +618,12 @@ var CHART_CLIENT_JS = [
   '  var y = d3.scaleLinear().domain([0, maxTotal]).range([height - margin.bottom, margin.top]);',
   '  var line = d3.line().x(function (d) { return x(d.groupValue); }).y(function (d) { return y(d.total); });',
   '  svg.append("path").datum(chart.data).attr("class", "chart-bar").style("fill", "none").attr("stroke", "#3F6659").attr("stroke-width", 2).attr("d", line);',
-  '  svg.append("g").selectAll("circle").data(chart.data).join("circle")',
+  '  var points = svg.append("g").selectAll("circle").data(chart.data).join("circle")',
   '    .attr("class", "chart-bar").attr("cx", function (d) { return x(d.groupValue); }).attr("cy", function (d) { return y(d.total); }).attr("r", 3);',
+  '  if (chart.linkKey) {',
+  '    points.attr("data-group-value", function (d) { return String(d.groupValue); }).style("cursor", "pointer")',
+  '      .on("click", function (event, d) { handleChartClick(chart, d.groupValue, undefined); });',
+  '  }',
   '  svg.append("g").selectAll("text").data(chart.data).join("text")',
   '    .attr("class", "chart-label").attr("x", function (d) { return x(d.groupValue); }).attr("y", height - 8).attr("text-anchor", "middle").text(function (d) { return d.groupValue; });',
   '}',
@@ -563,8 +637,12 @@ var CHART_CLIENT_JS = [
   '  var pieGen = d3.pie().value(function (d) { return d.total; });',
   '  var arcGen = d3.arc().innerRadius(chart.donut ? radius * 0.55 : 0).outerRadius(radius);',
   '  var pieData = pieGen(chart.data);',
-  '  svg.selectAll("path").data(pieData).join("path")',
+  '  var slices = svg.selectAll("path").data(pieData).join("path")',
   '    .attr("class", "chart-bar").style("fill", function (d) { return color(d.data.groupValue); }).attr("d", arcGen);',
+  '  if (chart.linkKey) {',
+  '    slices.attr("data-group-value", function (d) { return String(d.data.groupValue); }).style("cursor", "pointer")',
+  '      .on("click", function (event, d) { handleChartClick(chart, d.data.groupValue, undefined); });',
+  '  }',
   '  svg.selectAll("text").data(pieData).join("text")',
   '    .attr("class", "chart-label").attr("transform", function (d) { return "translate(" + arcGen.centroid(d) + ")"; })',
   '    .attr("text-anchor", "middle").text(function (d) { return d.data.groupValue; });',
@@ -584,6 +662,7 @@ var CHART_CLIENT_JS = [
   '    else if (chart.type === "pie") { drawPieChart(containerId, chart); }',
   '    else { drawBarChart(containerId, chart); }',
   '  });',
+  '  applyHighlight();',
   '});'
 ].join('\n');
 

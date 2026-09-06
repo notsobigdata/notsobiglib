@@ -329,3 +329,37 @@ var chartTypeOmittedPublish = {
   target: { type: 'drive', folderId: 'folder-id', fileName: 'chart-type-omitted.html' },
   charts: [{ id: 'by_category', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }]
 };
+
+// seriesLinkKey requires both type: 'bar' AND series to be set - a plain
+// bar chart (no series) with seriesLinkKey declared is the representative
+// misuse case, same "one representative fixture, not one per possible
+// misuse" precedent chartSeriesOnNonBarPublish already set.
+var chartSeriesLinkKeyWithoutSeriesPublish = {
+  kind: 'publish',
+  name: 'chartSeriesLinkKeyWithoutSeriesPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'chart-series-link-key-without-series.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, seriesLinkKey: 'channel' }]
+};
+
+// Four charts matching the design spec's §2 worked example: three linked
+// on 'category' (plain bar, pie, and a stacked bar also linking its
+// series on 'channel'), one ('trend') left deliberately unlinked as the
+// "never reacts, never triggers" control. Proves the widened schema
+// passes validation (fails only at the un-shimmed BigQuery call, same
+// proof pattern as chartsV2Publish) and backs Task 1's payload-passthrough
+// test plus Task 2/3's render tests.
+var linkKeyChartsPublish = {
+  kind: 'publish',
+  name: 'linkKeyChartsPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'link-key-charts.html' },
+  charts: [
+    { id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, linkKey: 'category' },
+    { id: 'share', type: 'pie', title: 'Share', groupBy: 'category', donut: true, metric: { agg: 'sum', field: 'revenue' }, linkKey: 'category' },
+    { id: 'by_category_channel', type: 'bar', title: 'By category/channel', groupBy: 'category', series: 'channel', stacking: 'stacked', metric: { agg: 'sum', field: 'revenue' }, linkKey: 'category', seriesLinkKey: 'channel' },
+    { id: 'trend', type: 'line', title: 'Trend', groupBy: 'day', metric: { agg: 'sum', field: 'revenue' } }
+  ]
+};

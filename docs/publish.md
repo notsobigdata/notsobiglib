@@ -97,6 +97,50 @@ list of its computed values instead of a blank area — the numbers
 stay readable, the visual chart does not render. KPIs and `tables[]`
 are unaffected either way; they have no external dependency.
 
+#### Linking charts together (`linkKey`/`seriesLinkKey`)
+
+```javascript
+charts: [
+  { id: 'by_category', type: 'bar', title: 'Revenue by category',
+    groupBy: 'category_name', metric: { agg: 'sum', field: 'revenue' },
+    linkKey: 'category' },
+  { id: 'share', type: 'pie', title: 'Share by category', donut: true,
+    groupBy: 'category_name', metric: { agg: 'sum', field: 'revenue' },
+    linkKey: 'category' },
+  { id: 'by_category_channel', type: 'bar', title: 'By category and channel',
+    groupBy: 'category_name', series: 'channel', stacking: 'stacked',
+    metric: { agg: 'sum', field: 'revenue' },
+    linkKey: 'category', seriesLinkKey: 'channel' },
+  { id: 'trend', type: 'line', title: 'Revenue by day',
+    groupBy: 'order_date', metric: { agg: 'sum', field: 'revenue' } }
+  // no linkKey - "trend" never highlights, and is never highlighted
+]
+```
+
+- `linkKey` (any chart type) is an opt-in string naming the "logical
+  dimension" this chart's `groupBy` represents. Clicking a bar/slice/point
+  in a chart that declares `linkKey` dims every element, in every *other*
+  chart that declares the **same** `linkKey` string, that doesn't match the
+  clicked value. Clicking the same value again clears the selection —
+  even from a different chart, since the selection is keyed by value,
+  not by which element was clicked.
+- `seriesLinkKey` (bar + `series` only) does the same for the `series`
+  dimension of a grouped/stacked bar. Clicking a segment selects **both**
+  its `groupBy` and `series` values together — another chart only lights
+  up on the exact combination if it declares both keys, or on just the
+  `groupBy` value alone if it only declares `linkKey`.
+- A chart with neither field set never highlights and is never
+  highlighted — this is opt-in, not automatic. Two charts grouping by the
+  same underlying field name do **not** auto-link; they must declare the
+  same `linkKey` string explicitly.
+- This is purely visual (dimmed vs. full opacity). KPIs, other charts'
+  totals, and `tables[]` never recompute or filter — clicking never
+  changes any number on the page, only which elements are dimmed.
+- `linkKey`/`seriesLinkKey` are compared only as plain strings. If two
+  unrelated charts are accidentally given the same `linkKey`, they will
+  highlight each other on any coincidentally-matching value — the library
+  has no way to detect that this wasn't intended.
+
 ### `tables[]`
 
 Either a **raw** table (a chosen subset of the source's own columns, one
@@ -170,11 +214,11 @@ pager needs to page through without re-formatting anything.
 Filters, drill-down, per-block `source` overrides, cross-file
 navigation, and a `board` tree layout are all planned but not
 implemented — see `docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s
-"Future direction" section. Cross-chart interactivity (one chart reacting to
-another's click/selection within the same file) is planned as a
-follow-up to the D3 chart engine — see
-`docs/superpowers/specs/2026-09-06-publish-d3-charts-design.md`.
-Column-header sort and search for the `tables[]` block, and `filters`/
-`linkTo` generally, are deliberately deferred until that follow-up is
-designed, since they overlap with it — see that spec's "Relationship
-to filters/linkTo" section.
+"Future direction" section. Cross-chart click-to-highlight is implemented (`linkKey`/`seriesLinkKey`,
+see `charts[]` above) — see
+`docs/superpowers/specs/2026-09-06-publish-chart-interactivity-design.md`
+for the full design. A `filters[]` dropdown that recomputes KPIs/charts/
+tables against the underlying rows, and `linkTo` cross-file navigation,
+remain future work, each still needing its own brainstorming pass — see
+that spec's "Future direction" section. Column-header sort and search for
+the `tables[]` block are also still deferred.

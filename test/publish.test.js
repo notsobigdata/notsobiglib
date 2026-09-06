@@ -491,6 +491,128 @@ function testPublishChartTypeOmittedDefaultsToBar() {
   assert.strictEqual(totalsByGroup.B, 20, 'expected plain {groupValue, total} shape for B, got: ' + JSON.stringify(chart.data));
 }
 
+function testPublishChartSeriesLinkKeyWithoutSeriesRejected() {
+  var result = runOne('chartSeriesLinkKeyWithoutSeriesPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"seriesLinkKey", which only "bar" charts with "series" support/.test(result.error), 'expected a seriesLinkKey-without-series error, got: ' + result.error);
+}
+
+function testPublishLinkKeyChartsProceedPastValidation() {
+  var result = runOne('linkKeyChartsPublish');
+  // Same proof pattern as testPublishV2ChartTypesProceedPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
+}
+
+function testPublishChartPayloadPassesThroughLinkKeys() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [
+    ['A', 'online', '1', '10']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  var byCategory = payload.charts.filter(function (c) { return c.id === 'by_category'; })[0];
+  assert.strictEqual(byCategory.linkKey, 'category', 'expected linkKey passed through, got: ' + JSON.stringify(byCategory));
+  assert.strictEqual(byCategory.seriesLinkKey, undefined, 'expected no seriesLinkKey on a non-series chart, got: ' + JSON.stringify(byCategory));
+
+  var byCategoryChannel = payload.charts.filter(function (c) { return c.id === 'by_category_channel'; })[0];
+  assert.strictEqual(byCategoryChannel.linkKey, 'category', 'expected linkKey passed through on the series chart, got: ' + JSON.stringify(byCategoryChannel));
+  assert.strictEqual(byCategoryChannel.seriesLinkKey, 'channel', 'expected seriesLinkKey passed through, got: ' + JSON.stringify(byCategoryChannel));
+
+  var trend = payload.charts.filter(function (c) { return c.id === 'trend'; })[0];
+  assert.strictEqual(trend.linkKey, undefined, 'expected no linkKey on an unlinked chart, got: ' + JSON.stringify(trend));
+  assert.ok(!Object.prototype.hasOwnProperty.call(trend, 'linkKey'), 'expected linkKey to be genuinely absent after the JSON round-trip, got: ' + JSON.stringify(trend));
+}
+
+function testPublishChartClientJsIncludesSelectionModule() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/function chartSelectionFor/.test(html), 'expected chartSelectionFor in the emitted script, got: ' + html);
+  assert.ok(/function selectionsEqual/.test(html), 'expected selectionsEqual in the emitted script, got: ' + html);
+  assert.ok(/function selectionMatches/.test(html), 'expected selectionMatches in the emitted script, got: ' + html);
+  assert.ok(/function handleChartClick/.test(html), 'expected handleChartClick in the emitted script, got: ' + html);
+  assert.ok(/function applyHighlight/.test(html), 'expected applyHighlight in the emitted script, got: ' + html);
+  assert.ok(/var currentSelection = null;/.test(html), 'expected the module-level currentSelection state, got: ' + html);
+}
+
+// Whole-branch review finding: a NULL groupValue/seriesValue must not
+// silently drop out of highlighting. D3's .attr(name, null) removes the
+// attribute rather than setting it, so every group/series-value accessor
+// must coerce through String(...) to keep null/undefined attribute-matchable.
+function testPublishChartClientJsCoercesGroupAndSeriesValuesToString() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var groupValueStringCount = (html.match(/data-group-value", function \(d\) \{ return String\(/g) || []).length;
+  assert.strictEqual(groupValueStringCount, 5, 'expected all 5 data-group-value accessors to coerce via String(...), got ' + groupValueStringCount + ' in: ' + html);
+  var seriesValueStringCount = (html.match(/data-series-value", function \(d\) \{ return String\(/g) || []).length;
+  assert.strictEqual(seriesValueStringCount, 2, 'expected both data-series-value accessors to coerce via String(...), got ' + seriesValueStringCount + ' in: ' + html);
+  assert.ok(/selection\[chart\.linkKey\] = String\(groupValue\);/.test(html), 'expected chartSelectionFor to coerce groupValue via String(...), got: ' + html);
+  assert.ok(/selection\[chart\.seriesLinkKey\] = String\(seriesValue\);/.test(html), 'expected chartSelectionFor to coerce seriesValue via String(...), got: ' + html);
+}
+
+function testPublishChartClientJsCallsApplyHighlightOnceOnLoad() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  // Two call sites total: applyHighlight()'s own definition never calls
+  // itself, so this counts (a) the DOMContentLoaded dispatcher's one call
+  // after drawing every chart and (b) handleChartClick's one call after
+  // updating currentSelection.
+  var callCount = (html.match(/applyHighlight\(\);/g) || []).length;
+  assert.strictEqual(callCount, 2, 'expected exactly 2 applyHighlight() call sites (DOMContentLoaded + handleChartClick), got ' + callCount + ' in: ' + html);
+}
+
+function testPublishChartClientJsWiresBarClickOnlyWhenInteractive() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/var interactive = !!\(chart\.linkKey \|\| chart\.seriesLinkKey\);/.test(html), 'expected drawBarChart\'s interactive flag, got: ' + html);
+  assert.ok(/data-group-value/.test(html), 'expected data-group-value attribute wiring in the emitted script, got: ' + html);
+  assert.ok(/data-series-value/.test(html), 'expected data-series-value attribute wiring for stacked/grouped bars, got: ' + html);
+}
+
+function testPublishChartClientJsWiresLineAndPieClickOnLinkKey() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  // drawLineChart and drawPieChart each gate their click wiring on a
+  // standalone "if (chart.linkKey) {" block (they have no seriesLinkKey
+  // concept at all) - anchored to end-of-line so this doesn't also match
+  // chartSelectionFor's/selectionMatches' one-line "if (chart.linkKey) {
+  // ... }" conditionals, which have trailing code after "{" on the same
+  // line and are a different thing entirely.
+  var lineOrPieGateCount = (html.match(/^\s*if \(chart\.linkKey\) \{$/gm) || []).length;
+  assert.strictEqual(lineOrPieGateCount, 2, 'expected exactly 2 standalone "if (chart.linkKey) {" gate blocks (drawLineChart + drawPieChart), got ' + lineOrPieGateCount + ' in: ' + html);
+}
+
 function testPublishAggregationFixtureStillHasNoStacking() {
   // Sanity check that the plain (non-series) chart path still produces
   // {groupValue, total} data, not the series {groupValue, values} shape -
@@ -649,5 +771,13 @@ module.exports = {
   testPublishAggregationFixtureStillHasNoStacking: testPublishAggregationFixtureStillHasNoStacking,
   testPublishD3ScriptHasSubresourceIntegrity: testPublishD3ScriptHasSubresourceIntegrity,
   testPublishDuplicateChartIdRejected: testPublishDuplicateChartIdRejected,
-  testPublishChartTypeOmittedDefaultsToBar: testPublishChartTypeOmittedDefaultsToBar
+  testPublishChartTypeOmittedDefaultsToBar: testPublishChartTypeOmittedDefaultsToBar,
+  testPublishChartSeriesLinkKeyWithoutSeriesRejected: testPublishChartSeriesLinkKeyWithoutSeriesRejected,
+  testPublishLinkKeyChartsProceedPastValidation: testPublishLinkKeyChartsProceedPastValidation,
+  testPublishChartPayloadPassesThroughLinkKeys: testPublishChartPayloadPassesThroughLinkKeys,
+  testPublishChartClientJsIncludesSelectionModule: testPublishChartClientJsIncludesSelectionModule,
+  testPublishChartClientJsCoercesGroupAndSeriesValuesToString: testPublishChartClientJsCoercesGroupAndSeriesValuesToString,
+  testPublishChartClientJsCallsApplyHighlightOnceOnLoad: testPublishChartClientJsCallsApplyHighlightOnceOnLoad,
+  testPublishChartClientJsWiresBarClickOnlyWhenInteractive: testPublishChartClientJsWiresBarClickOnlyWhenInteractive,
+  testPublishChartClientJsWiresLineAndPieClickOnLinkKey: testPublishChartClientJsWiresLineAndPieClickOnLinkKey
 };
