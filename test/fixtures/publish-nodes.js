@@ -87,7 +87,50 @@ var badChartTypePublish = {
   source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
   target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-chart-type.html' },
   kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }],
-  charts: [{ id: 'by_category', type: 'line', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }]
+  charts: [{ id: 'by_category', type: 'scatter', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var chartSeriesOnNonBarPublish = {
+  kind: 'publish',
+  name: 'chartSeriesOnNonBarPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'chart-series-on-non-bar.html' },
+  charts: [{ id: 'trend', type: 'line', title: 'Trend', groupBy: 'day', series: 'channel', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var chartDonutOnNonPiePublish = {
+  kind: 'publish',
+  name: 'chartDonutOnNonPiePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'chart-donut-on-non-pie.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', donut: true, metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var chartBadStackingPublish = {
+  kind: 'publish',
+  name: 'chartBadStackingPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'chart-bad-stacking.html' },
+  charts: [{ id: 'by_category_channel', type: 'bar', title: 'By category/channel', groupBy: 'category', series: 'channel', stacking: 'overlapping', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+// Proves the widened enum (bar/line/pie) plus series+stacking and donut
+// all pass validation - fails only at the un-shimmed BigQuery call, same
+// proof pattern as testPublishValidRefProceedsPastValidation.
+var chartsV2Publish = {
+  kind: 'publish',
+  name: 'chartsV2Publish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'charts-v2.html' },
+  charts: [
+    { id: 'trend', type: 'line', title: 'Trend', groupBy: 'day', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'share', type: 'pie', title: 'Share', groupBy: 'category', donut: true, metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'by_category_channel', type: 'bar', title: 'By category/channel', groupBy: 'category', series: 'channel', stacking: 'stacked', metric: { agg: 'sum', field: 'revenue' } }
+  ]
 };
 
 var badLayoutPublish = {

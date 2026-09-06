@@ -49,10 +49,38 @@ function testPublishValidRefProceedsPastValidation() {
   assert.ok(/BigQuery/.test(result.error), 'expected validation+ref-resolution to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
-function testPublishChartTypeOtherThanBarRejected() {
+function testPublishUnknownChartTypeRejected() {
   var result = runOne('badChartTypePublish');
   assert.strictEqual(result.status, 'failed');
-  assert.ok(/only "bar" is supported/.test(result.error), 'expected a chart-type error, got: ' + result.error);
+  assert.ok(/expected one of bar, line, pie/.test(result.error), 'expected a chart-type error, got: ' + result.error);
+}
+
+function testPublishChartSeriesOnNonBarRejected() {
+  var result = runOne('chartSeriesOnNonBarPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"series"\/"stacking", which only "bar" charts support/.test(result.error), 'expected a series-on-non-bar error, got: ' + result.error);
+}
+
+function testPublishChartDonutOnNonPieRejected() {
+  var result = runOne('chartDonutOnNonPiePublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"donut", which only "pie" charts support/.test(result.error), 'expected a donut-on-non-pie error, got: ' + result.error);
+}
+
+function testPublishChartBadStackingRejected() {
+  var result = runOne('chartBadStackingPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/expected "grouped" or "stacked"/.test(result.error), 'expected a stacking-enum error, got: ' + result.error);
+}
+
+function testPublishV2ChartTypesProceedPastValidation() {
+  var result = runOne('chartsV2Publish');
+  // Same proof pattern as testPublishValidRefProceedsPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
 function testPublishLayoutTypeOtherThanLinearRejected() {
@@ -344,7 +372,11 @@ module.exports = {
   testPublishKpiRequiresFieldUnlessCount: testPublishKpiRequiresFieldUnlessCount,
   testPublishRefMustResolveToBigQueryLocation: testPublishRefMustResolveToBigQueryLocation,
   testPublishValidRefProceedsPastValidation: testPublishValidRefProceedsPastValidation,
-  testPublishChartTypeOtherThanBarRejected: testPublishChartTypeOtherThanBarRejected,
+  testPublishUnknownChartTypeRejected: testPublishUnknownChartTypeRejected,
+  testPublishChartSeriesOnNonBarRejected: testPublishChartSeriesOnNonBarRejected,
+  testPublishChartDonutOnNonPieRejected: testPublishChartDonutOnNonPieRejected,
+  testPublishChartBadStackingRejected: testPublishChartBadStackingRejected,
+  testPublishV2ChartTypesProceedPastValidation: testPublishV2ChartTypesProceedPastValidation,
   testPublishLayoutTypeOtherThanLinearRejected: testPublishLayoutTypeOtherThanLinearRejected,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,

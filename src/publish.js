@@ -12,6 +12,11 @@
 // elsewhere, per the design spec's §3.
 var PUBLISH_VALUE_FORMATS = ['string', 'currency', 'integer', 'decimal'];
 
+// The chart types charts[] accepts - see the design spec's §2. 'bar' also
+// accepts an optional series/stacking pair for grouped/stacked bars; that
+// isn't a separate type, just an optional second dimension on 'bar'.
+var CHART_TYPES = ['bar', 'line', 'pie'];
+
 // Every check a publish node's config must pass before anything is
 // fetched or written - same "throw new Error('publish(): ...')"
 // convention move()/model() already use. Field-by-field, not a schema
@@ -45,8 +50,18 @@ function validatePublishConfig(config) {
     if (!chart.id || !chart.title || !chart.groupBy || !chart.metric || !chart.metric.agg) {
       throw new Error('publish(): every chart needs "id", "title", "groupBy", and "metric.agg".');
     }
-    if (chart.type && chart.type !== 'bar') {
-      throw new Error('publish(): chart "' + chart.id + '" has type "' + chart.type + '" - only "bar" is supported.');
+    var chartType = chart.type || 'bar';
+    if (CHART_TYPES.indexOf(chartType) === -1) {
+      throw new Error('publish(): chart "' + chart.id + '" has type "' + chartType + '" - expected one of ' + CHART_TYPES.join(', ') + '.');
+    }
+    if ((chart.series || chart.stacking) && chartType !== 'bar') {
+      throw new Error('publish(): chart "' + chart.id + '" has "series"/"stacking", which only "bar" charts support.');
+    }
+    if (chart.stacking && ['grouped', 'stacked'].indexOf(chart.stacking) === -1) {
+      throw new Error('publish(): chart "' + chart.id + '" has stacking "' + chart.stacking + '" - expected "grouped" or "stacked".');
+    }
+    if (chart.donut !== undefined && chartType !== 'pie') {
+      throw new Error('publish(): chart "' + chart.id + '" has "donut", which only "pie" charts support.');
     }
   });
   var seenTableIds = emptyMap();
