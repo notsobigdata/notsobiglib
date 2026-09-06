@@ -366,6 +366,61 @@ function testPublishNoPaginationScriptWithoutTables() {
   assert.ok(!/DOMContentLoaded/.test(html), 'expected no pagination script when config.tables is empty, got: ' + html);
 }
 
+function testPublishLineChartSortsGroupsByNumericValue() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['day', 'revenue'], [
+    ['3', '30'],
+    ['1', '10'],
+    ['2', '20']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select lineChartPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  var chart = payload.charts.filter(function (c) { return c.id === 'trend'; })[0];
+  assert.deepStrictEqual(chart.data.map(function (d) { return d.groupValue; }), ['1', '2', '3'],
+    'expected line chart groups sorted ascending numerically, got: ' + JSON.stringify(chart.data));
+}
+
+function testPublishLineChartSortsGroupsByDateString() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['order_date', 'revenue'], [
+    ['2026-01-03', '30'],
+    ['2026-01-01', '10'],
+    ['2026-01-02', '20']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select lineChartDatePublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  var chart = payload.charts.filter(function (c) { return c.id === 'trend'; })[0];
+  assert.deepStrictEqual(chart.data.map(function (d) { return d.groupValue; }), ['2026-01-01', '2026-01-02', '2026-01-03'],
+    'expected line chart groups sorted ascending by ISO date string, got: ' + JSON.stringify(chart.data));
+}
+
+function testPublishSeriesChartBuildsDenseZeroFilledMatrix() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue'], [
+    ['A', 'online', '10'],
+    ['A', 'store', '5'],
+    ['B', 'online', '20']
+    // B/store deliberately missing - proves zero-fill.
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select seriesChartPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  var chart = payload.charts.filter(function (c) { return c.id === 'by_category_channel'; })[0];
+
+  assert.deepStrictEqual(chart.seriesKeys, ['online', 'store'], 'expected seriesKeys in first-seen order, got: ' + JSON.stringify(chart.seriesKeys));
+  var groupA = chart.data.filter(function (d) { return d.groupValue === 'A'; })[0];
+  var groupB = chart.data.filter(function (d) { return d.groupValue === 'B'; })[0];
+  assert.strictEqual(groupA.values.online, 10, 'expected A/online = 10, got: ' + JSON.stringify(groupA));
+  assert.strictEqual(groupA.values.store, 5, 'expected A/store = 5, got: ' + JSON.stringify(groupA));
+  assert.strictEqual(groupB.values.online, 20, 'expected B/online = 20, got: ' + JSON.stringify(groupB));
+  assert.strictEqual(groupB.values.store, 0, 'expected B/store zero-filled to 0, got: ' + JSON.stringify(groupB));
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -392,5 +447,8 @@ module.exports = {
   testPublishValidTablesProceedPastValidation: testPublishValidTablesProceedPastValidation,
   testPublishBuildsRawAndAggregatedTablePayloads: testPublishBuildsRawAndAggregatedTablePayloads,
   testPublishRawTableRendersFirstPageAndEmbedsFullData: testPublishRawTableRendersFirstPageAndEmbedsFullData,
-  testPublishNoPaginationScriptWithoutTables: testPublishNoPaginationScriptWithoutTables
+  testPublishNoPaginationScriptWithoutTables: testPublishNoPaginationScriptWithoutTables,
+  testPublishLineChartSortsGroupsByNumericValue: testPublishLineChartSortsGroupsByNumericValue,
+  testPublishLineChartSortsGroupsByDateString: testPublishLineChartSortsGroupsByDateString,
+  testPublishSeriesChartBuildsDenseZeroFilledMatrix: testPublishSeriesChartBuildsDenseZeroFilledMatrix
 };

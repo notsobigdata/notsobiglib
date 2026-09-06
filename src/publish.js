@@ -267,17 +267,79 @@ function buildAggregatedTablePayload(table, rows) {
   return { id: table.id, title: table.title, pageSize: table.pageSize || 25, columns: columns, rows: tableRows };
 }
 
+// Numeric-aware ascending compare for line charts' groupValue ordering -
+// numeric if both sides parse as numbers (covers plain numbers and
+// ISO-format date strings' *year* component alone would sort wrong
+// numerically, which is exactly why non-numeric strings fall through to
+// plain string compare: 'YYYY-MM-DD' sorts correctly as a string already).
+function compareGroupValues(a, b) {
+  var numA = Number(a);
+  var numB = Number(b);
+  if (!isNaN(numA) && !isNaN(numB) && a !== '' && b !== '') {
+    return numA - numB;
+  }
+  return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+}
+
+// One chart's payload - either the plain {groupValue, total} shape every
+// chart type has used since v1 (bar/pie, and line which additionally
+// sorts it), or, when chart.series is set, a dense {groupValue, values}
+// matrix: every seriesKeys entry present in every group's `values`, zero
+// where the source rows had no matching combination. Dense on purpose -
+// Task 3's client-side d3.stack() code never has to special-case a
+// missing combination.
+function buildChartPayload(chart, rows) {
+  var chartType = chart.type || 'bar';
+  if (chart.series) {
+    var seriesSeen = emptyMap();
+    var seriesKeys = [];
+    var groupSeen = emptyMap();
+    var groupKeys = [];
+    var cellRows = emptyMap();
+    rows.forEach(function (row) {
+      var groupKey = row[chart.groupBy];
+      var seriesKey = row[chart.series];
+      if (!has(groupSeen, groupKey)) {
+        groupSeen[groupKey] = true;
+        groupKeys.push(groupKey);
+      }
+      if (!has(seriesSeen, seriesKey)) {
+        seriesSeen[seriesKey] = true;
+        seriesKeys.push(seriesKey);
+      }
+      var cellKey = groupKey + ' ' + seriesKey;
+      if (!has(cellRows, cellKey)) {
+        cellRows[cellKey] = [];
+      }
+      cellRows[cellKey].push(row);
+    });
+    var data = groupKeys.map(function (groupKey) {
+      var values = emptyMap();
+      seriesKeys.forEach(function (seriesKey) {
+        var cellKey = groupKey + ' ' + seriesKey;
+        values[seriesKey] = computeAggregate(cellRows[cellKey] || [], chart.metric.agg, chart.metric.field);
+      });
+      return { groupValue: groupKey, values: values };
+    });
+    return { id: chart.id, title: chart.title, type: chartType, series: chart.series, stacking: chart.stacking || 'grouped', seriesKeys: seriesKeys, data: data };
+  }
+  var grouped = groupRowsBy(rows, chart.groupBy);
+  var data = grouped.order.map(function (key) {
+    return { groupValue: key, total: computeAggregate(grouped.groups[key], chart.metric.agg, chart.metric.field) };
+  });
+  if (chartType === 'line') {
+    data.sort(function (a, b) { return compareGroupValues(a.groupValue, b.groupValue); });
+  }
+  return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data };
+}
+
 function buildReportPayload(config, rows) {
   var kpis = (config.kpis || []).map(function (kpi) {
     var value = computeAggregate(rows, kpi.agg, kpi.field);
     return { label: kpi.label, value: value, formatted: formatValue(value, kpi.format) };
   });
   var charts = (config.charts || []).map(function (chart) {
-    var grouped = groupRowsBy(rows, chart.groupBy);
-    var data = grouped.order.map(function (key) {
-      return { groupValue: key, total: computeAggregate(grouped.groups[key], chart.metric.agg, chart.metric.field) };
-    });
-    return { id: chart.id, title: chart.title, data: data };
+    return buildChartPayload(chart, rows);
   });
   var tables = (config.tables || []).map(function (table) {
     return table.mode === 'raw' ? buildRawTablePayload(table, rows) : buildAggregatedTablePayload(table, rows);
@@ -296,8 +358,12 @@ function escapeHtml(value) {
 
 // One bar per chart.data entry, widths scaled against the largest total
 // in the chart - a template-string SVG, not <canvas> and not a charting
-// library, per the design spec's "zero dependency" principle.
+// library, per the design spec's "zero dependency" principle. Series
+// charts are skipped here (they'll be rendered by Task 3's D3 code).
 function renderBarChartSvg(chart) {
+  if (chart.series) {
+    return ''; // ponytail: series chart rendering deferred to Task 3
+  }
   var width = 480;
   var barHeight = 28;
   var gap = 8;

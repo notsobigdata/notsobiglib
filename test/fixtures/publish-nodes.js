@@ -133,6 +133,33 @@ var chartsV2Publish = {
   ]
 };
 
+var lineChartPublish = {
+  kind: 'publish',
+  name: 'lineChartPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'line-chart.html' },
+  charts: [{ id: 'trend', type: 'line', title: 'Trend', groupBy: 'day', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var lineChartDatePublish = {
+  kind: 'publish',
+  name: 'lineChartDatePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'line-chart-date.html' },
+  charts: [{ id: 'trend', type: 'line', title: 'Trend', groupBy: 'order_date', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
+var seriesChartPublish = {
+  kind: 'publish',
+  name: 'seriesChartPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'series-chart.html' },
+  charts: [{ id: 'by_category_channel', type: 'bar', title: 'By category/channel', groupBy: 'category', series: 'channel', stacking: 'stacked', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
 var badLayoutPublish = {
   kind: 'publish',
   name: 'badLayoutPublish',
