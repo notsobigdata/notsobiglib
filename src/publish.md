@@ -96,3 +96,35 @@ color scales, then again on the plain line chart's `fill: none`. Any new
 call site that sets `fill` (or any other CSS property `.chart-bar`/
 `.chart-label`/`.chart-value` also declares) on a D3-created element must
 use `.style(...)`, not `.attr(...)`.
+
+## Cross-chart highlighting is one shared client-side module, not per-chart state
+
+`CHART_CLIENT_JS` gained a small selection module for Phase 2
+(`docs/superpowers/specs/2026-09-06-publish-chart-interactivity-design.md`):
+one module-level `currentSelection` (`null`, or a plain object mapping a
+`linkKey`/`seriesLinkKey` name to the selected value), `handleChartClick()`
+to update it on a click, and `applyHighlight()` to re-derive every
+interactive element's opacity from it. `applyHighlight()` is generic across
+all three chart shapes on purpose: rather than re-deriving each drawn
+element's own `(groupValue, seriesValue)` from D3's per-shape datum layout
+a second time, every interactive element gets `data-group-value`/
+`data-series-value` DOM attributes at draw time, and `applyHighlight()`
+reads those back uniformly. Click handlers themselves *do* read the D3
+datum directly (cheaper, and the shape is known at the call site) — the
+DOM attributes exist specifically so the later, shape-agnostic highlight
+pass doesn't need to know a stacked bar's parent-datum trick versus a
+plain bar's flat datum.
+
+Matching is deliberately "only the keys the reacting chart itself
+declares, intersected with the current selection's keys" — never
+`Object.keys(currentSelection).length === Object.keys(ownKeys).length`
+strict equality. A chart declaring only `linkKey` must still react to a
+selection that also carries a `seriesLinkKey` entry from a different
+chart's stacked-segment click, by matching on the one dimension it
+understands and ignoring the rest. Getting this backwards (requiring an
+exact key-set match) is the most likely way a future change to this
+module quietly breaks cross-chart highlighting between charts of
+different shapes — see `selectionMatches` for the actual implementation.
+
+No new `.attr("fill", ...)`-vs-`.style("fill", ...)` traps were introduced
+here — none of this task's new code sets `fill`.
