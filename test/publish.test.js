@@ -421,6 +421,44 @@ function testPublishSeriesChartBuildsDenseZeroFilledMatrix() {
   assert.strictEqual(groupB.values.store, 0, 'expected B/store zero-filled to 0, got: ' + JSON.stringify(groupB));
 }
 
+function testPublishSeriesChartHandlesSpacesWithoutCollision() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['location', 'channel_type', 'revenue'], [
+    ['New York', 'Paid Search', '100'],
+    ['New', 'York Paid Search', '50'],  // Different combination, same concat result
+    ['New York', 'Organic', '25']
+    // Tests: 'New York' + 'Paid Search' and 'New' + 'York Paid Search'
+    // would both hash to 'New York Paid Search' with string key;
+    // nested maps keep them separate.
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select seriesChartWithSpacesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  var chart = payload.charts.filter(function (c) { return c.id === 'by_location_channel'; })[0];
+
+  assert.deepStrictEqual(chart.seriesKeys, ['Paid Search', 'York Paid Search', 'Organic'],
+    'expected seriesKeys in first-seen order, got: ' + JSON.stringify(chart.seriesKeys));
+  var groupNewYork = chart.data.filter(function (d) { return d.groupValue === 'New York'; })[0];
+  var groupNew = chart.data.filter(function (d) { return d.groupValue === 'New'; })[0];
+
+  // New York should have: Paid Search=100, York Paid Search=0 (zero-filled), Organic=25
+  assert.strictEqual(groupNewYork.values['Paid Search'], 100,
+    'expected New York / Paid Search = 100, got: ' + JSON.stringify(groupNewYork));
+  assert.strictEqual(groupNewYork.values['York Paid Search'], 0,
+    'expected New York / York Paid Search zero-filled to 0, got: ' + JSON.stringify(groupNewYork));
+  assert.strictEqual(groupNewYork.values.Organic, 25,
+    'expected New York / Organic = 25, got: ' + JSON.stringify(groupNewYork));
+
+  // New should have: Paid Search=0 (zero-filled), York Paid Search=50, Organic=0 (zero-filled)
+  assert.strictEqual(groupNew.values['Paid Search'], 0,
+    'expected New / Paid Search zero-filled to 0, got: ' + JSON.stringify(groupNew));
+  assert.strictEqual(groupNew.values['York Paid Search'], 50,
+    'expected New / York Paid Search = 50, got: ' + JSON.stringify(groupNew));
+  assert.strictEqual(groupNew.values.Organic, 0,
+    'expected New / Organic zero-filled to 0, got: ' + JSON.stringify(groupNew));
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -450,5 +488,6 @@ module.exports = {
   testPublishNoPaginationScriptWithoutTables: testPublishNoPaginationScriptWithoutTables,
   testPublishLineChartSortsGroupsByNumericValue: testPublishLineChartSortsGroupsByNumericValue,
   testPublishLineChartSortsGroupsByDateString: testPublishLineChartSortsGroupsByDateString,
-  testPublishSeriesChartBuildsDenseZeroFilledMatrix: testPublishSeriesChartBuildsDenseZeroFilledMatrix
+  testPublishSeriesChartBuildsDenseZeroFilledMatrix: testPublishSeriesChartBuildsDenseZeroFilledMatrix,
+  testPublishSeriesChartHandlesSpacesWithoutCollision: testPublishSeriesChartHandlesSpacesWithoutCollision
 };

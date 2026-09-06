@@ -307,17 +307,18 @@ function buildChartPayload(chart, rows) {
         seriesSeen[seriesKey] = true;
         seriesKeys.push(seriesKey);
       }
-      var cellKey = groupKey + ' ' + seriesKey;
-      if (!has(cellRows, cellKey)) {
-        cellRows[cellKey] = [];
+      if (!cellRows[groupKey]) {
+        cellRows[groupKey] = emptyMap();
       }
-      cellRows[cellKey].push(row);
+      if (!cellRows[groupKey][seriesKey]) {
+        cellRows[groupKey][seriesKey] = [];
+      }
+      cellRows[groupKey][seriesKey].push(row);
     });
     var data = groupKeys.map(function (groupKey) {
       var values = emptyMap();
       seriesKeys.forEach(function (seriesKey) {
-        var cellKey = groupKey + ' ' + seriesKey;
-        values[seriesKey] = computeAggregate(cellRows[cellKey] || [], chart.metric.agg, chart.metric.field);
+        values[seriesKey] = computeAggregate((cellRows[groupKey] && cellRows[groupKey][seriesKey]) || [], chart.metric.agg, chart.metric.field);
       });
       return { groupValue: groupKey, values: values };
     });

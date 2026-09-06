@@ -160,6 +160,20 @@ var seriesChartPublish = {
   charts: [{ id: 'by_category_channel', type: 'bar', title: 'By category/channel', groupBy: 'category', series: 'channel', stacking: 'stacked', metric: { agg: 'sum', field: 'revenue' } }]
 };
 
+// Regression test for cell-key collision: values with spaces must not
+// cross-contaminate. E.g. groupKey='New York', seriesKey='Paid Search'
+// vs groupKey='New', seriesKey='York Paid Search' would both produce
+// cellKey='New York Paid Search' with string concatenation - a silent
+// data corruption. Nested maps prevent collision.
+var seriesChartWithSpacesPublish = {
+  kind: 'publish',
+  name: 'seriesChartWithSpacesPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'series-chart-spaces.html' },
+  charts: [{ id: 'by_location_channel', type: 'bar', title: 'By location/channel', groupBy: 'location', series: 'channel_type', stacking: 'grouped', metric: { agg: 'sum', field: 'revenue' } }]
+};
+
 var badLayoutPublish = {
   kind: 'publish',
   name: 'badLayoutPublish',
