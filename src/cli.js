@@ -26,7 +26,8 @@
 // generalized version of this one.
 var EXECUTORS = {
   move: move,
-  model: model
+  model: model,
+  publish: publish
 };
 
 // The compile-time counterpart to EXECUTORS, consulted only by
@@ -590,7 +591,7 @@ function recordBlockedNode(node, check, blocked, results) {
   Logger.log((check.status === 'failed' ? 'FAIL  ' : 'SKIP  ') + nodeLabel(node) + ' - ' + (check.error || 'waiting on ' + check.blockedBy.join(', ')));
 }
 
-function runNodes(nodesOrLevels, command) {
+function runNodes(nodesOrLevels, command, allNodes) {
   var levels = (nodesOrLevels.length > 0 && Array.isArray(nodesOrLevels[0]))
     ? nodesOrLevels
     : [nodesOrLevels];
@@ -678,7 +679,7 @@ function runNodes(nodesOrLevels, command) {
     Logger.log('START ' + nodeLabel(node));
     var startedAt = new Date().getTime();
     try {
-      var result = EXECUTORS[node.kind](node.config);
+      var result = EXECUTORS[node.kind](node.config, allNodes);
       var elapsed = new Date().getTime() - startedAt;
       results.push({ name: node.name, kind: node.kind, status: 'success', ms: elapsed, result: result });
       if (verbose) {
@@ -1485,7 +1486,7 @@ function cli(input) {
   // For 'run', group by levels to enable parallel execution within each level;
   // for 'list'/'compile', keep flat for backward compat (no functional difference).
   var nodesToRun = parsed.command === 'run' ? buildLevelGroups(ordered) : ordered;
-  var results = runNodes(nodesToRun, parsed.command);
+  var results = runNodes(nodesToRun, parsed.command, discovered.nodes);
   var ok = results.every(function (result) { return result.status !== 'failed' && result.status !== 'skipped'; });
   Logger.log('DONE  cli("' + input + '") - ' + formatStatusCounts(results) + ' (' + results.length + ' total).');
   var report = {

@@ -21,7 +21,7 @@ cd "$(dirname "$0")"
 # is a list of hoisted function declarations sharing one closure - but an
 # explicit list keeps the built file's reading order stable and makes
 # "what is this library made of" a one-line answer.
-MODULES="move.js model.js cli.js"
+MODULES="move.js model.js publish.js cli.js"
 
 OUTPUT="src.js"
 
