@@ -55,9 +55,31 @@ Task 3 for the fixture-first `notsobigtests` companion this needs.
 columns: [{key,label}], rows: [[cell,...]]}` shape before
 `renderReportHtml` ever sees them — every cell already formatted to a
 string, the same way `kpi.formatted` already is. That convergence is
-deliberate: `renderTableSection()` and `TABLE_PAGINATION_JS` don't know
+deliberate: `renderTableSection()` and `TABLE_CLIENT_JS` don't know
 or care which mode produced a given table, so a third mode later needs
 only its own `buildXTablePayload` function producing this same shape,
-never a second render/pagination path. See
+never a second render/pagination/export path. See
 `docs/superpowers/specs/2026-09-06-publish-table-block-design.md`'s §4
 for the fuller rationale.
+
+## CSV export reuses the pager's per-table scope, not a second listener
+
+The "Export CSV" button's click handler lives inside `TABLE_CLIENT_JS`'s
+existing per-`.table-block` `forEach` (renamed from
+`TABLE_PAGINATION_JS` once it grew a second responsibility), not a
+separate `DOMContentLoaded` listener — it already has `table`/`tableId`
+in scope from the pager setup, so wiring the button there is one more
+`addEventListener` call, not new lookup logic. It always exports the
+full `table.rows` set (not just the visible page), since that data is
+already embedded for the pager and slicing it down for export would be
+a step backward. `csvField()` is a plain top-level function in the same
+JS string, not folded into the `forEach`, since it's pure and doesn't
+need per-section scope.
+
+`csvField()` also guards against CSV formula injection (CWE-1236):
+`table.rows` cells come from a live BigQuery table `publish()` never
+validates for injection safety (same untrusted-data posture as the
+`<`-escaping fix for the embedded JSON payload, see `be7a960`) — a cell
+starting with `=`/`+`/`-`/`@` would otherwise be parsed as a formula by
+Excel/Sheets the moment a human opens the exported file, so a leading
+`'` is prefixed before the existing quote/comma/newline escaping runs.

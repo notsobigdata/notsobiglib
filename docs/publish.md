@@ -91,8 +91,12 @@ tables: [
   still reaches the browser (in the same embedded
   `window.__PUBLISH_PAYLOAD__` `kpis`/`charts` already use) for the
   "Next" button to page through.
-- No column-header sort, search, or CSV export yet — see "What's not
-  here yet" below.
+- Every table also gets an "Export CSV" button that downloads the
+  **full** row set (not just the current page) as `<table id>.csv`,
+  built client-side from the same embedded, already-formatted cells the
+  pager uses — no extra config, no server round trip.
+- No column-header sort or search yet — see "What's not here yet"
+  below.
 
 The generated `.html` also embeds the full computed payload as
 `window.__PUBLISH_PAYLOAD__`, a plain JS object separate from the
@@ -118,9 +122,12 @@ pager needs to page through without re-formatting anything.
 ## What's not here yet
 
 Filters, drill-down, per-block `source` overrides, cross-file
-navigation, a `board` tree layout, and CSV export are all planned but
-not implemented — see
+navigation, and a `board` tree layout are all planned but not
+implemented — see
 `docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s "Future
-direction" section. Column-header sort, search, and CSV export for the
-`tables[]` block specifically are also not implemented — see
+direction" section (CSV export from that list now ships, see
+`tables[]` above). Column-header sort and search for the `tables[]`
+block specifically are also not implemented yet — deliberately
+deferred until `filters` is designed, since both would likely share
+the same client-side row-filtering JS — see
 `docs/superpowers/specs/2026-09-06-publish-table-block-design.md`'s §1.

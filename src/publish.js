@@ -333,7 +333,7 @@ var REPORT_CSS = [
 // holds every row, pre-formatted (see buildRawTablePayload/
 // buildAggregatedTablePayload) - only the first pageSize rows render here;
 // the rest reaches the browser via the existing __PUBLISH_PAYLOAD__ embed,
-// for TABLE_PAGINATION_JS below to page through.
+// for TABLE_CLIENT_JS below to page through (and export as CSV).
 function renderTableSection(table) {
   var firstPageRows = table.rows.slice(0, table.pageSize);
   var pageCount = Math.max(1, Math.ceil(table.rows.length / table.pageSize));
@@ -350,17 +350,26 @@ function renderTableSection(table) {
     + '<button type="button" class="table-prev" disabled>Previous</button>'
     + '<span class="table-page-label">Page 1 of ' + pageCount + '</span>'
     + '<button type="button" class="table-next"' + (pageCount <= 1 ? ' disabled' : '') + '>Next</button>'
+    + '<button type="button" class="table-csv-export">Export CSV</button>'
     + '</div></section>';
 }
 
-// One generic paginator for every table.table-block on the page - reads
-// columns/rows/pageSize back off window.__PUBLISH_PAYLOAD__ by
-// data-table-id, never re-computes or re-formats a value (everything's
-// already a formatted string in the payload). Builds <tr>/<td> via
-// createElement + textContent only, per this repo's rule against
-// innerHTML/string-concatenated markup on payload-sourced data - see the
-// design spec's Render section.
-var TABLE_PAGINATION_JS = [
+// One generic client-side handler for every table.table-block on the page -
+// pagination plus CSV export, both reading columns/rows/pageSize back off
+// window.__PUBLISH_PAYLOAD__ by data-table-id, never re-computing or
+// re-formatting a value (everything's already a formatted string in the
+// payload). Pagination builds <tr>/<td> via createElement + textContent
+// only, per this repo's rule against innerHTML/string-concatenated markup
+// on payload-sourced data - see the design spec's Render section. CSV
+// export always exports the full row set, not just the current page - it's
+// already embedded for pagination, so there's no reason to limit it.
+var TABLE_CLIENT_JS = [
+  'function csvField(value) {',
+  '  var str = String(value);',
+  '  if (/^[=+@-]/.test(str)) { str = "\'" + str; }',
+  '  if (/["\\r\\n,]/.test(str)) { return "\\"" + str.replace(/"/g, "\\"\\"") + "\\""; }',
+  '  return str;',
+  '}',
   'document.addEventListener("DOMContentLoaded", function () {',
   '  var payload = window.__PUBLISH_PAYLOAD__;',
   '  Array.prototype.forEach.call(document.querySelectorAll(".table-block"), function (section) {',
@@ -373,6 +382,7 @@ var TABLE_PAGINATION_JS = [
   '    var prevBtn = section.querySelector(".table-prev");',
   '    var nextBtn = section.querySelector(".table-next");',
   '    var pageLabel = section.querySelector(".table-page-label");',
+  '    var csvBtn = section.querySelector(".table-csv-export");',
   '    function render() {',
   '      while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }',
   '      var start = page * table.pageSize;',
@@ -391,6 +401,20 @@ var TABLE_PAGINATION_JS = [
   '    }',
   '    prevBtn.addEventListener("click", function () { if (page > 0) { page -= 1; render(); } });',
   '    nextBtn.addEventListener("click", function () { if (page < pageCount - 1) { page += 1; render(); } });',
+  '    csvBtn.addEventListener("click", function () {',
+  '      var headerRow = table.columns.map(function (c) { return csvField(c.label); }).join(",");',
+  '      var lines = table.rows.map(function (row) { return row.map(csvField).join(","); });',
+  '      var csv = [headerRow].concat(lines).join("\\r\\n");',
+  '      var blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });',
+  '      var url = URL.createObjectURL(blob);',
+  '      var a = document.createElement("a");',
+  '      a.href = url;',
+  '      a.download = tableId + ".csv";',
+  '      document.body.appendChild(a);',
+  '      a.click();',
+  '      document.body.removeChild(a);',
+  '      URL.revokeObjectURL(url);',
+  '    });',
   '  });',
   '});'
 ].join('\n');
@@ -406,7 +430,7 @@ function renderReportHtml(payload, config) {
   var tableSections = payload.tables.map(renderTableSection).join('');
   var script = 'window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';';
   if (payload.tables.length) {
-    script += TABLE_PAGINATION_JS;
+    script += TABLE_CLIENT_JS;
   }
   return '<!doctype html><html><head><meta charset="utf-8">'
     + '<title>' + escapeHtml(config.target.fileName) + '</title>'
