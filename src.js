@@ -377,6 +377,34 @@ var NotSoBigData = (function () {
     assertSingleStatementStripped(stripped, messagePrefix);
   }
 
+  // Submits a BigQuery query job (Jobs.query) and returns job metadata without
+  // waiting for completion. Use pollBigQueryJob() to wait for results in parallel
+  // with other jobs, or runBigQueryQueryJob() for the synchronous, single-job path.
+  function submitBigQueryQuery(queryRequest, projectId) {
+    var queryResults = BigQuery.Jobs.query(queryRequest, projectId);
+    return {
+      projectId: projectId,
+      jobId: queryResults.jobReference.jobId,
+      initialResults: queryResults,
+      maxResults: queryRequest.maxResults
+    };
+  }
+
+  // Polls a submitted BigQuery query job to completion. jobInfo is the object
+  // returned by submitBigQueryQuery(). Returns the completed queryResults object.
+  function pollBigQueryJob(jobInfo) {
+    var queryResults = jobInfo.initialResults;
+    var projectId = jobInfo.projectId;
+    var jobId = jobInfo.jobId;
+    var pollParams = jobInfo.maxResults ? { maxResults: jobInfo.maxResults } : undefined;
+    while (!queryResults.jobComplete) {
+      queryResults = pollParams
+        ? BigQuery.Jobs.getQueryResults(projectId, jobId, pollParams)
+        : BigQuery.Jobs.getQueryResults(projectId, jobId);
+    }
+    return queryResults;
+  }
+
   // Runs a BigQuery query job (Jobs.query) to completion and returns
   // whichever response - the initial Jobs.query call, or the last
   // getQueryResults poll - ended up job-complete. A caller that wants more
@@ -391,15 +419,94 @@ var NotSoBigData = (function () {
   // that stopped applying the moment a job needed more than one poll to
   // finish would defeat that.
   function runBigQueryQueryJob(queryRequest, projectId) {
-    var queryResults = BigQuery.Jobs.query(queryRequest, projectId);
-    var jobId = queryResults.jobReference.jobId;
-    var pollParams = queryRequest.maxResults ? { maxResults: queryRequest.maxResults } : undefined;
-    while (!queryResults.jobComplete) {
-      queryResults = pollParams
-        ? BigQuery.Jobs.getQueryResults(projectId, jobId, pollParams)
-        : BigQuery.Jobs.getQueryResults(projectId, jobId);
+    var jobInfo = submitBigQueryQuery(queryRequest, projectId);
+    return pollBigQueryJob(jobInfo);
+  }
+
+  // Non-blocking status check for a job submitted via submitBigQueryQuery -
+  // timeoutMs:0 tells getQueryResults to return whatever it currently knows
+  // instead of long-polling, which is what pollBigQueryJob above relies on
+  // for its wait-for-completion behavior. This is the primitive
+  // runBigQueryPipelinesInParallel below needs to check many in-flight jobs
+  // per round without any one of them blocking the others.
+  function checkBigQueryJob(jobInfo) {
+    var pollParams = jobInfo.maxResults ? { maxResults: jobInfo.maxResults, timeoutMs: 0 } : { timeoutMs: 0 };
+    var queryResults = BigQuery.Jobs.getQueryResults(jobInfo.projectId, jobInfo.jobId, pollParams);
+    return { complete: !!queryResults.jobComplete, results: queryResults };
+  }
+
+  // Drives N independent multi-step BigQuery pipelines to completion,
+  // overlapping their wait time instead of draining pipeline 1 to
+  // completion before even checking pipeline 2 (which calling
+  // pollBigQueryJob once per pipeline, in sequence, would do - each call
+  // blocks internally until that one job is done). Every in-flight job is
+  // checked once per round via the non-blocking checkBigQueryJob above; a
+  // short sleep only happens when a whole round found nothing to advance,
+  // not on every round, so this reacts the instant something finishes
+  // instead of busy-looping.
+  //
+  // Each element of `pipelineFactories` is a zero-arg function returning a
+  // pipeline: {start, resume}. start() does synchronous prep (building SQL,
+  // schema introspection) and returns either {job: <jobInfo from
+  // submitBigQueryQuery>} to wait on, or {done:true, result}/{done:true,
+  // error} for a pipeline needing no BigQuery job at all. resume(queryResults)
+  // is called once that job completes; it may do more synchronous work
+  // (running tests, promoting a staged table, cleanup) and either return
+  // another {job: ...} to continue the pipeline, or {done:true,
+  // result}/{done:true, error} to finish it. Building the pipeline is
+  // deferred to here (called lazily, once per element, right before that
+  // element's first start()) rather than done by the caller up front,
+  // specifically so a factory that throws - a bad {{ ref() }}, a
+  // multi-statement SQL file - is isolated exactly like a start()/resume()
+  // throw: reported as {error} for that pipeline only, never aborting the
+  // others.
+  function runBigQueryPipelinesInParallel(pipelineFactories) {
+    function advance(state, queryResults) {
+      try {
+        if (!state.pipeline) {
+          state.pipeline = state.pipelineFactory();
+        }
+        var step = arguments.length > 1 ? state.pipeline.resume(queryResults) : state.pipeline.start();
+        if (step.done) {
+          state.done = true;
+          state.result = step.result;
+          state.error = step.error || null;
+          state.elapsed = new Date().getTime() - state.startedAt;
+        } else {
+          state.job = step.job;
+        }
+      } catch (error) {
+        state.done = true;
+        state.error = error.message;
+        state.elapsed = new Date().getTime() - state.startedAt;
+      }
     }
-    return queryResults;
+
+    var states = pipelineFactories.map(function (pipelineFactory) {
+      return { pipelineFactory: pipelineFactory, pipeline: null, job: null, done: false, result: null, error: null, startedAt: new Date().getTime(), elapsed: null };
+    });
+    states.forEach(function (state) { advance(state); });
+
+    while (states.some(function (s) { return !s.done; })) {
+      var anyProgress = false;
+      states.forEach(function (state) {
+        if (state.done) {
+          return;
+        }
+        var check = checkBigQueryJob(state.job);
+        if (check.complete) {
+          anyProgress = true;
+          advance(state, check.results);
+        }
+      });
+      if (!anyProgress) {
+        Utilities.sleep(200);
+      }
+    }
+
+    return states.map(function (state) {
+      return { result: state.result, error: state.error, elapsed: state.elapsed };
+    });
   }
 
   // Reads from BigQuery via the Advanced BigQuery Service - either a whole
@@ -1045,10 +1152,11 @@ var NotSoBigData = (function () {
   // Promotes a staging table into its real destination via a BigQuery copy
   // job (a metadata-level table copy, no query slots consumed - not a
   // second "SELECT * FROM staging" write). The one piece of "stage, test,
-  // promote" this function's own two callers - loadBigQueryStaged below and
-  // model.js's modelTableStaged - need identically, extracted so a future
-  // copy-job quirk only needs fixing in one place. widenDestinationTableForPromotion's
-  // own discovery is exactly that kind of quirk: schemaUpdateOptions on the
+  // promote" this function's own two callers - loadBigQueryStaged below
+  // and model.js's buildStagedTablePipeline - need identically, extracted
+  // so a future copy-job quirk only needs fixing in one place.
+  // widenDestinationTableForPromotion's own discovery is exactly that kind
+  // of quirk: schemaUpdateOptions on the
   // copy job itself was tried first and confirmed, against a real project,
   // not to work the way a load job's does - if a second such quirk ever
   // turns up, this is the one function both callers already share, not two
@@ -1671,6 +1779,47 @@ var NotSoBigData = (function () {
     return /\{%\s*endfor\s*%\}/;
   }
 
+  // {% if is_incremental() %} - conditional block, only for the exact condition
+  // is_incremental(), no else/elif. Used in discovery (always evaluate true) to
+  // keep refs inside the block, and at compile-time to evaluate the real
+  // condition: relation exists && materialized is incremental && no full-refresh.
+  function ifOpenPattern() {
+    return /\{%\s*if\s+is_incremental\s*\(\s*\)\s*%\}/;
+  }
+
+  function ifEndPattern() {
+    return /\{%\s*endif\s*%\}/;
+  }
+
+  // Expands {% if is_incremental() %}...{% endif %} blocks. The evaluateIsIncremental
+  // boolean determines whether to keep or discard the body: true (at discovery time,
+  // or at compile-time when the condition is true) keeps it, false (at compile-time
+  // when the condition is false) discards it and both markers.
+  function expandIfStatements(sql, evaluateIsIncremental) {
+    var openPattern = ifOpenPattern();
+    var endPattern = ifEndPattern();
+    var result = '';
+    var remaining = sql;
+    var openMatch;
+    while ((openMatch = openPattern.exec(remaining))) {
+      var before = remaining.slice(0, openMatch.index);
+      var afterOpen = remaining.slice(openMatch.index + openMatch[0].length);
+      var endMatch = endPattern.exec(afterOpen);
+      if (!endMatch) {
+        throw new Error('model(): "{% if is_incremental() %}" has no matching "{% endif %}".');
+      }
+      var body = afterOpen.slice(0, endMatch.index);
+      var bodyPart = evaluateIsIncremental ? body : '';
+      result += before + bodyPart;
+      remaining = afterOpen.slice(endMatch.index + endMatch[0].length);
+    }
+    result += remaining;
+    if (endPattern.test(result)) {
+      throw new Error('model(): SQL has a "{% endif %}" with no matching "{% if is_incremental() %}".');
+    }
+    return result;
+  }
+
   function scanTemplateExpressions(sql) {
     var pattern = templateExpressionPattern();
     var matches = [];
@@ -1772,7 +1921,7 @@ var NotSoBigData = (function () {
   // reason: a registry-wide "every model's default sqlFile lives under
   // this prefix" is a real shape, and folders (below) reuse this same key
   // name to set it per group instead of project-wide.
-  var MODEL_DEFAULT_KEYS = ['projectId', 'dataset', 'materialized', 'dependsOn', 'modelDir'];
+  var MODEL_DEFAULT_KEYS = ['projectId', 'dataset', 'materialized', 'dependsOn', 'modelDir', 'incrementalStrategy', 'uniqueKey', 'partitionBy', 'on_schema_change'];
 
   // The keys a {{ config(...) }} call inside a model's own SQL may set - see
   // extractConfigOverrides below. Kept separate from MODEL_DEFAULT_KEYS (even
@@ -1782,7 +1931,11 @@ var NotSoBigData = (function () {
   // itself may override inline" - projectId/dataset/dependsOn are registry
   // routing concerns a model's own SQL has no business changing, even once a
   // second config()-settable key beyond materialized eventually shows up.
-  var MODEL_CONFIG_KEYS = ['materialized'];
+  // incrementalStrategy, uniqueKey, and on_schema_change are settable via config() inside SQL
+  // (as comma-separated strings: uniqueKey='a,b'), but partitionBy (a structured
+  // object { field, dataType, granularity }) is not - string-only parsing stays
+  // in MODEL_CONFIG_KEYS, structured config stays registry-only.
+  var MODEL_CONFIG_KEYS = ['materialized', 'incrementalStrategy', 'uniqueKey', 'on_schema_change'];
 
   // The {{ name(...) }} calls compileModelSql() gives a built-in meaning -
   // see readMacroDefinitions() below. A user-authored macro reusing one of
@@ -2760,9 +2913,23 @@ var NotSoBigData = (function () {
     return spans.some(function (span) { return offset >= span[0] && offset < span[1]; });
   }
 
-  function compileModelSql(sql, resolveRef, resolveSource, registry) {
+  // config is passed so that {% if is_incremental() %} can be evaluated - it needs
+  // to know if materialized is 'incremental', and if so, whether the relation exists
+  // and fullRefresh is false. In discovery mode (expandModelNodes), config is undefined
+  // and is_incremental() is always kept; at compile/run time, config is passed and
+  // the condition is evaluated for real.
+  function compileModelSql(sql, resolveRef, resolveSource, registry, config) {
     var setValues = extractSetStatements(sql);
     var refConfigVarSpans = commentSpans(sql);
+    // Evaluate is_incremental() for {% if %} expansion. True if all three conditions
+    // hold: materialized is 'incremental', the target relation exists, and there's
+    // no full-refresh override.
+    var isIncremental = config && config.materialized === 'incremental' &&
+      relationExists(config.projectId, config.dataset, config.name) &&
+      !config.fullRefresh;
+    // Expand {% if is_incremental() %}...{% endif %} - strip the block if the
+    // condition is false, keep it (both body and markers) if true.
+    sql = expandIfStatements(sql, isIncremental);
     var compiled = sql.replace(templateExpressionPattern(), function (raw, call, args, offset) {
       if (isCommentedOut(refConfigVarSpans, offset)) {
         return raw;
@@ -2798,6 +2965,14 @@ var NotSoBigData = (function () {
     compiled = compiled.replace(bareVarPattern(), function (raw, name, offset) {
       if (isCommentedOut(bareVarSpans, offset)) {
         return raw;
+      }
+      // {{ this }} - the model's own qualified relation. Only valid for incremental
+      // models, where it refers to the target table (the incremental update target).
+      if (name === 'this') {
+        if (!config || config.materialized !== 'incremental') {
+          throw new Error('model(): "{{ this }}" can only be used in incremental models.');
+        }
+        return qualifiedRelation(config);
       }
       if (!has(setValues, name)) {
         throw new Error('model(): {{ ' + name + ' }} references "' + name + '", which is never set via {% set ' + name + ' = ... %} in this SQL.');
@@ -2846,14 +3021,60 @@ var NotSoBigData = (function () {
     return qualifiedTableRef(config.projectId, config.dataset, config.name);
   }
 
-  // view/table only - incremental (dbt's third materialization) is v2, same
-  // deferral as column-level tests.
+  // view/table/incremental - materialization shape. incremental is a table with
+  // an incremental strategy and an optional unique_key (for merge) or partition_by
+  // (for insert_overwrite).
   function resolveMaterialized(config) {
     var materialized = config.materialized || 'view';
-    if (materialized !== 'view' && materialized !== 'table') {
-      throw new Error('model(): "' + config.name + '" has materialized "' + materialized + '" - expected "view" or "table" (incremental is not implemented yet).');
+    if (materialized !== 'view' && materialized !== 'table' && materialized !== 'incremental') {
+      throw new Error('model(): "' + config.name + '" has materialized "' + materialized + '" - expected "view", "table", or "incremental".');
     }
     return materialized;
+  }
+
+  // For incremental models: resolve the strategy (merge/insert_overwrite/append,
+  // default merge). Called only when materialized is 'incremental'.
+  function resolveIncrementalStrategy(config) {
+    var strategy = config.incrementalStrategy || 'merge';
+    if (strategy !== 'merge' && strategy !== 'insert_overwrite' && strategy !== 'append') {
+      throw new Error('model(): "' + config.name + '" has incrementalStrategy "' + strategy + '" - expected "merge", "insert_overwrite", or "append".');
+    }
+    return strategy;
+  }
+
+  // For incremental models: resolve on_schema_change behavior (ignore/fail/append_new_columns/sync_all_columns,
+  // default ignore). Called only when materialized is 'incremental'.
+  function resolveOnSchemaChange(config) {
+    var onSchemaChange = config.on_schema_change || 'ignore';
+    if (onSchemaChange !== 'ignore' && onSchemaChange !== 'fail' && onSchemaChange !== 'append_new_columns' && onSchemaChange !== 'sync_all_columns') {
+      throw new Error('model(): "' + config.name + '" has on_schema_change "' + onSchemaChange + '" - expected "ignore", "fail", "append_new_columns", or "sync_all_columns".');
+    }
+    return onSchemaChange;
+  }
+
+  // Validates that an incremental model's config has the required keys for its
+  // chosen strategy. merge needs uniqueKey, insert_overwrite needs partitionBy.
+  // append has no required keys.
+  function validateIncrementalConfig(config, strategy) {
+    if (strategy === 'merge') {
+      if (!config.uniqueKey) {
+        throw new Error('model(): "' + config.name + '" has incrementalStrategy "merge" but no uniqueKey - set uniqueKey on the model entry or in {{ config(...) }}.');
+      }
+    } else if (strategy === 'insert_overwrite') {
+      if (!config.partitionBy) {
+        throw new Error('model(): "' + config.name + '" has incrementalStrategy "insert_overwrite" but no partitionBy - set partitionBy on the model entry.');
+      }
+      if (!config.partitionBy.field || !config.partitionBy.dataType || !config.partitionBy.granularity) {
+        throw new Error('model(): "' + config.name + '" has partitionBy but is missing field, dataType, or granularity.');
+      }
+    }
+  }
+
+  // on_schema_change is only valid for incremental models. Reject it on any other materialization.
+  function validateOnSchemaChangeConfig(config) {
+    if (config.on_schema_change && config.materialized !== 'incremental') {
+      throw new Error('model(): "' + config.name + '" sets on_schema_change but is not an incremental model - on_schema_change is only valid for materialized="incremental".');
+    }
   }
 
   // The check names a model's own tests[] entries may use for a "generic"
@@ -2941,10 +3162,10 @@ var NotSoBigData = (function () {
   // MODEL_TEST_COMPILERS.relationships's own resolveModelConfig() call to
   // throw "is not declared in notsobigdataModels.models" once the model had
   // already materialized (CREATE OR REPLACE already ran, and for a "table"
-  // materialization, modelTableStaged() had already created its staging
-  // table) - a discovery-time check should have caught this before any
-  // BigQuery work started, the same way every other "to"/"ref()" mismatch
-  // in this file already does.
+  // materialization, buildStagedTablePipeline()'s start() had already
+  // created its staging table) - a discovery-time check should have caught
+  // this before any BigQuery work started, the same way every other
+  // "to"/"ref()" mismatch in this file already does.
   function validateModelTest(test, messagePrefix, registry) {
     if (!test || typeof test !== 'object') {
       throw new Error(messagePrefix + ' every "tests" entry must be an object.');
@@ -3192,6 +3413,10 @@ var NotSoBigData = (function () {
           throw new Error(cached.error);
         }
         config.sql = extractModelSql(cached.content, config.sqlFile, name);
+        // {% if is_incremental() %} expands first at discovery time - always
+        // keeping the body so refs inside it are found by the dependency scan
+        // below, regardless of whether the relation actually exists.
+        config.sql = expandIfStatements(config.sql, true);
         // {% for %} expands before anything else scans this SQL - see
         // expandForLoops()'s own comment for why this has to run first, not
         // as another case in compileModelSql()'s dispatch.
@@ -3216,6 +3441,11 @@ var NotSoBigData = (function () {
         validateModelTests(config.tests, 'model(): "' + name + '"', registry);
         validateSetUsage(config.sql, 'model(): "' + name + '"');
         validateVarUsage(templateMatches, registry, 'model(): "' + name + '"');
+        validateOnSchemaChangeConfig(config);
+        // Validate on_schema_change value if set
+        if (config.on_schema_change) {
+          resolveOnSchemaChange(config);
+        }
         // Every {{ ref(...) }} name must resolve to something - a declared
         // model (unchanged, handled by model()'s own resolveRef at compile
         // time) or a bigquery-target move node (resolved right here, once,
@@ -3285,15 +3515,16 @@ var NotSoBigData = (function () {
   // table. A table with no tests also just materializes directly - nothing
   // to check, nothing to gain from staging.
   //
-  // A table *with* tests goes through modelTableStaged() below instead:
-  // build into a scratch table, test the scratch table, and only promote
-  // into the real relation - via a copy job, not a second SELECT - once
-  // every test has passed. That's the guarantee CREATE OR REPLACE alone
-  // can't give a table model: without staging, a failing test is
+  // A table *with* tests goes through buildStagedTablePipeline() below
+  // instead: build into a scratch table, test the scratch table, and only
+  // promote into the real relation - via a copy job, not a second SELECT -
+  // once every test has passed. That's the guarantee CREATE OR REPLACE
+  // alone can't give a table model: without staging, a failing test is
   // discovered only after the bad rows are already sitting in the real
   // relation (this was itself the shape of the bug an external review
-  // caught - see modelTableStaged()'s own comment for the fix and why the
-  // previous "would double BigQuery compute" reasoning here didn't hold).
+  // caught - see buildStagedTablePipeline()'s own comment for the fix and
+  // why the previous "would double BigQuery compute" reasoning here didn't
+  // hold).
   //
   // The ref()-resolution closure both model() and compileModel() need:
   // a name resolves against either a declared model (via
@@ -3348,6 +3579,19 @@ var NotSoBigData = (function () {
       }
       throw new Error('model(): "' + config.name + '" has {{ source(\'' + sourceName + '\', \'' + tableName + '\') }}, which does not match a declared source/table in notsobigdataModels.sources.');
     };
+  }
+
+  // Checks whether a BigQuery table exists. Used to determine if an incremental
+  // model should do a full-refresh build (relation doesn't exist yet) or an
+  // incremental mutation (relation exists). Returns true if the table exists,
+  // false if it doesn't or if the API call fails for any reason.
+  function relationExists(projectId, dataset, table) {
+    try {
+      BigQuery.Tables.get(projectId, dataset, table);
+      return true;
+    } catch (error) {
+      return false;
+    }
   }
 
   // Flattens registry.sources (nested source -> table, the shape
@@ -3422,11 +3666,12 @@ var NotSoBigData = (function () {
   }
 
   // cli('sources')'s test check for one source table entry - reuses
-  // compileModelTests()/runSqlTests() exactly as modelTableStaged()/model()
-  // above already do for a model's own tests[], just pointed at the source
-  // table's own relation instead of a model's. registry is only needed for
-  // a "relationships" test's own "to" resolution (MODEL_TEST_COMPILERS.relationships,
-  // above), the same reason readSourcesEntry() needed it once already, at
+  // compileModelTests()/runModelTests() exactly as this file's own model
+  // pipelines above already do for a model's own tests[], just pointed at
+  // the source table's own relation instead of a model's. registry is only
+  // needed for a "relationships" test's own "to" resolution
+  // (MODEL_TEST_COMPILERS.relationships, above), the same reason
+  // readSourcesEntry() needed it once already, at
   // validation time - this is that same test list, now actually run.
   function runSourceTests(entry, registry) {
     var compiledTests = compileModelTests(entry.tests, registry);
@@ -3447,7 +3692,7 @@ var NotSoBigData = (function () {
     var sql = config.sql;
     assertSingleStatement(sql, 'model(): "' + config.name + '"');
     var registry = readModelsRegistry();
-    return compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry);
+    return compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry, config);
   }
 
   // config.sql is always already set by expandModelNodes() above by the
@@ -3456,31 +3701,201 @@ var NotSoBigData = (function () {
   // as "failed" before ever calling an EXECUTORS entry - so there is no path
   // into this function for a node that didn't get a real config.sql, and
   // config.tests (if present) has already passed validateModelTests above.
+  //
+  // model() itself is a thin wrapper: build this node's pipeline and drive
+  // it alone through runBigQueryPipelinesInParallel (move.js) - the same
+  // machinery cli.js's runNodes() uses to drive many models' pipelines side
+  // by side within one dependency level for a parallel 'run'. One node here,
+  // N there; a solo model() call and a parallel-level model() call can never
+  // diverge in what they submit, poll for, or return, because they're the
+  // same code - buildModelPipeline(config) itself is only ever called
+  // lazily from inside runBigQueryPipelinesInParallel, same as the parallel
+  // path, so even a construction-time throw is reported and rethrown the
+  // same way here as it would be there.
   function model(config) {
+    var outcome = runBigQueryPipelinesInParallel([function () { return buildModelPipeline(config); }])[0];
+    if (outcome.error) {
+      throw new Error(outcome.error);
+    }
+    return outcome.result;
+  }
+
+  // Builds this model's execution as a {start, resume} pipeline (see
+  // runBigQueryPipelinesInParallel's contract in move.js) instead of running
+  // it straight through, so cli.js can drive many models' pipelines side by
+  // side within one dependency level rather than submitting a job, blocking
+  // until it's done, then moving to the next model. Dispatches on
+  // materialized/hasTests exactly like model() always has; each branch
+  // below is the async form of what used to be its own synchronous
+  // function.
+  function buildModelPipeline(config) {
     var sql = config.sql;
     assertSingleStatement(sql, 'model(): "' + config.name + '"');
     var registry = readModelsRegistry();
-    var compiled = compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry);
+    var compiled = compileModelSql(sql, buildRefResolver(config, registry), buildSourceResolver(config, registry), registry, config);
     var relation = qualifiedRelation(config);
     var materialized = resolveMaterialized(config);
     var hasTests = !!(config.tests && config.tests.length);
 
+    if (materialized === 'incremental') {
+      return buildIncrementalPipeline(config, compiled, relation, registry, hasTests);
+    }
     if (materialized === 'table' && hasTests) {
-      return modelTableStaged(config, compiled, relation, registry);
+      return buildStagedTablePipeline(config, compiled, relation, registry);
+    }
+    return buildPlainPipeline(config, compiled, relation, registry, materialized, hasTests);
+  }
+
+  // Runs config.tests against `table` and returns the results - the same
+  // three lines every materialization branch below needs once its data
+  // lands, extracted so there's exactly one place building that message
+  // (previously repeated near-verbatim in model(), modelIncremental() and
+  // each of its three strategy functions).
+  function runModelTests(config, registry, dataset, table) {
+    var compiledTests = compileModelTests(config.tests, registry);
+    return runSqlTests(
+      compiledTests,
+      { projectId: config.projectId, dataset: dataset, table: table },
+      'model(): "' + config.name + '" tests'
+    );
+  }
+
+  // view, or table with no tests to gate on: one CREATE OR REPLACE job,
+  // then (if declared) tests against the relation it just wrote.
+  function buildPlainPipeline(config, compiled, relation, registry, materialized, hasTests) {
+    return {
+      start: function () {
+        var statement = 'CREATE OR REPLACE ' + materialized.toUpperCase() + ' ' + relation + ' AS\n' + compiled;
+        return { job: submitBigQueryQuery({ query: statement, useLegacySql: false }, config.projectId) };
+      },
+      resume: function () {
+        var result = { relation: relation, materialized: materialized };
+        if (hasTests) {
+          result.testResults = runModelTests(config, registry, config.dataset, config.name);
+        }
+        return { done: true, result: result };
+      }
+    };
+  }
+
+  // Handles an incremental model: first build (CREATE OR REPLACE TABLE), or
+  // incremental mutation (MERGE/INSERT INTO/INSERT OVERWRITE script,
+  // depending on strategy) - exactly one BigQuery job either way, so one
+  // submit/resume round trip covers every strategy. Tests run after against
+  // the real relation (no staging - see the design spec for why).
+  // insert_overwrite's script stages into a scratch table as part of that
+  // one job; resume() cleans it up once the job (and any tests) are done.
+  function buildIncrementalPipeline(config, compiled, relation, registry, hasTests) {
+    var strategy = resolveIncrementalStrategy(config);
+    validateIncrementalConfig(config, strategy);
+    var stagingTable = strategy === 'insert_overwrite' ? resolveStagingTableId(config.name) : null;
+    var isFullBuild = false;
+
+    // First build or full-refresh: CREATE OR REPLACE TABLE (same semantics
+    // as a regular table materialization). insert_overwrite adds PARTITION BY.
+    function fullBuildStatement() {
+      var partitionClause = '';
+      if (strategy === 'insert_overwrite' && config.partitionBy) {
+        var partitionExpr = quoteIdentifier(config.partitionBy.field);
+        if (config.partitionBy.dataType !== 'DATE' || config.partitionBy.granularity !== 'DAY') {
+          partitionExpr = 'TIMESTAMP_TRUNC(CAST(' + partitionExpr + ' AS TIMESTAMP), ' + config.partitionBy.granularity + ')';
+        }
+        partitionClause = ' PARTITION BY ' + partitionExpr + ' OPTIONS(require_partition_filter=false)';
+      }
+      return 'CREATE OR REPLACE TABLE ' + relation + partitionClause + ' AS\n' + compiled;
     }
 
-    var statement = 'CREATE OR REPLACE ' + materialized.toUpperCase() + ' ' + relation + ' AS\n' + compiled;
-    runBigQueryQueryJob({ query: statement, useLegacySql: false }, config.projectId);
-    var result = { relation: relation, materialized: materialized };
-    if (hasTests) {
-      var compiledTests = compileModelTests(config.tests, registry);
-      result.testResults = runSqlTests(
-        compiledTests,
-        { projectId: config.projectId, dataset: config.dataset, table: config.name },
-        'model(): "' + config.name + '" tests'
-      );
+    // MERGE strategy: upsert by unique_key. Extracts columns from the
+    // target relation's schema, builds SET clauses for MATCHED updates and
+    // INSERT clauses for NOT MATCHED, deriving both from the compiled
+    // SELECT's column list (via BigQuery's schema introspection).
+    function mergeStatement() {
+      var uniqueKey = config.uniqueKey;
+      if (typeof uniqueKey === 'string') {
+        uniqueKey = uniqueKey.split(',').map(function (k) { return k.trim(); });
+      } else if (!Array.isArray(uniqueKey)) {
+        uniqueKey = [uniqueKey];
+      }
+      var targetTable = BigQuery.Tables.get(config.projectId, config.dataset, config.name);
+      var targetColumns = targetTable.schema.fields.map(function (f) { return f.name; });
+      var onClause = uniqueKey.map(function (col) {
+        return 'T.' + quoteIdentifier(col) + ' = S.' + quoteIdentifier(col);
+      }).join(' AND ');
+      var setClauses = targetColumns
+        .filter(function (col) { return uniqueKey.indexOf(col) === -1; })
+        .map(function (col) { return quoteIdentifier(col) + ' = S.' + quoteIdentifier(col); });
+      var setClause = setClauses.length ? ', ' + setClauses.join(', ') : '';
+      var insertCols = targetColumns.map(function (col) { return quoteIdentifier(col); }).join(', ');
+      var insertVals = targetColumns.map(function (col) { return 'S.' + quoteIdentifier(col); }).join(', ');
+      return 'MERGE INTO ' + relation + ' T\n' +
+        'USING (\n' + compiled + '\n) S\n' +
+        'ON ' + onClause + '\n' +
+        'WHEN MATCHED THEN UPDATE SET ' + uniqueKey.map(function (col) {
+          return quoteIdentifier(col) + ' = S.' + quoteIdentifier(col);
+        }).join(', ') + setClause + '\n' +
+        'WHEN NOT MATCHED THEN INSERT (' + insertCols + ') VALUES (' + insertVals + ')';
     }
-    return result;
+
+    // INSERT OVERWRITE strategy: partition-based incremental via
+    // multi-statement BigQuery script. Stages the compiled SELECT into a
+    // temp table, captures touched partitions, deletes those partitions
+    // from the target, then inserts the staged data.
+    //
+    // Confirmed against live BigQuery via notsobigtests Layer 2
+    // (testParallelismMixedMaterializationTypesSucceedTogether,
+    // 2026-09-05): GAS's BigQuery Advanced Service does accept this
+    // multi-statement BEGIN...END scripting.
+    function insertOverwriteScript() {
+      var partitionField = quoteIdentifier(config.partitionBy.field);
+      var stagingRelation = qualifiedTableRef(config.projectId, config.dataset, stagingTable);
+      return 'BEGIN\n' +
+        '  DECLARE touched_partitions ARRAY<' + config.partitionBy.dataType + '>;\n' +
+        '  CREATE OR REPLACE TABLE ' + stagingRelation + ' AS\n' +
+        '  ' + compiled + ';\n' +
+        '  SET touched_partitions = (\n' +
+        '    SELECT ARRAY_AGG(DISTINCT ' + partitionField + ')\n' +
+        '    FROM ' + stagingRelation + '\n' +
+        '  );\n' +
+        '  DELETE FROM ' + relation + '\n' +
+        '  WHERE ' + partitionField + ' IN UNNEST(touched_partitions);\n' +
+        '  INSERT INTO ' + relation + '\n' +
+        '  SELECT * FROM ' + stagingRelation + ';\n' +
+        'END';
+    }
+
+    return {
+      start: function () {
+        var exists = relationExists(config.projectId, config.dataset, config.name);
+        isFullBuild = !exists || config.fullRefresh;
+        var query = isFullBuild ? fullBuildStatement()
+          : strategy === 'merge' ? mergeStatement()
+          : strategy === 'insert_overwrite' ? insertOverwriteScript()
+          : 'INSERT INTO ' + relation + '\n' + compiled; // append
+        return { job: submitBigQueryQuery({ query: query, useLegacySql: false }, config.projectId) };
+      },
+      // isFullBuild reaching here (rather than being read at submit time)
+      // matters: it's still whatever start() last set, since resume() only
+      // ever runs after that same start()'s job has completed - so the
+      // insert_overwrite staging cleanup below always matches the branch
+      // that actually ran.
+      resume: function () {
+        try {
+          var result = { relation: relation, materialized: 'incremental', strategy: strategy };
+          if (hasTests) {
+            result.testResults = runModelTests(config, registry, config.dataset, config.name);
+          }
+          return { done: true, result: result };
+        } finally {
+          if (!isFullBuild && strategy === 'insert_overwrite') {
+            try {
+              BigQuery.Tables.remove(config.projectId, config.dataset, stagingTable);
+            } catch (e) {
+              // Ignore cleanup errors - staging table has expiration_timestamp anyway
+            }
+          }
+        }
+      }
+    };
   }
 
   // Stages a table-materialized model's compiled SELECT into a scratch
@@ -3489,74 +3904,76 @@ var NotSoBigData = (function () {
   // loadBigQueryStaged (see its comment for the general shape and the
   // GAS-execution-timeout reasoning behind the staging table's
   // belt-and-suspenders expiration_timestamp). Reuses move.js's
-  // resolveStagingTableId rather than growing a second staging-id helper -
-  // it was already generic, just previously only called from move.js. As of
-  // 2026-08-11, promotion itself also reuses move.js's promoteStagedTable()
-  // rather than a second hand-written copy job - see that function's own
-  // comment for why (a future BigQuery copy-job quirk, the kind
-  // widenDestinationTableForPromotion already was once, should only ever
-  // need fixing in one place).
+  // resolveStagingTableId rather than growing a second staging-id helper,
+  // and promotion reuses move.js's promoteStagedTable() rather than a
+  // second hand-written copy job - see that function's own comment for why
+  // (a future BigQuery copy-job quirk, the kind widenDestinationTableForPromotion
+  // already was once, should only ever need fixing in one place).
   //
-  // Promotion is a BigQuery *copy* job (configuration.copy,
-  // WRITE_TRUNCATE - a full replace, matching what CREATE OR REPLACE TABLE
-  // already does every run since incremental materialization isn't
-  // implemented yet), not a second "CREATE OR REPLACE TABLE ... AS
-  // SELECT". That distinction is the whole point: an earlier version of
-  // this function's comment argued staging would double BigQuery compute,
-  // reasoning that promotion would mean re-running the model's own SELECT
-  // a second time. A copy job doesn't do that - it's a metadata-level
-  // operation, not a re-executed query - so the SELECT still runs exactly
-  // once per run, staging buys the "never test data that's already sitting
-  // in the real relation" guarantee for free, and the real relation is
-  // simply never touched by a run whose tests failed.
-  //
-  // The staging table's OPTIONS(expiration_timestamp=...) is set directly
-  // in the CREATE OR REPLACE TABLE DDL rather than via a separate
-  // BigQuery.Tables.insert call the way loadBigQueryStaged does - model()
-  // only ever talks to BigQuery through query jobs already (no CSV blob to
-  // load), so setting the expiration inline keeps this a single query job
-  // instead of adding a second API shape just for this one path.
-  function modelTableStaged(config, compiled, relation, registry) {
+  // Only the staging build (the actual SELECT) goes through the async
+  // submit/poll below - tests, promotion and cleanup are comparatively fast
+  // metadata-level operations run synchronously once it completes, so this
+  // still overlaps the expensive part across every model in a level even
+  // though the tail end of each pipeline runs solo.
+  function buildStagedTablePipeline(config, compiled, relation, registry) {
     var stagingTable = resolveStagingTableId(config.name);
-    var stagingRelation = qualifiedTableRef(config.projectId, config.dataset, stagingTable);
-    var expirationMillis = Date.now() + 60 * 60 * 1000;
-    var stagingStatement = 'CREATE OR REPLACE TABLE ' + stagingRelation +
-      ' OPTIONS(expiration_timestamp = TIMESTAMP_MILLIS(' + expirationMillis + ')) AS\n' + compiled;
-    // Tracks whether the staging query itself succeeded, so the finally
-    // block below only tries to remove a table that actually exists - if
-    // the staging query throws, there is nothing to clean up yet, and
-    // calling BigQuery.Tables.remove anyway would mask the real error with
-    // a spurious "not found" from cleanup.
-    var stagingCreated = false;
-    try {
-      runBigQueryQueryJob({ query: stagingStatement, useLegacySql: false }, config.projectId);
-      stagingCreated = true;
-
-      var compiledTests = compileModelTests(config.tests, registry);
-      var testResults = runSqlTests(
-        compiledTests,
-        { projectId: config.projectId, dataset: config.dataset, table: stagingTable },
-        'model(): "' + config.name + '" tests'
-      );
-
-      // Reuses move.js's promoteStagedTable() rather than a second, hand-written
-      // copy job - the same primitive loadBigQueryStaged uses for its own
-      // promotion, so a future BigQuery copy-job quirk discovered against
-      // either caller (widenDestinationTableForPromotion was one such quirk)
-      // only ever needs fixing in the one function both share. widenFirst is
-      // always false here: a model's promotion is always a full WRITE_TRUNCATE
-      // replace, with no schema-evolution concept of its own to opt into.
-      promoteStagedTable(
-        { projectId: config.projectId, dataset: config.dataset, table: config.name },
-        stagingTable, 'WRITE_TRUNCATE', false
-      );
-
-      return { relation: relation, materialized: 'table', staged: { table: stagingTable }, testResults: testResults };
-    } finally {
-      if (stagingCreated) {
-        BigQuery.Tables.remove(config.projectId, config.dataset, stagingTable);
+    return {
+      start: function () {
+        var stagingRelation = qualifiedTableRef(config.projectId, config.dataset, stagingTable);
+        var expirationMillis = Date.now() + 60 * 60 * 1000;
+        var stagingStatement = 'CREATE OR REPLACE TABLE ' + stagingRelation +
+          ' OPTIONS(expiration_timestamp = TIMESTAMP_MILLIS(' + expirationMillis + ')) AS\n' + compiled;
+        return { job: submitBigQueryQuery({ query: stagingStatement, useLegacySql: false }, config.projectId) };
+      },
+      // Reached only once the staging CREATE OR REPLACE TABLE job above
+      // completed successfully, so - unlike the old single-shot version -
+      // no separate stagingCreated flag is needed to gate cleanup: getting
+      // here at all means there's a staging table to remove.
+      resume: function () {
+        try {
+          var testResults = runModelTests(config, registry, config.dataset, stagingTable);
+          promoteStagedTable(
+            { projectId: config.projectId, dataset: config.dataset, table: config.name },
+            stagingTable, 'WRITE_TRUNCATE', false
+          );
+          return { done: true, result: { relation: relation, materialized: 'table', staged: { table: stagingTable }, testResults: testResults } };
+        } finally {
+          BigQuery.Tables.remove(config.projectId, config.dataset, stagingTable);
+        }
       }
+    };
+  }
+
+  // Applies target overlay to every model node after discovery. Each model
+  // entry in notsobigdataModels.models may optionally declare a targets
+  // object, shaped like {prod: {dataset: 'x'}, dev: {dataset: 'y'}} - overlay
+  // the target's config onto the node's already-resolved config. Complements
+  // cli.js's applyTargetOverlay for move nodes - model targets can't be
+  // applied at the same time because resolveModelConfig() is called during
+  // discovery, before targets are known, so this runs after discovery instead.
+  function applyModelTargets(nodes, targetName) {
+    if (!targetName) {
+      return;
     }
+    var registry = readModelsRegistry();
+    nodes.forEach(function (node) {
+      if (node.kind !== 'model') {
+        return;
+      }
+      var modelEntry = registry.models[node.name];
+      if (!modelEntry || !isPlainObject(modelEntry.targets)) {
+        return;
+      }
+      if (!has(modelEntry.targets, targetName)) {
+        throw new Error('cli(): target "' + targetName + '" is not declared on model "' + node.name + '". Known targets: ' + Object.keys(modelEntry.targets).join(', ') + '.');
+      }
+      var targetConfig = modelEntry.targets[targetName];
+      if (isPlainObject(targetConfig)) {
+        Object.keys(targetConfig).forEach(function (key) {
+          node.config[key] = targetConfig[key];
+        });
+      }
+    });
   }
 
   // ==================================================================
@@ -3695,6 +4112,7 @@ var NotSoBigData = (function () {
       '  cli("run --select move")       run only nodes of a given kind',
       '  cli("run --select a,b")        run only the named nodes',
       '  cli("run --exclude a")         run everything except the named nodes',
+      '  cli("run --target prod")       run with prod target config (models/moves with targets)',
       '  cli("list")                    show what would run, in order, without running it (includes declared sources)',
       '  cli("compile")                 resolve model SQL ({{ ref()/source()/var()/config() }}) without running anything',
       '  cli("debug")                   check OAuth scopes/services for each node\'s connector, without writing anything',
@@ -3705,15 +4123,20 @@ var NotSoBigData = (function () {
       '',
       'Nodes are plain objects declared as top-level "var"s, marked with a',
       '"kind" (one of: ' + knownKinds().join(', ') + '). Their name defaults to',
-      'the variable name, and "dependsOn" lists the names they must run after.'
+      'the variable name, and "dependsOn" lists the names they must run after.',
+      '',
+      'Targets let you declare environment-specific configs (e.g. --target prod):',
+      'models: targets: {prod: {dataset: \'x\'}, dev: {dataset: \'y\'}}',
+      'moves:  targets: {prod: {target: {...}}, dev: {target: {...}}}'
     ].join('\n');
   }
 
-  // Turns a command string into { command, select, exclude }. Deliberately
+  // Turns a command string into { command, select, exclude, target }. Deliberately
   // a tiny hand-rolled parser rather than anything clever: the whole
-  // grammar is one verb plus two optional list flags, and both
-  // "--select a,b" and "--select=a,b" are accepted because both spellings
-  // are muscle memory for anyone who has used a real CLI.
+  // grammar is one verb plus four optional flags (--select, --exclude, --target,
+  // --full-refresh), and both "--select a,b" and "--select=a,b" are accepted
+  // because both spellings are muscle memory for anyone who has used a real CLI.
+  // --full-refresh is a value-less boolean flag, only legal on run/compile.
   function parseCommand(input) {
     var text = typeof input === 'string' ? input.trim() : '';
     if (!text) {
@@ -3729,7 +4152,7 @@ var NotSoBigData = (function () {
     if (COMMANDS.indexOf(command) === -1) {
       throw new Error('cli(): unknown command "' + command + '".\n\n' + usage());
     }
-    var parsed = { command: command, select: [], exclude: [] };
+    var parsed = { command: command, select: [], exclude: [], target: null, fullRefresh: false };
     while (tokens.length) {
       var token = tokens.shift();
       var flag = token;
@@ -3739,22 +4162,43 @@ var NotSoBigData = (function () {
         flag = token.slice(0, equalsAt);
         value = token.slice(equalsAt + 1);
       }
-      if (flag !== '--select' && flag !== '--exclude') {
-        throw new Error('cli(): unknown option "' + flag + '". Expected "--select" or "--exclude".\n\n' + usage());
+      if (flag !== '--select' && flag !== '--exclude' && flag !== '--target' && flag !== '--full-refresh') {
+        throw new Error('cli(): unknown option "' + flag + '". Expected "--select", "--exclude", "--target", or "--full-refresh".\n\n' + usage());
       }
-      if (value === null) {
+      if (flag === '--full-refresh') {
+        // --full-refresh is a value-less boolean flag
+        if (value !== null) {
+          throw new Error('cli(): "--full-refresh" does not take a value.');
+        }
+        if (command !== 'run' && command !== 'compile') {
+          throw new Error('cli(): "--full-refresh" is only valid for "run" and "compile", not for "' + command + '".');
+        }
+        parsed.fullRefresh = true;
+      } else if (value === null) {
         value = tokens.length && tokens[0].indexOf('--') !== 0 ? tokens.shift() : '';
       }
-      var list = value.split(',')
-        .map(function (item) { return item.trim(); })
-        .filter(function (item) { return !!item; });
-      if (!list.length) {
-        throw new Error('cli(): "' + flag + '" needs a comma-separated value, e.g. ' + flag + ' orders,customers.');
+      if (flag !== '--full-refresh') {
+        if (flag === '--target') {
+          if (!value) {
+            throw new Error('cli(): "--target" needs a value, e.g. --target prod.');
+          }
+          if (parsed.target !== null) {
+            throw new Error('cli(): "--target" can only be specified once.');
+          }
+          parsed.target = value;
+        } else {
+          var list = value.split(',')
+            .map(function (item) { return item.trim(); })
+            .filter(function (item) { return !!item; });
+          if (!list.length) {
+            throw new Error('cli(): "' + flag + '" needs a comma-separated value, e.g. ' + flag + ' orders,customers.');
+          }
+          // Both flags are "--" plus the key they fill, and flag was validated
+          // above, so this is the key rather than a lookup that could miss.
+          var key = flag.slice(2);
+          parsed[key] = parsed[key].concat(list);
+        }
       }
-      // Both flags are "--" plus the key they fill, and flag was validated
-      // above, so this is the key rather than a lookup that could miss.
-      var key = flag.slice(2);
-      parsed[key] = parsed[key].concat(list);
     }
     return parsed;
   }
@@ -4008,6 +4452,36 @@ var NotSoBigData = (function () {
     return ordered;
   }
 
+  // Groups a topologically-ordered node list into levels (array of arrays).
+  // Each level contains all nodes that can run in parallel - a node's level
+  // is 1 + max(level of its dependsOn). Levels[0] = all nodes with no deps,
+  // Levels[1] = all that only depend on Level[0], etc. Used to parallelize
+  // model() execution within each level.
+  function buildLevelGroups(orderedNodes) {
+    var levelByName = emptyMap();
+    orderedNodes.forEach(function (node) {
+      var maxDepLevel = -1;
+      node.dependsOn.forEach(function (depName) {
+        if (has(levelByName, depName)) {
+          maxDepLevel = Math.max(maxDepLevel, levelByName[depName]);
+        }
+      });
+      levelByName[node.name] = maxDepLevel + 1;
+    });
+    var maxLevel = -1;
+    Object.keys(levelByName).forEach(function (name) {
+      maxLevel = Math.max(maxLevel, levelByName[name]);
+    });
+    var levels = [];
+    for (var i = 0; i <= maxLevel; i++) {
+      levels.push([]);
+    }
+    orderedNodes.forEach(function (node) {
+      levels[levelByName[node.name]].push(node);
+    });
+    return levels;
+  }
+
   // Runs the ordered nodes, one at a time.
   //
   // A failure does not abort the run. The failed node is recorded, every
@@ -4052,32 +4526,112 @@ var NotSoBigData = (function () {
   // compile failure the same way a real run failure is treated - it blocks
   // dependents transitively via the same `blocked` map, rather than needing
   // a parallel skip mechanism just for this mode.
-  function runNodes(nodes, command, verbose) {
+  //
+  // Accepts either a flat array of nodes (backward compat) or an array of
+  // arrays (levels from buildLevelGroups). Flat arrays are wrapped as a
+  // single level for uniform handling.
+  // A node can arrive already known to be broken - model.js's
+  // expandModelNodes() sets this when a model's own sqlFile/tag
+  // configuration is bad, discovered while building the graph, well before
+  // any node's turn to actually run. Checked kind-agnostically (a plain
+  // node-level field, not something only model nodes could have) and ahead
+  // of a blocked-by-dependency check: the whole point of a "list"/"compile"
+  // dry run is surfacing a config mistake before anything executes for
+  // real, and this error is already fully known with nothing to execute to
+  // see it - reporting it only on a real "run" would make "list"/"compile"
+  // strictly less useful for exactly the errors that are cheapest to catch
+  // early. One shared check, in this one order, for both runNodes()
+  // branches below - they used to each carry their own copy, which had
+  // silently drifted to opposite check orders (a node with both problems
+  // got a different status depending on which branch ran it).
+  function checkNodeBlocked(node, blocked) {
+    if (node.discoveryError) {
+      return { blocked: true, status: 'failed', error: node.discoveryError };
+    }
+    var blockers = node.dependsOn.filter(function (dependency) { return has(blocked, dependency); });
+    if (blockers.length) {
+      return { blocked: true, status: 'skipped', blockedBy: blockers };
+    }
+    return { blocked: false };
+  }
+
+  // Records a checkNodeBlocked() hit against `blocked`/`results` and logs it -
+  // shared so the result shape (which of error/blockedBy is attached) and the
+  // FAIL/SKIP log line are built in exactly one place for both runNodes()
+  // branches.
+  function recordBlockedNode(node, check, blocked, results) {
+    blocked[node.name] = true;
+    var result = { name: node.name, kind: node.kind, status: check.status };
+    if (check.status === 'failed') {
+      result.error = check.error;
+    } else {
+      result.blockedBy = check.blockedBy;
+    }
+    results.push(result);
+    Logger.log((check.status === 'failed' ? 'FAIL  ' : 'SKIP  ') + nodeLabel(node) + ' - ' + (check.error || 'waiting on ' + check.blockedBy.join(', ')));
+  }
+
+  function runNodes(nodesOrLevels, command) {
+    var levels = (nodesOrLevels.length > 0 && Array.isArray(nodesOrLevels[0]))
+      ? nodesOrLevels
+      : [nodesOrLevels];
     var results = [];
     var blocked = emptyMap();
-    nodes.forEach(function (node) {
-      // A node can arrive already known to be broken - model.js's
-      // expandModelNodes() sets this when a model's own sqlFile/tag
-      // configuration is bad, discovered while building the graph, well
-      // before any node's turn to actually run. Checked here, kind-
-      // agnostically (a plain node-level field, not something only model
-      // nodes could have), and ahead of the dry-run/compile branches below:
-      // the whole point of a "list"/"compile" dry run is surfacing a config
-      // mistake before anything executes for real, and this error is already
-      // fully known with nothing to execute to see it - reporting it only on
-      // a real "run" would make "list"/"compile" strictly less useful for
-      // exactly the errors that are cheapest to catch early.
-      if (node.discoveryError) {
-        blocked[node.name] = true;
-        results.push({ name: node.name, kind: node.kind, status: 'failed', error: node.discoveryError });
-        Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + node.discoveryError);
-        return;
+    var verbose = resolveLoggingConfig().verbose;
+    levels.forEach(function (nodes) {
+      // For 'run' command with a level of all-models: parallel submit+poll.
+      // Otherwise: sequential execution (backward compat).
+      var allModels = command === 'run' && nodes.length > 0 && nodes.every(function (n) { return n.kind === 'model'; });
+      if (allModels) {
+        // Check if any node is blocked before attempting parallel submit.
+        var unblocked = nodes.filter(function (node) {
+          var check = checkNodeBlocked(node, blocked);
+          if (check.blocked) {
+            recordBlockedNode(node, check, blocked, results);
+          }
+          return !check.blocked;
+        });
+        if (unblocked.length > 0) {
+          unblocked.forEach(function (node) { Logger.log('START ' + nodeLabel(node)); });
+          // buildModelPipeline (model.js) is the exact same code model()
+          // itself calls for a single node - running the whole level through
+          // runBigQueryPipelinesInParallel (move.js) here, instead of a
+          // second cli.js-side "submit the simple case" shortcut, is what
+          // guarantees every materialization type (incremental merge/
+          // insert_overwrite/append, staged-table-with-tests, plain) gets
+          // full parallel submit/poll, not just the plain path - and that a
+          // node's result/error shape can never differ by which branch ran it.
+          // buildModelPipeline(node.config) itself can throw (a bad
+          // {{ ref() }}, a multi-statement SQL file, an invalid incremental
+          // strategy) - each node's factory is only invoked lazily inside
+          // runBigQueryPipelinesInParallel (move.js), which is what catches
+          // that failure exactly like a submit/poll failure, instead of
+          // throwing out of this whole level before any job is even submitted.
+          var pipelineFactories = unblocked.map(function (node) {
+            return function () { return buildModelPipeline(node.config); };
+          });
+          var outcomes = runBigQueryPipelinesInParallel(pipelineFactories);
+          unblocked.forEach(function (node, i) {
+            var outcome = outcomes[i];
+            if (outcome.error) {
+              blocked[node.name] = true;
+              results.push({ name: node.name, kind: node.kind, status: 'failed', ms: outcome.elapsed, error: outcome.error });
+              Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + outcome.error);
+            } else {
+              results.push({ name: node.name, kind: node.kind, status: 'success', ms: outcome.elapsed, result: outcome.result });
+              if (verbose) {
+                Logger.log('OK    ' + nodeLabel(node) + ' - ' + outcome.elapsed + 'ms');
+              }
+            }
+          });
+        }
+        return; // Skip the sequential forEach below for this level.
       }
-      var blockers = node.dependsOn.filter(function (dependency) { return has(blocked, dependency); });
-      if (blockers.length) {
-        blocked[node.name] = true;
-        results.push({ name: node.name, kind: node.kind, status: 'skipped', blockedBy: blockers });
-        Logger.log('SKIP  ' + nodeLabel(node) + ' - waiting on ' + blockers.join(', '));
+      // Sequential execution (default for non-model or non-run).
+      nodes.forEach(function (node) {
+      var check = checkNodeBlocked(node, blocked);
+      if (check.blocked) {
+        recordBlockedNode(node, check, blocked, results);
         return;
       }
       if (command === 'compile') {
@@ -4116,6 +4670,7 @@ var NotSoBigData = (function () {
         results.push({ name: node.name, kind: node.kind, status: 'failed', ms: new Date().getTime() - startedAt, error: error.message });
         Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + error.message);
       }
+      });
     });
     return results;
   }
@@ -4222,11 +4777,11 @@ var NotSoBigData = (function () {
   // their size - a manifest is an observability artifact, not a second copy
   // of the data that already landed at its real destination.
   //
-  // staged (model.js's modelTableStaged(), a table model with tests) is its
-  // own independent `if`, same as every other optional field here - it was
-  // missing until a code-review pass caught it (2026-08-11): the staging
+  // staged (model.js's buildStagedTablePipeline(), a table model with tests)
+  // is its own independent `if`, same as every other optional field here - it
+  // was missing until a code-review pass caught it (2026-08-11): the staging
   // table itself is already gone by the time a manifest is written (deleted
-  // in modelTableStaged()'s own finally block), so this field is purely
+  // in that pipeline's own resume()/finally block), so this field is purely
   // informational, recording that this run went through the staged path at
   // all rather than materializing directly - worth knowing from the
   // manifest alone, without having to infer it from materialized/tests.
@@ -4804,6 +5359,54 @@ var NotSoBigData = (function () {
     });
   }
 
+  // Applies target overlay to all nodes - both models and moves that have
+  // declared targets. If a node has a targets object with an entry matching
+  // the active target name, overlays those config keys onto the node's config.
+  // This runs after discovery but before selection/ordering/execution, so
+  // a targeted config is visible to every downstream step. For a move node,
+  // a targets overlay is opt-in - only a move with a targets key gets one.
+  // For a model node, target resolution happens inside model.js after
+  // discovery via applyModelTargets() below.
+  function applyTargetOverlay(nodes, targetName) {
+    if (!targetName) {
+      return;
+    }
+    // Apply targets to move nodes
+    nodes.forEach(function (node) {
+      if (node.kind === 'model') {
+        return;
+      }
+      if (!isPlainObject(node.config.targets)) {
+        return;
+      }
+      if (!has(node.config.targets, targetName)) {
+        throw new Error('cli(): target "' + targetName + '" is not declared on move node "' + node.name + '". Known targets: ' + Object.keys(node.config.targets).join(', ') + '.');
+      }
+      var targetConfig = node.config.targets[targetName];
+      if (isPlainObject(targetConfig)) {
+        Object.keys(targetConfig).forEach(function (key) {
+          node.config[key] = targetConfig[key];
+        });
+      }
+    });
+    // Apply targets to model nodes via model.js
+    applyModelTargets(nodes, targetName);
+  }
+
+  // Applies --full-refresh to every incremental model node. Mirroring
+  // applyTargetOverlay()'s pattern, this sets config.fullRefresh on every
+  // model node when the --full-refresh flag was provided.
+  function applyFullRefresh(nodes, fullRefresh) {
+    if (!fullRefresh) {
+      return;
+    }
+    nodes.forEach(function (node) {
+      if (node.kind === 'model') {
+        node.config.fullRefresh = true;
+      }
+    });
+  }
+
   // The single public entrypoint. Takes one command string and returns
   // either a run report (for "run"/"list"/"compile") or a message string
   // (for "hello"/"help").
@@ -4842,6 +5445,8 @@ var NotSoBigData = (function () {
       throw new Error('cli(): found no declared nodes. Config objects must be declared as top-level "var"s marked with a "kind" - one declared inside a function is invisible to cli(). Run cli("hello") to see what the library can find.');
     }
     assertDependenciesExist(discovered.nodes);
+    applyTargetOverlay(discovered.nodes, parsed.target);
+    applyFullRefresh(discovered.nodes, parsed.fullRefresh);
     var selected = applySelection(discovered.nodes, parsed.select, parsed.exclude);
     if (!selected.length) {
       throw new Error('cli(): the selection matched no nodes. Run cli("list") to see everything available.');
@@ -4858,7 +5463,10 @@ var NotSoBigData = (function () {
       return { ok: debugOk, command: 'debug', checks: checks, ignored: discovered.ignored };
     }
     var ordered = orderNodes(selected);
-    var results = runNodes(ordered, parsed.command, resolveLoggingConfig().verbose);
+    // For 'run', group by levels to enable parallel execution within each level;
+    // for 'list'/'compile', keep flat for backward compat (no functional difference).
+    var nodesToRun = parsed.command === 'run' ? buildLevelGroups(ordered) : ordered;
+    var results = runNodes(nodesToRun, parsed.command);
     var ok = results.every(function (result) { return result.status !== 'failed' && result.status !== 'skipped'; });
     Logger.log('DONE  cli("' + input + '") - ' + formatStatusCounts(results) + ' (' + results.length + ' total).');
     var report = {

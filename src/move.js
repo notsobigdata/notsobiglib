@@ -367,6 +367,34 @@ function assertReadOnlySelect(sql, messagePrefix) {
   assertSingleStatementStripped(stripped, messagePrefix);
 }
 
+// Submits a BigQuery query job (Jobs.query) and returns job metadata without
+// waiting for completion. Use pollBigQueryJob() to wait for results in parallel
+// with other jobs, or runBigQueryQueryJob() for the synchronous, single-job path.
+function submitBigQueryQuery(queryRequest, projectId) {
+  var queryResults = BigQuery.Jobs.query(queryRequest, projectId);
+  return {
+    projectId: projectId,
+    jobId: queryResults.jobReference.jobId,
+    initialResults: queryResults,
+    maxResults: queryRequest.maxResults
+  };
+}
+
+// Polls a submitted BigQuery query job to completion. jobInfo is the object
+// returned by submitBigQueryQuery(). Returns the completed queryResults object.
+function pollBigQueryJob(jobInfo) {
+  var queryResults = jobInfo.initialResults;
+  var projectId = jobInfo.projectId;
+  var jobId = jobInfo.jobId;
+  var pollParams = jobInfo.maxResults ? { maxResults: jobInfo.maxResults } : undefined;
+  while (!queryResults.jobComplete) {
+    queryResults = pollParams
+      ? BigQuery.Jobs.getQueryResults(projectId, jobId, pollParams)
+      : BigQuery.Jobs.getQueryResults(projectId, jobId);
+  }
+  return queryResults;
+}
+
 // Runs a BigQuery query job (Jobs.query) to completion and returns
 // whichever response - the initial Jobs.query call, or the last
 // getQueryResults poll - ended up job-complete. A caller that wants more
@@ -381,15 +409,94 @@ function assertReadOnlySelect(sql, messagePrefix) {
 // that stopped applying the moment a job needed more than one poll to
 // finish would defeat that.
 function runBigQueryQueryJob(queryRequest, projectId) {
-  var queryResults = BigQuery.Jobs.query(queryRequest, projectId);
-  var jobId = queryResults.jobReference.jobId;
-  var pollParams = queryRequest.maxResults ? { maxResults: queryRequest.maxResults } : undefined;
-  while (!queryResults.jobComplete) {
-    queryResults = pollParams
-      ? BigQuery.Jobs.getQueryResults(projectId, jobId, pollParams)
-      : BigQuery.Jobs.getQueryResults(projectId, jobId);
+  var jobInfo = submitBigQueryQuery(queryRequest, projectId);
+  return pollBigQueryJob(jobInfo);
+}
+
+// Non-blocking status check for a job submitted via submitBigQueryQuery -
+// timeoutMs:0 tells getQueryResults to return whatever it currently knows
+// instead of long-polling, which is what pollBigQueryJob above relies on
+// for its wait-for-completion behavior. This is the primitive
+// runBigQueryPipelinesInParallel below needs to check many in-flight jobs
+// per round without any one of them blocking the others.
+function checkBigQueryJob(jobInfo) {
+  var pollParams = jobInfo.maxResults ? { maxResults: jobInfo.maxResults, timeoutMs: 0 } : { timeoutMs: 0 };
+  var queryResults = BigQuery.Jobs.getQueryResults(jobInfo.projectId, jobInfo.jobId, pollParams);
+  return { complete: !!queryResults.jobComplete, results: queryResults };
+}
+
+// Drives N independent multi-step BigQuery pipelines to completion,
+// overlapping their wait time instead of draining pipeline 1 to
+// completion before even checking pipeline 2 (which calling
+// pollBigQueryJob once per pipeline, in sequence, would do - each call
+// blocks internally until that one job is done). Every in-flight job is
+// checked once per round via the non-blocking checkBigQueryJob above; a
+// short sleep only happens when a whole round found nothing to advance,
+// not on every round, so this reacts the instant something finishes
+// instead of busy-looping.
+//
+// Each element of `pipelineFactories` is a zero-arg function returning a
+// pipeline: {start, resume}. start() does synchronous prep (building SQL,
+// schema introspection) and returns either {job: <jobInfo from
+// submitBigQueryQuery>} to wait on, or {done:true, result}/{done:true,
+// error} for a pipeline needing no BigQuery job at all. resume(queryResults)
+// is called once that job completes; it may do more synchronous work
+// (running tests, promoting a staged table, cleanup) and either return
+// another {job: ...} to continue the pipeline, or {done:true,
+// result}/{done:true, error} to finish it. Building the pipeline is
+// deferred to here (called lazily, once per element, right before that
+// element's first start()) rather than done by the caller up front,
+// specifically so a factory that throws - a bad {{ ref() }}, a
+// multi-statement SQL file - is isolated exactly like a start()/resume()
+// throw: reported as {error} for that pipeline only, never aborting the
+// others.
+function runBigQueryPipelinesInParallel(pipelineFactories) {
+  function advance(state, queryResults) {
+    try {
+      if (!state.pipeline) {
+        state.pipeline = state.pipelineFactory();
+      }
+      var step = arguments.length > 1 ? state.pipeline.resume(queryResults) : state.pipeline.start();
+      if (step.done) {
+        state.done = true;
+        state.result = step.result;
+        state.error = step.error || null;
+        state.elapsed = new Date().getTime() - state.startedAt;
+      } else {
+        state.job = step.job;
+      }
+    } catch (error) {
+      state.done = true;
+      state.error = error.message;
+      state.elapsed = new Date().getTime() - state.startedAt;
+    }
   }
-  return queryResults;
+
+  var states = pipelineFactories.map(function (pipelineFactory) {
+    return { pipelineFactory: pipelineFactory, pipeline: null, job: null, done: false, result: null, error: null, startedAt: new Date().getTime(), elapsed: null };
+  });
+  states.forEach(function (state) { advance(state); });
+
+  while (states.some(function (s) { return !s.done; })) {
+    var anyProgress = false;
+    states.forEach(function (state) {
+      if (state.done) {
+        return;
+      }
+      var check = checkBigQueryJob(state.job);
+      if (check.complete) {
+        anyProgress = true;
+        advance(state, check.results);
+      }
+    });
+    if (!anyProgress) {
+      Utilities.sleep(200);
+    }
+  }
+
+  return states.map(function (state) {
+    return { result: state.result, error: state.error, elapsed: state.elapsed };
+  });
 }
 
 // Reads from BigQuery via the Advanced BigQuery Service - either a whole
@@ -1035,10 +1142,11 @@ function widenDestinationTableForPromotion(target, stagingTable) {
 // Promotes a staging table into its real destination via a BigQuery copy
 // job (a metadata-level table copy, no query slots consumed - not a
 // second "SELECT * FROM staging" write). The one piece of "stage, test,
-// promote" this function's own two callers - loadBigQueryStaged below and
-// model.js's modelTableStaged - need identically, extracted so a future
-// copy-job quirk only needs fixing in one place. widenDestinationTableForPromotion's
-// own discovery is exactly that kind of quirk: schemaUpdateOptions on the
+// promote" this function's own two callers - loadBigQueryStaged below
+// and model.js's buildStagedTablePipeline - need identically, extracted
+// so a future copy-job quirk only needs fixing in one place.
+// widenDestinationTableForPromotion's own discovery is exactly that kind
+// of quirk: schemaUpdateOptions on the
 // copy job itself was tried first and confirmed, against a real project,
 // not to work the way a load job's does - if a second such quirk ever
 // turns up, this is the one function both callers already share, not two

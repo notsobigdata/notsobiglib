@@ -131,6 +131,7 @@ function usage() {
     '  cli("run --select move")       run only nodes of a given kind',
     '  cli("run --select a,b")        run only the named nodes',
     '  cli("run --exclude a")         run everything except the named nodes',
+    '  cli("run --target prod")       run with prod target config (models/moves with targets)',
     '  cli("list")                    show what would run, in order, without running it (includes declared sources)',
     '  cli("compile")                 resolve model SQL ({{ ref()/source()/var()/config() }}) without running anything',
     '  cli("debug")                   check OAuth scopes/services for each node\'s connector, without writing anything',
@@ -141,15 +142,20 @@ function usage() {
     '',
     'Nodes are plain objects declared as top-level "var"s, marked with a',
     '"kind" (one of: ' + knownKinds().join(', ') + '). Their name defaults to',
-    'the variable name, and "dependsOn" lists the names they must run after.'
+    'the variable name, and "dependsOn" lists the names they must run after.',
+    '',
+    'Targets let you declare environment-specific configs (e.g. --target prod):',
+    'models: targets: {prod: {dataset: \'x\'}, dev: {dataset: \'y\'}}',
+    'moves:  targets: {prod: {target: {...}}, dev: {target: {...}}}'
   ].join('\n');
 }
 
-// Turns a command string into { command, select, exclude }. Deliberately
+// Turns a command string into { command, select, exclude, target }. Deliberately
 // a tiny hand-rolled parser rather than anything clever: the whole
-// grammar is one verb plus two optional list flags, and both
-// "--select a,b" and "--select=a,b" are accepted because both spellings
-// are muscle memory for anyone who has used a real CLI.
+// grammar is one verb plus four optional flags (--select, --exclude, --target,
+// --full-refresh), and both "--select a,b" and "--select=a,b" are accepted
+// because both spellings are muscle memory for anyone who has used a real CLI.
+// --full-refresh is a value-less boolean flag, only legal on run/compile.
 function parseCommand(input) {
   var text = typeof input === 'string' ? input.trim() : '';
   if (!text) {
@@ -165,7 +171,7 @@ function parseCommand(input) {
   if (COMMANDS.indexOf(command) === -1) {
     throw new Error('cli(): unknown command "' + command + '".\n\n' + usage());
   }
-  var parsed = { command: command, select: [], exclude: [] };
+  var parsed = { command: command, select: [], exclude: [], target: null, fullRefresh: false };
   while (tokens.length) {
     var token = tokens.shift();
     var flag = token;
@@ -175,22 +181,43 @@ function parseCommand(input) {
       flag = token.slice(0, equalsAt);
       value = token.slice(equalsAt + 1);
     }
-    if (flag !== '--select' && flag !== '--exclude') {
-      throw new Error('cli(): unknown option "' + flag + '". Expected "--select" or "--exclude".\n\n' + usage());
+    if (flag !== '--select' && flag !== '--exclude' && flag !== '--target' && flag !== '--full-refresh') {
+      throw new Error('cli(): unknown option "' + flag + '". Expected "--select", "--exclude", "--target", or "--full-refresh".\n\n' + usage());
     }
-    if (value === null) {
+    if (flag === '--full-refresh') {
+      // --full-refresh is a value-less boolean flag
+      if (value !== null) {
+        throw new Error('cli(): "--full-refresh" does not take a value.');
+      }
+      if (command !== 'run' && command !== 'compile') {
+        throw new Error('cli(): "--full-refresh" is only valid for "run" and "compile", not for "' + command + '".');
+      }
+      parsed.fullRefresh = true;
+    } else if (value === null) {
       value = tokens.length && tokens[0].indexOf('--') !== 0 ? tokens.shift() : '';
     }
-    var list = value.split(',')
-      .map(function (item) { return item.trim(); })
-      .filter(function (item) { return !!item; });
-    if (!list.length) {
-      throw new Error('cli(): "' + flag + '" needs a comma-separated value, e.g. ' + flag + ' orders,customers.');
+    if (flag !== '--full-refresh') {
+      if (flag === '--target') {
+        if (!value) {
+          throw new Error('cli(): "--target" needs a value, e.g. --target prod.');
+        }
+        if (parsed.target !== null) {
+          throw new Error('cli(): "--target" can only be specified once.');
+        }
+        parsed.target = value;
+      } else {
+        var list = value.split(',')
+          .map(function (item) { return item.trim(); })
+          .filter(function (item) { return !!item; });
+        if (!list.length) {
+          throw new Error('cli(): "' + flag + '" needs a comma-separated value, e.g. ' + flag + ' orders,customers.');
+        }
+        // Both flags are "--" plus the key they fill, and flag was validated
+        // above, so this is the key rather than a lookup that could miss.
+        var key = flag.slice(2);
+        parsed[key] = parsed[key].concat(list);
+      }
     }
-    // Both flags are "--" plus the key they fill, and flag was validated
-    // above, so this is the key rather than a lookup that could miss.
-    var key = flag.slice(2);
-    parsed[key] = parsed[key].concat(list);
   }
   return parsed;
 }
@@ -444,6 +471,36 @@ function orderNodes(nodes) {
   return ordered;
 }
 
+// Groups a topologically-ordered node list into levels (array of arrays).
+// Each level contains all nodes that can run in parallel - a node's level
+// is 1 + max(level of its dependsOn). Levels[0] = all nodes with no deps,
+// Levels[1] = all that only depend on Level[0], etc. Used to parallelize
+// model() execution within each level.
+function buildLevelGroups(orderedNodes) {
+  var levelByName = emptyMap();
+  orderedNodes.forEach(function (node) {
+    var maxDepLevel = -1;
+    node.dependsOn.forEach(function (depName) {
+      if (has(levelByName, depName)) {
+        maxDepLevel = Math.max(maxDepLevel, levelByName[depName]);
+      }
+    });
+    levelByName[node.name] = maxDepLevel + 1;
+  });
+  var maxLevel = -1;
+  Object.keys(levelByName).forEach(function (name) {
+    maxLevel = Math.max(maxLevel, levelByName[name]);
+  });
+  var levels = [];
+  for (var i = 0; i <= maxLevel; i++) {
+    levels.push([]);
+  }
+  orderedNodes.forEach(function (node) {
+    levels[levelByName[node.name]].push(node);
+  });
+  return levels;
+}
+
 // Runs the ordered nodes, one at a time.
 //
 // A failure does not abort the run. The failed node is recorded, every
@@ -488,32 +545,112 @@ function orderNodes(nodes) {
 // compile failure the same way a real run failure is treated - it blocks
 // dependents transitively via the same `blocked` map, rather than needing
 // a parallel skip mechanism just for this mode.
-function runNodes(nodes, command, verbose) {
+//
+// Accepts either a flat array of nodes (backward compat) or an array of
+// arrays (levels from buildLevelGroups). Flat arrays are wrapped as a
+// single level for uniform handling.
+// A node can arrive already known to be broken - model.js's
+// expandModelNodes() sets this when a model's own sqlFile/tag
+// configuration is bad, discovered while building the graph, well before
+// any node's turn to actually run. Checked kind-agnostically (a plain
+// node-level field, not something only model nodes could have) and ahead
+// of a blocked-by-dependency check: the whole point of a "list"/"compile"
+// dry run is surfacing a config mistake before anything executes for
+// real, and this error is already fully known with nothing to execute to
+// see it - reporting it only on a real "run" would make "list"/"compile"
+// strictly less useful for exactly the errors that are cheapest to catch
+// early. One shared check, in this one order, for both runNodes()
+// branches below - they used to each carry their own copy, which had
+// silently drifted to opposite check orders (a node with both problems
+// got a different status depending on which branch ran it).
+function checkNodeBlocked(node, blocked) {
+  if (node.discoveryError) {
+    return { blocked: true, status: 'failed', error: node.discoveryError };
+  }
+  var blockers = node.dependsOn.filter(function (dependency) { return has(blocked, dependency); });
+  if (blockers.length) {
+    return { blocked: true, status: 'skipped', blockedBy: blockers };
+  }
+  return { blocked: false };
+}
+
+// Records a checkNodeBlocked() hit against `blocked`/`results` and logs it -
+// shared so the result shape (which of error/blockedBy is attached) and the
+// FAIL/SKIP log line are built in exactly one place for both runNodes()
+// branches.
+function recordBlockedNode(node, check, blocked, results) {
+  blocked[node.name] = true;
+  var result = { name: node.name, kind: node.kind, status: check.status };
+  if (check.status === 'failed') {
+    result.error = check.error;
+  } else {
+    result.blockedBy = check.blockedBy;
+  }
+  results.push(result);
+  Logger.log((check.status === 'failed' ? 'FAIL  ' : 'SKIP  ') + nodeLabel(node) + ' - ' + (check.error || 'waiting on ' + check.blockedBy.join(', ')));
+}
+
+function runNodes(nodesOrLevels, command) {
+  var levels = (nodesOrLevels.length > 0 && Array.isArray(nodesOrLevels[0]))
+    ? nodesOrLevels
+    : [nodesOrLevels];
   var results = [];
   var blocked = emptyMap();
-  nodes.forEach(function (node) {
-    // A node can arrive already known to be broken - model.js's
-    // expandModelNodes() sets this when a model's own sqlFile/tag
-    // configuration is bad, discovered while building the graph, well
-    // before any node's turn to actually run. Checked here, kind-
-    // agnostically (a plain node-level field, not something only model
-    // nodes could have), and ahead of the dry-run/compile branches below:
-    // the whole point of a "list"/"compile" dry run is surfacing a config
-    // mistake before anything executes for real, and this error is already
-    // fully known with nothing to execute to see it - reporting it only on
-    // a real "run" would make "list"/"compile" strictly less useful for
-    // exactly the errors that are cheapest to catch early.
-    if (node.discoveryError) {
-      blocked[node.name] = true;
-      results.push({ name: node.name, kind: node.kind, status: 'failed', error: node.discoveryError });
-      Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + node.discoveryError);
-      return;
+  var verbose = resolveLoggingConfig().verbose;
+  levels.forEach(function (nodes) {
+    // For 'run' command with a level of all-models: parallel submit+poll.
+    // Otherwise: sequential execution (backward compat).
+    var allModels = command === 'run' && nodes.length > 0 && nodes.every(function (n) { return n.kind === 'model'; });
+    if (allModels) {
+      // Check if any node is blocked before attempting parallel submit.
+      var unblocked = nodes.filter(function (node) {
+        var check = checkNodeBlocked(node, blocked);
+        if (check.blocked) {
+          recordBlockedNode(node, check, blocked, results);
+        }
+        return !check.blocked;
+      });
+      if (unblocked.length > 0) {
+        unblocked.forEach(function (node) { Logger.log('START ' + nodeLabel(node)); });
+        // buildModelPipeline (model.js) is the exact same code model()
+        // itself calls for a single node - running the whole level through
+        // runBigQueryPipelinesInParallel (move.js) here, instead of a
+        // second cli.js-side "submit the simple case" shortcut, is what
+        // guarantees every materialization type (incremental merge/
+        // insert_overwrite/append, staged-table-with-tests, plain) gets
+        // full parallel submit/poll, not just the plain path - and that a
+        // node's result/error shape can never differ by which branch ran it.
+        // buildModelPipeline(node.config) itself can throw (a bad
+        // {{ ref() }}, a multi-statement SQL file, an invalid incremental
+        // strategy) - each node's factory is only invoked lazily inside
+        // runBigQueryPipelinesInParallel (move.js), which is what catches
+        // that failure exactly like a submit/poll failure, instead of
+        // throwing out of this whole level before any job is even submitted.
+        var pipelineFactories = unblocked.map(function (node) {
+          return function () { return buildModelPipeline(node.config); };
+        });
+        var outcomes = runBigQueryPipelinesInParallel(pipelineFactories);
+        unblocked.forEach(function (node, i) {
+          var outcome = outcomes[i];
+          if (outcome.error) {
+            blocked[node.name] = true;
+            results.push({ name: node.name, kind: node.kind, status: 'failed', ms: outcome.elapsed, error: outcome.error });
+            Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + outcome.error);
+          } else {
+            results.push({ name: node.name, kind: node.kind, status: 'success', ms: outcome.elapsed, result: outcome.result });
+            if (verbose) {
+              Logger.log('OK    ' + nodeLabel(node) + ' - ' + outcome.elapsed + 'ms');
+            }
+          }
+        });
+      }
+      return; // Skip the sequential forEach below for this level.
     }
-    var blockers = node.dependsOn.filter(function (dependency) { return has(blocked, dependency); });
-    if (blockers.length) {
-      blocked[node.name] = true;
-      results.push({ name: node.name, kind: node.kind, status: 'skipped', blockedBy: blockers });
-      Logger.log('SKIP  ' + nodeLabel(node) + ' - waiting on ' + blockers.join(', '));
+    // Sequential execution (default for non-model or non-run).
+    nodes.forEach(function (node) {
+    var check = checkNodeBlocked(node, blocked);
+    if (check.blocked) {
+      recordBlockedNode(node, check, blocked, results);
       return;
     }
     if (command === 'compile') {
@@ -552,6 +689,7 @@ function runNodes(nodes, command, verbose) {
       results.push({ name: node.name, kind: node.kind, status: 'failed', ms: new Date().getTime() - startedAt, error: error.message });
       Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + error.message);
     }
+    });
   });
   return results;
 }
@@ -658,11 +796,11 @@ function resolveManifestFolderId(folderId) {
 // their size - a manifest is an observability artifact, not a second copy
 // of the data that already landed at its real destination.
 //
-// staged (model.js's modelTableStaged(), a table model with tests) is its
-// own independent `if`, same as every other optional field here - it was
-// missing until a code-review pass caught it (2026-08-11): the staging
+// staged (model.js's buildStagedTablePipeline(), a table model with tests)
+// is its own independent `if`, same as every other optional field here - it
+// was missing until a code-review pass caught it (2026-08-11): the staging
 // table itself is already gone by the time a manifest is written (deleted
-// in modelTableStaged()'s own finally block), so this field is purely
+// in that pipeline's own resume()/finally block), so this field is purely
 // informational, recording that this run went through the staged path at
 // all rather than materializing directly - worth knowing from the
 // manifest alone, without having to infer it from materialized/tests.
@@ -1240,6 +1378,54 @@ function listSourcesForReport() {
   });
 }
 
+// Applies target overlay to all nodes - both models and moves that have
+// declared targets. If a node has a targets object with an entry matching
+// the active target name, overlays those config keys onto the node's config.
+// This runs after discovery but before selection/ordering/execution, so
+// a targeted config is visible to every downstream step. For a move node,
+// a targets overlay is opt-in - only a move with a targets key gets one.
+// For a model node, target resolution happens inside model.js after
+// discovery via applyModelTargets() below.
+function applyTargetOverlay(nodes, targetName) {
+  if (!targetName) {
+    return;
+  }
+  // Apply targets to move nodes
+  nodes.forEach(function (node) {
+    if (node.kind === 'model') {
+      return;
+    }
+    if (!isPlainObject(node.config.targets)) {
+      return;
+    }
+    if (!has(node.config.targets, targetName)) {
+      throw new Error('cli(): target "' + targetName + '" is not declared on move node "' + node.name + '". Known targets: ' + Object.keys(node.config.targets).join(', ') + '.');
+    }
+    var targetConfig = node.config.targets[targetName];
+    if (isPlainObject(targetConfig)) {
+      Object.keys(targetConfig).forEach(function (key) {
+        node.config[key] = targetConfig[key];
+      });
+    }
+  });
+  // Apply targets to model nodes via model.js
+  applyModelTargets(nodes, targetName);
+}
+
+// Applies --full-refresh to every incremental model node. Mirroring
+// applyTargetOverlay()'s pattern, this sets config.fullRefresh on every
+// model node when the --full-refresh flag was provided.
+function applyFullRefresh(nodes, fullRefresh) {
+  if (!fullRefresh) {
+    return;
+  }
+  nodes.forEach(function (node) {
+    if (node.kind === 'model') {
+      node.config.fullRefresh = true;
+    }
+  });
+}
+
 // The single public entrypoint. Takes one command string and returns
 // either a run report (for "run"/"list"/"compile") or a message string
 // (for "hello"/"help").
@@ -1278,6 +1464,8 @@ function cli(input) {
     throw new Error('cli(): found no declared nodes. Config objects must be declared as top-level "var"s marked with a "kind" - one declared inside a function is invisible to cli(). Run cli("hello") to see what the library can find.');
   }
   assertDependenciesExist(discovered.nodes);
+  applyTargetOverlay(discovered.nodes, parsed.target);
+  applyFullRefresh(discovered.nodes, parsed.fullRefresh);
   var selected = applySelection(discovered.nodes, parsed.select, parsed.exclude);
   if (!selected.length) {
     throw new Error('cli(): the selection matched no nodes. Run cli("list") to see everything available.');
@@ -1294,7 +1482,10 @@ function cli(input) {
     return { ok: debugOk, command: 'debug', checks: checks, ignored: discovered.ignored };
   }
   var ordered = orderNodes(selected);
-  var results = runNodes(ordered, parsed.command, resolveLoggingConfig().verbose);
+  // For 'run', group by levels to enable parallel execution within each level;
+  // for 'list'/'compile', keep flat for backward compat (no functional difference).
+  var nodesToRun = parsed.command === 'run' ? buildLevelGroups(ordered) : ordered;
+  var results = runNodes(nodesToRun, parsed.command);
   var ok = results.every(function (result) { return result.status !== 'failed' && result.status !== 'skipped'; });
   Logger.log('DONE  cli("' + input + '") - ' + formatStatusCounts(results) + ' (' + results.length + ' total).');
   var report = {

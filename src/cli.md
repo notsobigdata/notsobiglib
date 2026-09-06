@@ -14,7 +14,8 @@ The pipeline inside `cli()`, in order:
 
 ```
 parseCommand  →  discoverNodes  →  assertDependenciesExist
-              →  applySelection →  orderNodes  →  runNodes
+              →  applySelection →  orderNodes  →  buildLevelGroups (run only)
+              →  runNodes
 ```
 
 Everything here is **kind-agnostic**. The only thing that knows kinds exist
@@ -93,6 +94,25 @@ globals throws, so a bare `globalThis[key]` would break discovery entirely.
 - **`orderNodes` is Kahn's algorithm** and names the cycle members on
   failure — keep that; "there is a cycle" without names is useless in a
   ten-node graph.
+- **`buildLevelGroups` groups ordered nodes by dependency depth (topological tiers).**
+  After `orderNodes()` produces a flat topological sort, `buildLevelGroups()`
+  assigns each node a level (0 = no dependencies, 1 = only depends on level-0
+  nodes, etc.) and groups them into an array of arrays. For `run`, this enables
+  parallel execution within each level: a level where every node is kind
+  `model` builds each node's `{start, resume}` pipeline via model.js's
+  `buildModelPipeline()` and drives them all side by side through move.js's
+  `runBigQueryPipelinesInParallel()` (submit every pipeline's first job, then
+  poll all in-flight jobs each round with a single non-blocking check per
+  job, advancing whichever complete). `buildModelPipeline()` covers every
+  materialization — plain view/table, every incremental strategy, and the
+  staged-table-with-tests path — so nothing about a node's own correctness
+  depends on which level it lands in; `model()` itself is a one-pipeline call
+  through the same machinery, so a solo run and a parallel-level run can
+  never diverge in behavior or result shape. Non-model or mixed levels run
+  sequentially (backward compat), sharing the same `checkNodeBlocked()` used
+  by the parallel branch so a node's blocked/failed status doesn't depend on
+  which branch handles it either. For `list`/`compile`, the flat array is used
+  as-is (no functional change). `runNodes()` accepts either shape.
 
 ## The run manifest
 
