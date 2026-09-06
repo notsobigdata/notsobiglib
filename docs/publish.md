@@ -79,7 +79,9 @@ charts: [
   `bar`/`pie` keep first-seen order.
 - `series` (bar only) adds a second grouping dimension, rendering as
   grouped or stacked bars per `stacking` (`'grouped'` default, or
-  `'stacked'`).
+  `'stacked'`). Grouped/stacked bars have no legend or color key in
+  this phase — the series' colors are visible in the chart but which
+  color maps to which series value isn't labeled anywhere on the page.
 - `donut` (pie only) sets an inner radius on the same `groupBy`/`metric`
   aggregation — it doesn't change the computed data.
 - Charts render via D3, loaded from a pinned-version CDN URL in the
@@ -144,7 +146,7 @@ tables: [
 
 The generated `.html` also embeds the full computed payload as
 `window.__PUBLISH_PAYLOAD__`, a plain JS object separate from the
-rendered KPI cards/SVG chart/table markup — useful for reading or
+rendered KPI cards/chart/table markup — useful for reading or
 exporting the computed data programmatically, e.g. from the browser
 console, without re-parsing the visible page. KPI and chart values keep
 both their raw number and a separate `.formatted` string; `tables[]`
@@ -168,8 +170,7 @@ pager needs to page through without re-formatting anything.
 Filters, drill-down, per-block `source` overrides, cross-file
 navigation, and a `board` tree layout are all planned but not
 implemented — see `docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s
-"Future direction" section (CSV export from that list now ships, see
-`tables[]` above). Cross-chart interactivity (one chart reacting to
+"Future direction" section. Cross-chart interactivity (one chart reacting to
 another's click/selection within the same file) is planned as a
 follow-up to the D3 chart engine — see
 `docs/superpowers/specs/2026-09-06-publish-d3-charts-design.md`.

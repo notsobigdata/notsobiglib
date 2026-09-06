@@ -84,3 +84,15 @@ aggregation happens in the browser. Cross-chart interactivity (Phase
 2, not designed yet) is the point where the browser will need to
 re-aggregate against a shared filter/selection state; this phase
 deliberately doesn't build that machinery early.
+
+**Set a per-item chart color with `.style('fill', ...)`, never
+`.attr('fill', ...)`.** `REPORT_CSS`'s `.chart-bar { fill: var(--teal); }`
+class rule always wins over a presentation attribute set via
+`.attr("fill", ...)` regardless of specificity, because a stylesheet rule
+beats a presentation attribute outright in SVG/CSS — only an inline style
+(`.style(...)`) outranks a stylesheet rule. This exact bug was caught
+twice during this branch's review: once on the pie/stacked/grouped-bar
+color scales, then again on the plain line chart's `fill: none`. Any new
+call site that sets `fill` (or any other CSS property `.chart-bar`/
+`.chart-label`/`.chart-value` also declares) on a D3-created element must
+use `.style(...)`, not `.attr(...)`.
