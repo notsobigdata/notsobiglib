@@ -310,7 +310,81 @@ var REPORT_CSS = [
   '.chart { border-top: 1px solid var(--paper-line); padding-top: 16px; margin-top: 16px; }',
   '.chart h2 { font-size: 14px; }',
   '.chart-label, .chart-value { font-family: var(--mono); font-size: 12px; fill: var(--ink); }',
-  '.chart-bar { fill: var(--teal); }'
+  '.chart-bar { fill: var(--teal); }',
+  '.table-block { border-top: 1px solid var(--paper-line); padding-top: 16px; margin-top: 16px; }',
+  '.table-block h2 { font-size: 14px; }',
+  '.table-block table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }',
+  '.table-block th, .table-block td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); font-variant-numeric: tabular-nums; }',
+  '.table-pager { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-family: var(--mono); font-size: 12px; }',
+  '.table-pager button { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 8px; cursor: pointer; }',
+  '.table-pager button:disabled { color: var(--ink-soft); cursor: default; }'
+].join('\n');
+
+// Static first page (readable with zero JS, same as the KPI cards/SVG
+// chart above) plus inert-without-JS pager controls. table.rows already
+// holds every row, pre-formatted (see buildRawTablePayload/
+// buildAggregatedTablePayload) - only the first pageSize rows render here;
+// the rest reaches the browser via the existing __PUBLISH_PAYLOAD__ embed,
+// for TABLE_PAGINATION_JS below to page through.
+function renderTableSection(table) {
+  var firstPageRows = table.rows.slice(0, table.pageSize);
+  var pageCount = Math.max(1, Math.ceil(table.rows.length / table.pageSize));
+  var headerCells = table.columns.map(function (column) {
+    return '<th>' + escapeHtml(column.label) + '</th>';
+  }).join('');
+  var bodyRows = firstPageRows.map(function (row) {
+    return '<tr>' + row.map(function (cell) { return '<td>' + escapeHtml(cell) + '</td>'; }).join('') + '</tr>';
+  }).join('');
+  return '<section class="table-block" data-table-id="' + escapeHtml(table.id) + '">'
+    + '<h2>' + escapeHtml(table.title) + '</h2>'
+    + '<table><thead><tr>' + headerCells + '</tr></thead><tbody>' + bodyRows + '</tbody></table>'
+    + '<div class="table-pager">'
+    + '<button type="button" class="table-prev" disabled>Previous</button>'
+    + '<span class="table-page-label">Page 1 of ' + pageCount + '</span>'
+    + '<button type="button" class="table-next"' + (pageCount <= 1 ? ' disabled' : '') + '>Next</button>'
+    + '</div></section>';
+}
+
+// One generic paginator for every table.table-block on the page - reads
+// columns/rows/pageSize back off window.__PUBLISH_PAYLOAD__ by
+// data-table-id, never re-computes or re-formats a value (everything's
+// already a formatted string in the payload). Builds <tr>/<td> via
+// createElement + textContent only, per this repo's rule against
+// innerHTML/string-concatenated markup on payload-sourced data - see the
+// design spec's Render section.
+var TABLE_PAGINATION_JS = [
+  'document.addEventListener("DOMContentLoaded", function () {',
+  '  var payload = window.__PUBLISH_PAYLOAD__;',
+  '  Array.prototype.forEach.call(document.querySelectorAll(".table-block"), function (section) {',
+  '    var tableId = section.getAttribute("data-table-id");',
+  '    var table = payload.tables.filter(function (t) { return t.id === tableId; })[0];',
+  '    if (!table) { return; }',
+  '    var page = 0;',
+  '    var pageCount = Math.max(1, Math.ceil(table.rows.length / table.pageSize));',
+  '    var tbody = section.querySelector("tbody");',
+  '    var prevBtn = section.querySelector(".table-prev");',
+  '    var nextBtn = section.querySelector(".table-next");',
+  '    var pageLabel = section.querySelector(".table-page-label");',
+  '    function render() {',
+  '      while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }',
+  '      var start = page * table.pageSize;',
+  '      table.rows.slice(start, start + table.pageSize).forEach(function (row) {',
+  '        var tr = document.createElement("tr");',
+  '        row.forEach(function (cell) {',
+  '          var td = document.createElement("td");',
+  '          td.textContent = cell;',
+  '          tr.appendChild(td);',
+  '        });',
+  '        tbody.appendChild(tr);',
+  '      });',
+  '      pageLabel.textContent = "Page " + (page + 1) + " of " + pageCount;',
+  '      prevBtn.disabled = page === 0;',
+  '      nextBtn.disabled = page >= pageCount - 1;',
+  '    }',
+  '    prevBtn.addEventListener("click", function () { if (page > 0) { page -= 1; render(); } });',
+  '    nextBtn.addEventListener("click", function () { if (page < pageCount - 1) { page += 1; render(); } });',
+  '  });',
+  '});'
 ].join('\n');
 
 function renderReportHtml(payload, config) {
@@ -321,10 +395,15 @@ function renderReportHtml(payload, config) {
   var chartSections = payload.charts.map(function (chart) {
     return '<section class="chart"><h2>' + escapeHtml(chart.title) + '</h2>' + renderBarChartSvg(chart) + '</section>';
   }).join('');
+  var tableSections = payload.tables.map(renderTableSection).join('');
+  var script = 'window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';';
+  if (payload.tables.length) {
+    script += TABLE_PAGINATION_JS;
+  }
   return '<!doctype html><html><head><meta charset="utf-8">'
     + '<title>' + escapeHtml(config.target.fileName) + '</title>'
     + '<style>' + REPORT_CSS + '</style></head><body>'
-    + '<main><div class="kpis">' + kpiCards + '</div>' + chartSections + '</main>'
-    + '<script>window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';</script>'
+    + '<main><div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections + '</main>'
+    + '<script>' + script + '</script>'
     + '</body></html>';
 }

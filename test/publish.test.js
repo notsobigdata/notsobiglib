@@ -281,6 +281,49 @@ function testPublishBuildsRawAndAggregatedTablePayloads() {
   ]);
 }
 
+function testPublishRawTableRendersFirstPageAndEmbedsFullData() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [
+    ['A', '10', 'o1'],
+    ['A', '20', 'o1'],
+    ['A', '5', 'o3'],
+    ['B', '5', 'o2']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var sectionMatch = html.match(/<section class="table-block" data-table-id="recent_orders">[\s\S]*?<\/section>/);
+  assert.ok(sectionMatch, 'expected the recent_orders table section in: ' + html);
+  var section = sectionMatch[0];
+
+  // pageSize is 2, 4 raw rows total -> exactly 2 <tr> in the static <tbody>.
+  var bodyMatch = section.match(/<tbody>([\s\S]*?)<\/tbody>/);
+  assert.ok(bodyMatch, 'expected a <tbody> in: ' + section);
+  var rowCount = (bodyMatch[1].match(/<tr>/g) || []).length;
+  assert.strictEqual(rowCount, 2, 'expected exactly pageSize (2) rows in the static first page, got ' + rowCount);
+  assert.ok(/Page 1 of 2/.test(section), 'expected a "Page 1 of 2" label in: ' + section);
+  assert.ok(/\$10\.00/.test(bodyMatch[1]) && /\$20\.00/.test(bodyMatch[1]), 'expected the first two formatted rows in the static page, got: ' + bodyMatch[1]);
+
+  // Full 4-row dataset still embedded for client-side pagination to read.
+  var payload = extractPayload(html);
+  var rawTable = payload.tables.filter(function (t) { return t.id === 'recent_orders'; })[0];
+  assert.strictEqual(rawTable.rows.length, 4, 'expected all 4 rows embedded in the payload for pagination, got ' + rawTable.rows.length);
+
+  assert.ok(/DOMContentLoaded/.test(html), 'expected the pagination script to be emitted when tables[] is non-empty');
+}
+
+function testPublishNoPaginationScriptWithoutTables() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
+
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(!/DOMContentLoaded/.test(html), 'expected no pagination script when config.tables is empty, got: ' + html);
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -300,5 +343,7 @@ module.exports = {
   testPublishAggregatedMetricRequiresFieldUnlessCount: testPublishAggregatedMetricRequiresFieldUnlessCount,
   testPublishTableFormatMustBeKnownEnum: testPublishTableFormatMustBeKnownEnum,
   testPublishValidTablesProceedPastValidation: testPublishValidTablesProceedPastValidation,
-  testPublishBuildsRawAndAggregatedTablePayloads: testPublishBuildsRawAndAggregatedTablePayloads
+  testPublishBuildsRawAndAggregatedTablePayloads: testPublishBuildsRawAndAggregatedTablePayloads,
+  testPublishRawTableRendersFirstPageAndEmbedsFullData: testPublishRawTableRendersFirstPageAndEmbedsFullData,
+  testPublishNoPaginationScriptWithoutTables: testPublishNoPaginationScriptWithoutTables
 };

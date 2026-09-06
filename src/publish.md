@@ -47,3 +47,17 @@ reaching a live call (see `test/publish.test.js` and
 BigQuery read, aggregation-against-real-rows, and Drive write are Layer
 2 only — see `docs/superpowers/plans/2026-09-05-publish-kind-v1.md`'s
 Task 3 for the fixture-first `notsobigtests` companion this needs.
+
+## Why raw and aggregated tables share one render path
+
+`buildRawTablePayload`/`buildAggregatedTablePayload` (both in
+`src/publish.js`) converge on the exact same `{id, title, pageSize,
+columns: [{key,label}], rows: [[cell,...]]}` shape before
+`renderReportHtml` ever sees them — every cell already formatted to a
+string, the same way `kpi.formatted` already is. That convergence is
+deliberate: `renderTableSection()` and `TABLE_PAGINATION_JS` don't know
+or care which mode produced a given table, so a third mode later needs
+only its own `buildXTablePayload` function producing this same shape,
+never a second render/pagination path. See
+`docs/superpowers/specs/2026-09-06-publish-table-block-design.md`'s §4
+for the fuller rationale.
