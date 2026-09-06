@@ -471,73 +471,13 @@ function orderNodes(nodes) {
   return ordered;
 }
 
-// Submits all model queries in a level in parallel and returns an array of
-// {nodeName, jobInfo} so they can be polled together. Called only when every
-// node in a level is kind 'model' and command is 'run'.
-function submitModelJobsForLevel(nodes) {
-  var jobs = [];
-  nodes.forEach(function (node) {
-    var sql = node.config.sql;
-    assertSingleStatement(sql, 'model(): "' + node.name + '"');
-    var registry = readModelsRegistry();
-    var compiled = compileModelSql(sql, buildRefResolver(node.config, registry), buildSourceResolver(node.config, registry), registry, node.config);
-    var jobInfo = submitBigQueryQuery({ query: 'CREATE OR REPLACE ' + resolveMaterialized(node.config).toUpperCase() + ' ' + qualifiedRelation(node.config) + ' AS\n' + compiled, useLegacySql: false }, node.config.projectId);
-    jobs.push({ nodeName: node.name, nodeConfig: node.config, jobInfo: jobInfo, registry: registry });
-  });
-  return jobs;
-}
-
-// Polls all submitted model jobs until complete, returning results in the
-// same order as the jobs array. Each result is {nodeName, result, elapsed}.
-function pollModelJobsInParallel(jobs, verbose) {
-  var results = [];
-  var jobStatus = emptyMap();
-  jobs.forEach(function (job) {
-    jobStatus[job.nodeName] = { complete: false, result: null, elapsed: null, startedAt: new Date().getTime() };
-    Logger.log('START ' + job.nodeName + ' (model)');
-  });
-  var allComplete = false;
-  while (!allComplete) {
-    var anyProgress = false;
-    jobs.forEach(function (job) {
-      if (!jobStatus[job.nodeName].complete) {
-        try {
-          var pollResult = pollBigQueryJob(job.jobInfo);
-          jobStatus[job.nodeName].complete = true;
-          jobStatus[job.nodeName].result = pollResult;
-          jobStatus[job.nodeName].elapsed = new Date().getTime() - jobStatus[job.nodeName].startedAt;
-          anyProgress = true;
-          if (verbose) {
-            Logger.log('OK    ' + job.nodeName + ' (model) - ' + jobStatus[job.nodeName].elapsed + 'ms');
-          }
-        } catch (error) {
-          jobStatus[job.nodeName].complete = true;
-          jobStatus[job.nodeName].error = error.message;
-          jobStatus[job.nodeName].elapsed = new Date().getTime() - jobStatus[job.nodeName].startedAt;
-          anyProgress = true;
-          Logger.log('FAIL  ' + job.nodeName + ' (model) - ' + error.message);
-        }
-      }
-    });
-    allComplete = jobs.every(function (job) { return jobStatus[job.nodeName].complete; });
-    if (!allComplete && !anyProgress) {
-      Utilities.sleep(100);
-    }
-  }
-  return jobStatus;
-}
-
 // Groups a topologically-ordered node list into levels (array of arrays).
 // Each level contains all nodes that can run in parallel - a node's level
 // is 1 + max(level of its dependsOn). Levels[0] = all nodes with no deps,
 // Levels[1] = all that only depend on Level[0], etc. Used to parallelize
 // model() execution within each level.
 function buildLevelGroups(orderedNodes) {
-  var nodesByName = emptyMap();
   var levelByName = emptyMap();
-  orderedNodes.forEach(function (node) {
-    nodesByName[node.name] = node;
-  });
   orderedNodes.forEach(function (node) {
     var maxDepLevel = -1;
     node.dependsOn.forEach(function (depName) {
@@ -609,7 +549,48 @@ function buildLevelGroups(orderedNodes) {
 // Accepts either a flat array of nodes (backward compat) or an array of
 // arrays (levels from buildLevelGroups). Flat arrays are wrapped as a
 // single level for uniform handling.
-function runNodes(nodesOrLevels, command, verbose) {
+// A node can arrive already known to be broken - model.js's
+// expandModelNodes() sets this when a model's own sqlFile/tag
+// configuration is bad, discovered while building the graph, well before
+// any node's turn to actually run. Checked kind-agnostically (a plain
+// node-level field, not something only model nodes could have) and ahead
+// of a blocked-by-dependency check: the whole point of a "list"/"compile"
+// dry run is surfacing a config mistake before anything executes for
+// real, and this error is already fully known with nothing to execute to
+// see it - reporting it only on a real "run" would make "list"/"compile"
+// strictly less useful for exactly the errors that are cheapest to catch
+// early. One shared check, in this one order, for both runNodes()
+// branches below - they used to each carry their own copy, which had
+// silently drifted to opposite check orders (a node with both problems
+// got a different status depending on which branch ran it).
+function checkNodeBlocked(node, blocked) {
+  if (node.discoveryError) {
+    return { blocked: true, status: 'failed', error: node.discoveryError };
+  }
+  var blockers = node.dependsOn.filter(function (dependency) { return has(blocked, dependency); });
+  if (blockers.length) {
+    return { blocked: true, status: 'skipped', blockedBy: blockers };
+  }
+  return { blocked: false };
+}
+
+// Records a checkNodeBlocked() hit against `blocked`/`results` and logs it -
+// shared so the result shape (which of error/blockedBy is attached) and the
+// FAIL/SKIP log line are built in exactly one place for both runNodes()
+// branches.
+function recordBlockedNode(node, check, blocked, results) {
+  blocked[node.name] = true;
+  var result = { name: node.name, kind: node.kind, status: check.status };
+  if (check.status === 'failed') {
+    result.error = check.error;
+  } else {
+    result.blockedBy = check.blockedBy;
+  }
+  results.push(result);
+  Logger.log((check.status === 'failed' ? 'FAIL  ' : 'SKIP  ') + nodeLabel(node) + ' - ' + (check.error || 'waiting on ' + check.blockedBy.join(', ')));
+}
+
+function runNodes(nodesOrLevels, command) {
   var levels = (nodesOrLevels.length > 0 && Array.isArray(nodesOrLevels[0]))
     ? nodesOrLevels
     : [nodesOrLevels];
@@ -622,37 +603,55 @@ function runNodes(nodesOrLevels, command, verbose) {
     var allModels = command === 'run' && nodes.length > 0 && nodes.every(function (n) { return n.kind === 'model'; });
     if (allModels) {
       // Check if any node is blocked before attempting parallel submit.
-      var blockedInLevel = nodes.filter(function (node) {
-        var blockers = node.dependsOn.filter(function (dependency) { return has(blocked, dependency); });
-        if (blockers.length) {
-          blocked[node.name] = true;
-          results.push({ name: node.name, kind: node.kind, status: 'skipped', blockedBy: blockers });
-          Logger.log('SKIP  ' + nodeLabel(node) + ' - waiting on ' + blockers.join(', '));
-          return true;
+      var unblocked = nodes.filter(function (node) {
+        var check = checkNodeBlocked(node, blocked);
+        if (check.blocked) {
+          recordBlockedNode(node, check, blocked, results);
         }
-        if (node.discoveryError) {
-          blocked[node.name] = true;
-          results.push({ name: node.name, kind: node.kind, status: 'failed', error: node.discoveryError });
-          Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + node.discoveryError);
-          return true;
-        }
-        return false;
+        return !check.blocked;
       });
-      var unblocked = nodes.filter(function (n) { return blockedInLevel.indexOf(n) === -1; });
       if (unblocked.length > 0) {
-        // Submit all unblocked models in this level in parallel.
-        var jobs = submitModelJobsForLevel(unblocked);
-        // Poll all jobs in parallel (round-robin).
-        var jobStatus = pollModelJobsInParallel(jobs, verbose);
-        // Collect results.
-        unblocked.forEach(function (node) {
-          var status = jobStatus[node.name];
-          var elapsed = status.elapsed;
-          if (status.error) {
+        unblocked.forEach(function (node) { Logger.log('START ' + nodeLabel(node)); });
+        // buildModelPipeline (model.js) is the exact same code model()
+        // itself calls for a single node - running the whole level through
+        // runBigQueryPipelinesInParallel (move.js) here, instead of a
+        // second cli.js-side "submit the simple case" shortcut, is what
+        // guarantees every materialization type (incremental merge/
+        // insert_overwrite/append, staged-table-with-tests, plain) gets
+        // full parallel submit/poll, not just the plain path - and that a
+        // node's result/error shape can never differ by which branch ran it.
+        // buildModelPipeline(node.config) itself can throw (a bad
+        // {{ ref() }}, a multi-statement SQL file, an invalid incremental
+        // strategy) - deferred to inside start() rather than called
+        // eagerly here, so that failure is caught by
+        // runBigQueryPipelinesInParallel's own per-pipeline try/catch
+        // (move.js) exactly like a submit/poll failure, instead of
+        // throwing out of this whole level before any job is even
+        // submitted.
+        var pipelines = unblocked.map(function (node) {
+          var real = null;
+          return {
+            start: function () {
+              real = buildModelPipeline(node.config);
+              return real.start();
+            },
+            resume: function (queryResults) {
+              return real.resume(queryResults);
+            }
+          };
+        });
+        var outcomes = runBigQueryPipelinesInParallel(pipelines);
+        unblocked.forEach(function (node, i) {
+          var outcome = outcomes[i];
+          if (outcome.error) {
             blocked[node.name] = true;
-            results.push({ name: node.name, kind: node.kind, status: 'failed', ms: elapsed, error: status.error });
+            results.push({ name: node.name, kind: node.kind, status: 'failed', ms: outcome.elapsed, error: outcome.error });
+            Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + outcome.error);
           } else {
-            results.push({ name: node.name, kind: node.kind, status: 'success', ms: elapsed, result: status.result });
+            results.push({ name: node.name, kind: node.kind, status: 'success', ms: outcome.elapsed, result: outcome.result });
+            if (verbose) {
+              Logger.log('OK    ' + nodeLabel(node) + ' - ' + outcome.elapsed + 'ms');
+            }
           }
         });
       }
@@ -660,28 +659,9 @@ function runNodes(nodesOrLevels, command, verbose) {
     }
     // Sequential execution (default for non-model or non-run).
     nodes.forEach(function (node) {
-    // A node can arrive already known to be broken - model.js's
-    // expandModelNodes() sets this when a model's own sqlFile/tag
-    // configuration is bad, discovered while building the graph, well
-    // before any node's turn to actually run. Checked here, kind-
-    // agnostically (a plain node-level field, not something only model
-    // nodes could have), and ahead of the dry-run/compile branches below:
-    // the whole point of a "list"/"compile" dry run is surfacing a config
-    // mistake before anything executes for real, and this error is already
-    // fully known with nothing to execute to see it - reporting it only on
-    // a real "run" would make "list"/"compile" strictly less useful for
-    // exactly the errors that are cheapest to catch early.
-    if (node.discoveryError) {
-      blocked[node.name] = true;
-      results.push({ name: node.name, kind: node.kind, status: 'failed', error: node.discoveryError });
-      Logger.log('FAIL  ' + nodeLabel(node) + ' - ' + node.discoveryError);
-      return;
-    }
-    var blockers = node.dependsOn.filter(function (dependency) { return has(blocked, dependency); });
-    if (blockers.length) {
-      blocked[node.name] = true;
-      results.push({ name: node.name, kind: node.kind, status: 'skipped', blockedBy: blockers });
-      Logger.log('SKIP  ' + nodeLabel(node) + ' - waiting on ' + blockers.join(', '));
+    var check = checkNodeBlocked(node, blocked);
+    if (check.blocked) {
+      recordBlockedNode(node, check, blocked, results);
       return;
     }
     if (command === 'compile') {
@@ -827,11 +807,11 @@ function resolveManifestFolderId(folderId) {
 // their size - a manifest is an observability artifact, not a second copy
 // of the data that already landed at its real destination.
 //
-// staged (model.js's modelTableStaged(), a table model with tests) is its
-// own independent `if`, same as every other optional field here - it was
-// missing until a code-review pass caught it (2026-08-11): the staging
+// staged (model.js's buildStagedTablePipeline(), a table model with tests)
+// is its own independent `if`, same as every other optional field here - it
+// was missing until a code-review pass caught it (2026-08-11): the staging
 // table itself is already gone by the time a manifest is written (deleted
-// in modelTableStaged()'s own finally block), so this field is purely
+// in that pipeline's own resume()/finally block), so this field is purely
 // informational, recording that this run went through the staged path at
 // all rather than materializing directly - worth knowing from the
 // manifest alone, without having to infer it from materialized/tests.
@@ -1516,7 +1496,7 @@ function cli(input) {
   // For 'run', group by levels to enable parallel execution within each level;
   // for 'list'/'compile', keep flat for backward compat (no functional difference).
   var nodesToRun = parsed.command === 'run' ? buildLevelGroups(ordered) : ordered;
-  var results = runNodes(nodesToRun, parsed.command, resolveLoggingConfig().verbose);
+  var results = runNodes(nodesToRun, parsed.command);
   var ok = results.every(function (result) { return result.status !== 'failed' && result.status !== 'skipped'; });
   Logger.log('DONE  cli("' + input + '") - ' + formatStatusCounts(results) + ' (' + results.length + ' total).');
   var report = {

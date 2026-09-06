@@ -1548,10 +1548,10 @@ function quoteSqlLiteral(value) {
 // MODEL_TEST_COMPILERS.relationships's own resolveModelConfig() call to
 // throw "is not declared in notsobigdataModels.models" once the model had
 // already materialized (CREATE OR REPLACE already ran, and for a "table"
-// materialization, modelTableStaged() had already created its staging
-// table) - a discovery-time check should have caught this before any
-// BigQuery work started, the same way every other "to"/"ref()" mismatch
-// in this file already does.
+// materialization, buildStagedTablePipeline()'s start() had already
+// created its staging table) - a discovery-time check should have caught
+// this before any BigQuery work started, the same way every other
+// "to"/"ref()" mismatch in this file already does.
 function validateModelTest(test, messagePrefix, registry) {
   if (!test || typeof test !== 'object') {
     throw new Error(messagePrefix + ' every "tests" entry must be an object.');
@@ -1901,15 +1901,16 @@ function expandModelNodes(otherNodes) {
 // table. A table with no tests also just materializes directly - nothing
 // to check, nothing to gain from staging.
 //
-// A table *with* tests goes through modelTableStaged() below instead:
-// build into a scratch table, test the scratch table, and only promote
-// into the real relation - via a copy job, not a second SELECT - once
-// every test has passed. That's the guarantee CREATE OR REPLACE alone
-// can't give a table model: without staging, a failing test is
+// A table *with* tests goes through buildStagedTablePipeline() below
+// instead: build into a scratch table, test the scratch table, and only
+// promote into the real relation - via a copy job, not a second SELECT -
+// once every test has passed. That's the guarantee CREATE OR REPLACE
+// alone can't give a table model: without staging, a failing test is
 // discovered only after the bad rows are already sitting in the real
 // relation (this was itself the shape of the bug an external review
-// caught - see modelTableStaged()'s own comment for the fix and why the
-// previous "would double BigQuery compute" reasoning here didn't hold).
+// caught - see buildStagedTablePipeline()'s own comment for the fix and
+// why the previous "would double BigQuery compute" reasoning here didn't
+// hold).
 //
 // The ref()-resolution closure both model() and compileModel() need:
 // a name resolves against either a declared model (via
@@ -2051,11 +2052,12 @@ function checkSourceFreshness(entry) {
 }
 
 // cli('sources')'s test check for one source table entry - reuses
-// compileModelTests()/runSqlTests() exactly as modelTableStaged()/model()
-// above already do for a model's own tests[], just pointed at the source
-// table's own relation instead of a model's. registry is only needed for
-// a "relationships" test's own "to" resolution (MODEL_TEST_COMPILERS.relationships,
-// above), the same reason readSourcesEntry() needed it once already, at
+// compileModelTests()/runModelTests() exactly as this file's own model
+// pipelines above already do for a model's own tests[], just pointed at
+// the source table's own relation instead of a model's. registry is only
+// needed for a "relationships" test's own "to" resolution
+// (MODEL_TEST_COMPILERS.relationships, above), the same reason
+// readSourcesEntry() needed it once already, at
 // validation time - this is that same test list, now actually run.
 function runSourceTests(entry, registry) {
   var compiledTests = compileModelTests(entry.tests, registry);
@@ -2085,7 +2087,31 @@ function compileModel(config) {
 // as "failed" before ever calling an EXECUTORS entry - so there is no path
 // into this function for a node that didn't get a real config.sql, and
 // config.tests (if present) has already passed validateModelTests above.
+//
+// model() itself is a thin wrapper: build this node's pipeline and drive
+// it alone through runBigQueryPipelinesInParallel (move.js) - the same
+// machinery cli.js's runNodes() uses to drive many models' pipelines side
+// by side within one dependency level for a parallel 'run'. One node here,
+// N there; a solo model() call and a parallel-level model() call can never
+// diverge in what they submit, poll for, or return, because they're the
+// same code.
 function model(config) {
+  var outcome = runBigQueryPipelinesInParallel([buildModelPipeline(config)])[0];
+  if (outcome.error) {
+    throw new Error(outcome.error);
+  }
+  return outcome.result;
+}
+
+// Builds this model's execution as a {start, resume} pipeline (see
+// runBigQueryPipelinesInParallel's contract in move.js) instead of running
+// it straight through, so cli.js can drive many models' pipelines side by
+// side within one dependency level rather than submitting a job, blocking
+// until it's done, then moving to the next model. Dispatches on
+// materialized/hasTests exactly like model() always has; each branch
+// below is the async form of what used to be its own synchronous
+// function.
+function buildModelPipeline(config) {
   var sql = config.sql;
   assertSingleStatement(sql, 'model(): "' + config.name + '"');
   var registry = readModelsRegistry();
@@ -2095,198 +2121,164 @@ function model(config) {
   var hasTests = !!(config.tests && config.tests.length);
 
   if (materialized === 'incremental') {
-    return modelIncremental(config, compiled, relation, registry);
+    return buildIncrementalPipeline(config, compiled, relation, registry, hasTests);
   }
-
   if (materialized === 'table' && hasTests) {
-    return modelTableStaged(config, compiled, relation, registry);
+    return buildStagedTablePipeline(config, compiled, relation, registry);
   }
+  return buildPlainPipeline(config, compiled, relation, registry, materialized, hasTests);
+}
 
-  var statement = 'CREATE OR REPLACE ' + materialized.toUpperCase() + ' ' + relation + ' AS\n' + compiled;
-  runBigQueryQueryJob({ query: statement, useLegacySql: false }, config.projectId);
-  var result = { relation: relation, materialized: materialized };
-  if (hasTests) {
-    var compiledTests = compileModelTests(config.tests, registry);
-    result.testResults = runSqlTests(
-      compiledTests,
-      { projectId: config.projectId, dataset: config.dataset, table: config.name },
-      'model(): "' + config.name + '" tests'
-    );
-  }
-  return result;
+// Runs config.tests against `table` and returns the results - the same
+// three lines every materialization branch below needs once its data
+// lands, extracted so there's exactly one place building that message
+// (previously repeated near-verbatim in model(), modelIncremental() and
+// each of its three strategy functions).
+function runModelTests(config, registry, dataset, table) {
+  var compiledTests = compileModelTests(config.tests, registry);
+  return runSqlTests(
+    compiledTests,
+    { projectId: config.projectId, dataset: dataset, table: table },
+    'model(): "' + config.name + '" tests'
+  );
+}
+
+// view, or table with no tests to gate on: one CREATE OR REPLACE job,
+// then (if declared) tests against the relation it just wrote.
+function buildPlainPipeline(config, compiled, relation, registry, materialized, hasTests) {
+  return {
+    start: function () {
+      var statement = 'CREATE OR REPLACE ' + materialized.toUpperCase() + ' ' + relation + ' AS\n' + compiled;
+      return { job: submitBigQueryQuery({ query: statement, useLegacySql: false }, config.projectId) };
+    },
+    resume: function () {
+      var result = { relation: relation, materialized: materialized };
+      if (hasTests) {
+        result.testResults = runModelTests(config, registry, config.dataset, config.name);
+      }
+      return { done: true, result: result };
+    }
+  };
 }
 
 // Handles an incremental model: first build (CREATE OR REPLACE TABLE), or
-// incremental mutation (MERGE/INSERT INTO/INSERT OVERWRITE, depending on strategy).
-// Tests run after the mutation against the real relation (no staging - see the
-// main comment in the design spec for why).
-function modelIncremental(config, compiled, relation, registry) {
+// incremental mutation (MERGE/INSERT INTO/INSERT OVERWRITE script,
+// depending on strategy) - exactly one BigQuery job either way, so one
+// submit/resume round trip covers every strategy. Tests run after against
+// the real relation (no staging - see the design spec for why).
+// insert_overwrite's script stages into a scratch table as part of that
+// one job; resume() cleans it up once the job (and any tests) are done.
+function buildIncrementalPipeline(config, compiled, relation, registry, hasTests) {
   var strategy = resolveIncrementalStrategy(config);
   validateIncrementalConfig(config, strategy);
-  var exists = relationExists(config.projectId, config.dataset, config.name);
-  var hasTests = !!(config.tests && config.tests.length);
+  var stagingTable = strategy === 'insert_overwrite' ? resolveStagingTableId(config.name) : null;
+  var isFullBuild = false;
 
-  // First build or full-refresh: CREATE OR REPLACE TABLE (same semantics as
-  // a regular table materialization). insert_overwrite adds PARTITION BY.
-  // MARKER: 2026-09-02 20:25 - FIXED VERSION using TIMESTAMP_TRUNC/field directly
-  if (!exists || config.fullRefresh) {
+  // First build or full-refresh: CREATE OR REPLACE TABLE (same semantics
+  // as a regular table materialization). insert_overwrite adds PARTITION BY.
+  function fullBuildStatement() {
     var partitionClause = '';
     if (strategy === 'insert_overwrite' && config.partitionBy) {
       var partitionExpr = quoteIdentifier(config.partitionBy.field);
-      // DATE column with DAY granularity: use field directly
-      // Otherwise: TIMESTAMP_TRUNC(CAST(field AS TIMESTAMP), granularity)
       if (config.partitionBy.dataType !== 'DATE' || config.partitionBy.granularity !== 'DAY') {
         partitionExpr = 'TIMESTAMP_TRUNC(CAST(' + partitionExpr + ' AS TIMESTAMP), ' + config.partitionBy.granularity + ')';
       }
       partitionClause = ' PARTITION BY ' + partitionExpr + ' OPTIONS(require_partition_filter=false)';
     }
-    var statement = 'CREATE OR REPLACE TABLE ' + relation + partitionClause + ' AS\n' + compiled;
-    runBigQueryQueryJob({ query: statement, useLegacySql: false }, config.projectId);
-    var result = { relation: relation, materialized: 'incremental', strategy: strategy };
-    if (hasTests) {
-      var compiledTests = compileModelTests(config.tests, registry);
-      result.testResults = runSqlTests(
-        compiledTests,
-        { projectId: config.projectId, dataset: config.dataset, table: config.name },
-        'model(): "' + config.name + '" tests'
-      );
+    return 'CREATE OR REPLACE TABLE ' + relation + partitionClause + ' AS\n' + compiled;
+  }
+
+  // MERGE strategy: upsert by unique_key. Extracts columns from the
+  // target relation's schema, builds SET clauses for MATCHED updates and
+  // INSERT clauses for NOT MATCHED, deriving both from the compiled
+  // SELECT's column list (via BigQuery's schema introspection).
+  function mergeStatement() {
+    var uniqueKey = config.uniqueKey;
+    if (typeof uniqueKey === 'string') {
+      uniqueKey = uniqueKey.split(',').map(function (k) { return k.trim(); });
+    } else if (!Array.isArray(uniqueKey)) {
+      uniqueKey = [uniqueKey];
     }
-    return result;
+    var targetTable = BigQuery.Tables.get(config.projectId, config.dataset, config.name);
+    var targetColumns = targetTable.schema.fields.map(function (f) { return f.name; });
+    var onClause = uniqueKey.map(function (col) {
+      return 'T.' + quoteIdentifier(col) + ' = S.' + quoteIdentifier(col);
+    }).join(' AND ');
+    var setClauses = targetColumns
+      .filter(function (col) { return uniqueKey.indexOf(col) === -1; })
+      .map(function (col) { return quoteIdentifier(col) + ' = S.' + quoteIdentifier(col); });
+    var setClause = setClauses.length ? ', ' + setClauses.join(', ') : '';
+    var insertCols = targetColumns.map(function (col) { return quoteIdentifier(col); }).join(', ');
+    var insertVals = targetColumns.map(function (col) { return 'S.' + quoteIdentifier(col); }).join(', ');
+    return 'MERGE INTO ' + relation + ' T\n' +
+      'USING (\n' + compiled + '\n) S\n' +
+      'ON ' + onClause + '\n' +
+      'WHEN MATCHED THEN UPDATE SET ' + uniqueKey.map(function (col) {
+        return quoteIdentifier(col) + ' = S.' + quoteIdentifier(col);
+      }).join(', ') + setClause + '\n' +
+      'WHEN NOT MATCHED THEN INSERT (' + insertCols + ') VALUES (' + insertVals + ')';
   }
 
-  // Incremental mutation: relation exists and no full-refresh
-  if (strategy === 'merge') {
-    return modelIncrementalMerge(config, compiled, relation, registry);
-  } else if (strategy === 'insert_overwrite') {
-    return modelIncrementalInsertOverwrite(config, compiled, relation, registry);
-  } else { // append
-    return modelIncrementalAppend(config, compiled, relation, registry);
+  // INSERT OVERWRITE strategy: partition-based incremental via
+  // multi-statement BigQuery script. Stages the compiled SELECT into a
+  // temp table, captures touched partitions, deletes those partitions
+  // from the target, then inserts the staged data.
+  //
+  // ponytail: this assumes GAS's BigQuery Advanced Service accepts
+  // multi-statement scripts (BEGIN...END in BigQuery scripting). Not
+  // confirmed against live BigQuery yet - see notsobigtests Layer 2 for
+  // the real verification.
+  function insertOverwriteScript() {
+    var partitionField = quoteIdentifier(config.partitionBy.field);
+    var stagingRelation = qualifiedTableRef(config.projectId, config.dataset, stagingTable);
+    return 'BEGIN\n' +
+      '  DECLARE touched_partitions ARRAY<' + config.partitionBy.dataType + '>;\n' +
+      '  CREATE OR REPLACE TABLE ' + stagingRelation + ' AS\n' +
+      '  ' + compiled + ';\n' +
+      '  SET touched_partitions = (\n' +
+      '    SELECT ARRAY_AGG(DISTINCT ' + partitionField + ')\n' +
+      '    FROM ' + stagingRelation + '\n' +
+      '  );\n' +
+      '  DELETE FROM ' + relation + '\n' +
+      '  WHERE ' + partitionField + ' IN UNNEST(touched_partitions);\n' +
+      '  INSERT INTO ' + relation + '\n' +
+      '  SELECT * FROM ' + stagingRelation + ';\n' +
+      'END';
   }
-}
 
-// MERGE strategy: upsert by unique_key. Extracts columns from the table schema,
-// builds SET clauses for MATCHED updates and INSERT clauses for NOT MATCHED,
-// deriving both from the compiled SELECT's column list (via BigQuery's schema
-// introspection).
-function modelIncrementalMerge(config, compiled, relation, registry) {
-  var uniqueKey = config.uniqueKey;
-  if (typeof uniqueKey === 'string') {
-    uniqueKey = uniqueKey.split(',').map(function (k) { return k.trim(); });
-  } else if (!Array.isArray(uniqueKey)) {
-    uniqueKey = [uniqueKey];
-  }
-
-  // Introspect the target relation's schema to get column names
-  var targetTable = BigQuery.Tables.get(config.projectId, config.dataset, config.name);
-  var targetColumns = targetTable.schema.fields.map(function (f) { return f.name; });
-
-  // Build the ON clause from uniqueKey - e.g., "T.id = S.id AND T.date = S.date"
-  var onClauses = uniqueKey.map(function (col) {
-    return 'T.' + quoteIdentifier(col) + ' = S.' + quoteIdentifier(col);
-  });
-  var onClause = onClauses.join(' AND ');
-
-  // Build SET clause for MATCHED: "col = S.col" for non-key columns
-  var setClauses = targetColumns
-    .filter(function (col) { return uniqueKey.indexOf(col) === -1; })
-    .map(function (col) { return quoteIdentifier(col) + ' = S.' + quoteIdentifier(col); });
-  var setClause = setClauses.length ? ', ' + setClauses.join(', ') : '';
-
-  // Build column lists for NOT MATCHED INSERT
-  var insertCols = targetColumns.map(function (col) { return quoteIdentifier(col); }).join(', ');
-  var insertVals = targetColumns.map(function (col) { return 'S.' + quoteIdentifier(col); }).join(', ');
-
-  var mergeStatement = 'MERGE INTO ' + relation + ' T\n' +
-    'USING (\n' + compiled + '\n) S\n' +
-    'ON ' + onClause + '\n' +
-    'WHEN MATCHED THEN UPDATE SET ' + uniqueKey.map(function (col) {
-      return quoteIdentifier(col) + ' = S.' + quoteIdentifier(col);
-    }).join(', ') + setClause + '\n' +
-    'WHEN NOT MATCHED THEN INSERT (' + insertCols + ') VALUES (' + insertVals + ')';
-
-  runBigQueryQueryJob({ query: mergeStatement, useLegacySql: false }, config.projectId);
-  var result = { relation: relation, materialized: 'incremental', strategy: 'merge' };
-  if (config.tests && config.tests.length) {
-    var compiledTests = compileModelTests(config.tests, registry);
-    result.testResults = runSqlTests(
-      compiledTests,
-      { projectId: config.projectId, dataset: config.dataset, table: config.name },
-      'model(): "' + config.name + '" tests'
-    );
-  }
-  return result;
-}
-
-// INSERT OVERWRITE strategy: partition-based incremental via multi-statement
-// BigQuery script. Stages the compiled SELECT into a temp table, captures
-// touched partitions, deletes those partitions from the target, then inserts
-// the staged data.
-//
-// ponytail: this assumes GAS's BigQuery Advanced Service accepts multi-statement
-// scripts (BEGIN...END in BigQuery scripting). Not confirmed against live BigQuery
-// yet - see notsobigtests Layer 2 for the real verification.
-function modelIncrementalInsertOverwrite(config, compiled, relation, registry) {
-  var partitionField = quoteIdentifier(config.partitionBy.field);
-  var stagingTable = resolveStagingTableId(config.name);
-  var stagingRelation = qualifiedTableRef(config.projectId, config.dataset, stagingTable);
-
-  // Multi-statement script: stage the data, capture partitions, delete+insert
-  // DECLARE must come first in BigQuery scripts, before any other statements
-  var script = 'BEGIN\n' +
-    '  DECLARE touched_partitions ARRAY<' + config.partitionBy.dataType + '>;\n' +
-    '  CREATE OR REPLACE TABLE ' + stagingRelation + ' AS\n' +
-    '  ' + compiled + ';\n' +
-    '  SET touched_partitions = (\n' +
-    '    SELECT ARRAY_AGG(DISTINCT ' + partitionField + ')\n' +
-    '    FROM ' + stagingRelation + '\n' +
-    '  );\n' +
-    '  DELETE FROM ' + relation + '\n' +
-    '  WHERE ' + partitionField + ' IN UNNEST(touched_partitions);\n' +
-    '  INSERT INTO ' + relation + '\n' +
-    '  SELECT * FROM ' + stagingRelation + ';\n' +
-    'END';
-
-  var stagingCreated = false;
-  try {
-    runBigQueryQueryJob({ query: script, useLegacySql: false }, config.projectId);
-    stagingCreated = true;
-
-    var result = { relation: relation, materialized: 'incremental', strategy: 'insert_overwrite' };
-    if (config.tests && config.tests.length) {
-      var compiledTests = compileModelTests(config.tests, registry);
-      result.testResults = runSqlTests(
-        compiledTests,
-        { projectId: config.projectId, dataset: config.dataset, table: config.name },
-        'model(): "' + config.name + '" tests'
-      );
-    }
-    return result;
-  } finally {
-    if (stagingCreated) {
+  return {
+    start: function () {
+      var exists = relationExists(config.projectId, config.dataset, config.name);
+      isFullBuild = !exists || config.fullRefresh;
+      var query = isFullBuild ? fullBuildStatement()
+        : strategy === 'merge' ? mergeStatement()
+        : strategy === 'insert_overwrite' ? insertOverwriteScript()
+        : 'INSERT INTO ' + relation + '\n' + compiled; // append
+      return { job: submitBigQueryQuery({ query: query, useLegacySql: false }, config.projectId) };
+    },
+    // isFullBuild reaching here (rather than being read at submit time)
+    // matters: it's still whatever start() last set, since resume() only
+    // ever runs after that same start()'s job has completed - so the
+    // insert_overwrite staging cleanup below always matches the branch
+    // that actually ran.
+    resume: function () {
       try {
-        BigQuery.Tables.remove(config.projectId, config.dataset, stagingTable);
-      } catch (e) {
-        // Ignore cleanup errors - staging table has expiration_timestamp anyway
+        var result = { relation: relation, materialized: 'incremental', strategy: strategy };
+        if (hasTests) {
+          result.testResults = runModelTests(config, registry, config.dataset, config.name);
+        }
+        return { done: true, result: result };
+      } finally {
+        if (!isFullBuild && strategy === 'insert_overwrite') {
+          try {
+            BigQuery.Tables.remove(config.projectId, config.dataset, stagingTable);
+          } catch (e) {
+            // Ignore cleanup errors - staging table has expiration_timestamp anyway
+          }
+        }
       }
     }
-  }
-}
-
-// APPEND strategy: simplest incremental - just INSERT INTO the compiled SELECT
-function modelIncrementalAppend(config, compiled, relation, registry) {
-  var appendStatement = 'INSERT INTO ' + relation + '\n' + compiled;
-  runBigQueryQueryJob({ query: appendStatement, useLegacySql: false }, config.projectId);
-
-  var result = { relation: relation, materialized: 'incremental', strategy: 'append' };
-  if (config.tests && config.tests.length) {
-    var compiledTests = compileModelTests(config.tests, registry);
-    result.testResults = runSqlTests(
-      compiledTests,
-      { projectId: config.projectId, dataset: config.dataset, table: config.name },
-      'model(): "' + config.name + '" tests'
-    );
-  }
-  return result;
+  };
 }
 
 // Stages a table-materialized model's compiled SELECT into a scratch
@@ -2295,74 +2287,44 @@ function modelIncrementalAppend(config, compiled, relation, registry) {
 // loadBigQueryStaged (see its comment for the general shape and the
 // GAS-execution-timeout reasoning behind the staging table's
 // belt-and-suspenders expiration_timestamp). Reuses move.js's
-// resolveStagingTableId rather than growing a second staging-id helper -
-// it was already generic, just previously only called from move.js. As of
-// 2026-08-11, promotion itself also reuses move.js's promoteStagedTable()
-// rather than a second hand-written copy job - see that function's own
-// comment for why (a future BigQuery copy-job quirk, the kind
-// widenDestinationTableForPromotion already was once, should only ever
-// need fixing in one place).
+// resolveStagingTableId rather than growing a second staging-id helper,
+// and promotion reuses move.js's promoteStagedTable() rather than a
+// second hand-written copy job - see that function's own comment for why
+// (a future BigQuery copy-job quirk, the kind widenDestinationTableForPromotion
+// already was once, should only ever need fixing in one place).
 //
-// Promotion is a BigQuery *copy* job (configuration.copy,
-// WRITE_TRUNCATE - a full replace, matching what CREATE OR REPLACE TABLE
-// already does every run since incremental materialization isn't
-// implemented yet), not a second "CREATE OR REPLACE TABLE ... AS
-// SELECT". That distinction is the whole point: an earlier version of
-// this function's comment argued staging would double BigQuery compute,
-// reasoning that promotion would mean re-running the model's own SELECT
-// a second time. A copy job doesn't do that - it's a metadata-level
-// operation, not a re-executed query - so the SELECT still runs exactly
-// once per run, staging buys the "never test data that's already sitting
-// in the real relation" guarantee for free, and the real relation is
-// simply never touched by a run whose tests failed.
-//
-// The staging table's OPTIONS(expiration_timestamp=...) is set directly
-// in the CREATE OR REPLACE TABLE DDL rather than via a separate
-// BigQuery.Tables.insert call the way loadBigQueryStaged does - model()
-// only ever talks to BigQuery through query jobs already (no CSV blob to
-// load), so setting the expiration inline keeps this a single query job
-// instead of adding a second API shape just for this one path.
-function modelTableStaged(config, compiled, relation, registry) {
+// Only the staging build (the actual SELECT) goes through the async
+// submit/poll below - tests, promotion and cleanup are comparatively fast
+// metadata-level operations run synchronously once it completes, so this
+// still overlaps the expensive part across every model in a level even
+// though the tail end of each pipeline runs solo.
+function buildStagedTablePipeline(config, compiled, relation, registry) {
   var stagingTable = resolveStagingTableId(config.name);
-  var stagingRelation = qualifiedTableRef(config.projectId, config.dataset, stagingTable);
-  var expirationMillis = Date.now() + 60 * 60 * 1000;
-  var stagingStatement = 'CREATE OR REPLACE TABLE ' + stagingRelation +
-    ' OPTIONS(expiration_timestamp = TIMESTAMP_MILLIS(' + expirationMillis + ')) AS\n' + compiled;
-  // Tracks whether the staging query itself succeeded, so the finally
-  // block below only tries to remove a table that actually exists - if
-  // the staging query throws, there is nothing to clean up yet, and
-  // calling BigQuery.Tables.remove anyway would mask the real error with
-  // a spurious "not found" from cleanup.
-  var stagingCreated = false;
-  try {
-    runBigQueryQueryJob({ query: stagingStatement, useLegacySql: false }, config.projectId);
-    stagingCreated = true;
-
-    var compiledTests = compileModelTests(config.tests, registry);
-    var testResults = runSqlTests(
-      compiledTests,
-      { projectId: config.projectId, dataset: config.dataset, table: stagingTable },
-      'model(): "' + config.name + '" tests'
-    );
-
-    // Reuses move.js's promoteStagedTable() rather than a second, hand-written
-    // copy job - the same primitive loadBigQueryStaged uses for its own
-    // promotion, so a future BigQuery copy-job quirk discovered against
-    // either caller (widenDestinationTableForPromotion was one such quirk)
-    // only ever needs fixing in the one function both share. widenFirst is
-    // always false here: a model's promotion is always a full WRITE_TRUNCATE
-    // replace, with no schema-evolution concept of its own to opt into.
-    promoteStagedTable(
-      { projectId: config.projectId, dataset: config.dataset, table: config.name },
-      stagingTable, 'WRITE_TRUNCATE', false
-    );
-
-    return { relation: relation, materialized: 'table', staged: { table: stagingTable }, testResults: testResults };
-  } finally {
-    if (stagingCreated) {
-      BigQuery.Tables.remove(config.projectId, config.dataset, stagingTable);
+  return {
+    start: function () {
+      var stagingRelation = qualifiedTableRef(config.projectId, config.dataset, stagingTable);
+      var expirationMillis = Date.now() + 60 * 60 * 1000;
+      var stagingStatement = 'CREATE OR REPLACE TABLE ' + stagingRelation +
+        ' OPTIONS(expiration_timestamp = TIMESTAMP_MILLIS(' + expirationMillis + ')) AS\n' + compiled;
+      return { job: submitBigQueryQuery({ query: stagingStatement, useLegacySql: false }, config.projectId) };
+    },
+    // Reached only once the staging CREATE OR REPLACE TABLE job above
+    // completed successfully, so - unlike the old single-shot version -
+    // no separate stagingCreated flag is needed to gate cleanup: getting
+    // here at all means there's a staging table to remove.
+    resume: function () {
+      try {
+        var testResults = runModelTests(config, registry, config.dataset, stagingTable);
+        promoteStagedTable(
+          { projectId: config.projectId, dataset: config.dataset, table: config.name },
+          stagingTable, 'WRITE_TRUNCATE', false
+        );
+        return { done: true, result: { relation: relation, materialized: 'table', staged: { table: stagingTable }, testResults: testResults } };
+      } finally {
+        BigQuery.Tables.remove(config.projectId, config.dataset, stagingTable);
+      }
     }
-  }
+  };
 }
 
 // Applies target overlay to every model node after discovery. Each model

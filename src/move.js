@@ -413,6 +413,84 @@ function runBigQueryQueryJob(queryRequest, projectId) {
   return pollBigQueryJob(jobInfo);
 }
 
+// Non-blocking status check for a job submitted via submitBigQueryQuery -
+// timeoutMs:0 tells getQueryResults to return whatever it currently knows
+// instead of long-polling, which is what pollBigQueryJob above relies on
+// for its wait-for-completion behavior. This is the primitive
+// runBigQueryPipelinesInParallel below needs to check many in-flight jobs
+// per round without any one of them blocking the others.
+function checkBigQueryJob(jobInfo) {
+  var pollParams = jobInfo.maxResults ? { maxResults: jobInfo.maxResults, timeoutMs: 0 } : { timeoutMs: 0 };
+  var queryResults = BigQuery.Jobs.getQueryResults(jobInfo.projectId, jobInfo.jobId, pollParams);
+  return { complete: !!queryResults.jobComplete, results: queryResults };
+}
+
+// Drives N independent multi-step BigQuery pipelines to completion,
+// overlapping their wait time instead of draining pipeline 1 to
+// completion before even checking pipeline 2 (which calling
+// pollBigQueryJob once per pipeline, in sequence, would do - each call
+// blocks internally until that one job is done). Every in-flight job is
+// checked once per round via the non-blocking checkBigQueryJob above; a
+// short sleep only happens when a whole round found nothing to advance,
+// not on every round, so this reacts the instant something finishes
+// instead of busy-looping.
+//
+// Each pipeline is {start, resume}: start() does synchronous prep
+// (building SQL, schema introspection) and returns either {job:
+// <jobInfo from submitBigQueryQuery>} to wait on, or {done:true,
+// result}/{done:true, error} for a pipeline needing no BigQuery job at
+// all. resume(queryResults) is called once that job completes; it may do
+// more synchronous work (running tests, promoting a staged table,
+// cleanup) and either return another {job: ...} to continue the
+// pipeline, or {done:true, result}/{done:true, error} to finish it. A
+// pipeline whose start()/resume() throws is caught here and reported as
+// {error} for that pipeline only - it never aborts the others.
+function runBigQueryPipelinesInParallel(pipelines, pollIntervalMs) {
+  function advance(state, queryResults) {
+    try {
+      var step = arguments.length > 1 ? state.pipeline.resume(queryResults) : state.pipeline.start();
+      if (step.done) {
+        state.done = true;
+        state.result = step.result;
+        state.error = step.error || null;
+        state.elapsed = new Date().getTime() - state.startedAt;
+      } else {
+        state.job = step.job;
+      }
+    } catch (error) {
+      state.done = true;
+      state.error = error.message;
+      state.elapsed = new Date().getTime() - state.startedAt;
+    }
+  }
+
+  var states = pipelines.map(function (pipeline) {
+    return { pipeline: pipeline, job: null, done: false, result: null, error: null, startedAt: new Date().getTime(), elapsed: null };
+  });
+  states.forEach(function (state) { advance(state); });
+
+  while (states.some(function (s) { return !s.done; })) {
+    var anyProgress = false;
+    states.forEach(function (state) {
+      if (state.done) {
+        return;
+      }
+      var check = checkBigQueryJob(state.job);
+      if (check.complete) {
+        anyProgress = true;
+        advance(state, check.results);
+      }
+    });
+    if (!anyProgress) {
+      Utilities.sleep(pollIntervalMs || 200);
+    }
+  }
+
+  return states.map(function (state) {
+    return { result: state.result, error: state.error, elapsed: state.elapsed };
+  });
+}
+
 // Reads from BigQuery via the Advanced BigQuery Service - either a whole
 // table or the result of a read-only query. The table identifier is
 // backtick-quoted since it's interpolated into SQL text, even though
@@ -1056,10 +1134,11 @@ function widenDestinationTableForPromotion(target, stagingTable) {
 // Promotes a staging table into its real destination via a BigQuery copy
 // job (a metadata-level table copy, no query slots consumed - not a
 // second "SELECT * FROM staging" write). The one piece of "stage, test,
-// promote" this function's own two callers - loadBigQueryStaged below and
-// model.js's modelTableStaged - need identically, extracted so a future
-// copy-job quirk only needs fixing in one place. widenDestinationTableForPromotion's
-// own discovery is exactly that kind of quirk: schemaUpdateOptions on the
+// promote" this function's own two callers - loadBigQueryStaged below
+// and model.js's buildStagedTablePipeline - need identically, extracted
+// so a future copy-job quirk only needs fixing in one place.
+// widenDestinationTableForPromotion's own discovery is exactly that kind
+// of quirk: schemaUpdateOptions on the
 // copy job itself was tried first and confirmed, against a real project,
 // not to work the way a load job's does - if a second such quirk ever
 // turns up, this is the one function both callers already share, not two
