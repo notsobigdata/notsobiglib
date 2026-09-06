@@ -2094,9 +2094,12 @@ function compileModel(config) {
 // by side within one dependency level for a parallel 'run'. One node here,
 // N there; a solo model() call and a parallel-level model() call can never
 // diverge in what they submit, poll for, or return, because they're the
-// same code.
+// same code - buildModelPipeline(config) itself is only ever called
+// lazily from inside runBigQueryPipelinesInParallel, same as the parallel
+// path, so even a construction-time throw is reported and rethrown the
+// same way here as it would be there.
 function model(config) {
-  var outcome = runBigQueryPipelinesInParallel([buildModelPipeline(config)])[0];
+  var outcome = runBigQueryPipelinesInParallel([function () { return buildModelPipeline(config); }])[0];
   if (outcome.error) {
     throw new Error(outcome.error);
   }
@@ -2224,10 +2227,10 @@ function buildIncrementalPipeline(config, compiled, relation, registry, hasTests
   // temp table, captures touched partitions, deletes those partitions
   // from the target, then inserts the staged data.
   //
-  // ponytail: this assumes GAS's BigQuery Advanced Service accepts
-  // multi-statement scripts (BEGIN...END in BigQuery scripting). Not
-  // confirmed against live BigQuery yet - see notsobigtests Layer 2 for
-  // the real verification.
+  // Confirmed against live BigQuery via notsobigtests Layer 2
+  // (testParallelismMixedMaterializationTypesSucceedTogether,
+  // 2026-09-05): GAS's BigQuery Advanced Service does accept this
+  // multi-statement BEGIN...END scripting.
   function insertOverwriteScript() {
     var partitionField = quoteIdentifier(config.partitionBy.field);
     var stagingRelation = qualifiedTableRef(config.projectId, config.dataset, stagingTable);

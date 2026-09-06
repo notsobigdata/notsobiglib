@@ -622,25 +622,14 @@ function runNodes(nodesOrLevels, command) {
         // node's result/error shape can never differ by which branch ran it.
         // buildModelPipeline(node.config) itself can throw (a bad
         // {{ ref() }}, a multi-statement SQL file, an invalid incremental
-        // strategy) - deferred to inside start() rather than called
-        // eagerly here, so that failure is caught by
-        // runBigQueryPipelinesInParallel's own per-pipeline try/catch
-        // (move.js) exactly like a submit/poll failure, instead of
-        // throwing out of this whole level before any job is even
-        // submitted.
-        var pipelines = unblocked.map(function (node) {
-          var real = null;
-          return {
-            start: function () {
-              real = buildModelPipeline(node.config);
-              return real.start();
-            },
-            resume: function (queryResults) {
-              return real.resume(queryResults);
-            }
-          };
+        // strategy) - each node's factory is only invoked lazily inside
+        // runBigQueryPipelinesInParallel (move.js), which is what catches
+        // that failure exactly like a submit/poll failure, instead of
+        // throwing out of this whole level before any job is even submitted.
+        var pipelineFactories = unblocked.map(function (node) {
+          return function () { return buildModelPipeline(node.config); };
         });
-        var outcomes = runBigQueryPipelinesInParallel(pipelines);
+        var outcomes = runBigQueryPipelinesInParallel(pipelineFactories);
         unblocked.forEach(function (node, i) {
           var outcome = outcomes[i];
           if (outcome.error) {
