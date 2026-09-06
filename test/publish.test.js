@@ -150,8 +150,12 @@ function testPublishEscapesScriptCloseInEmbeddedPayload() {
   var html = getHtml();
   assert.ok(html, 'expected renderReportHtml\'s output to reach DriveApp.createFile');
 
+  // xssPublish has a chart, so Task 3 now also emits a second, legitimate
+  // <script src="..."> (the D3 CDN tag) alongside the inline payload
+  // script - two real closing tags is the correct baseline here, not a
+  // regression; the XSS-relevant assertion is that it's not more than that.
   var scriptCloseCount = html.split('</script').length - 1;
-  assert.strictEqual(scriptCloseCount, 1, 'expected exactly one </script closing tag (the template\'s own), found ' + scriptCloseCount + ' in: ' + html);
+  assert.strictEqual(scriptCloseCount, 2, 'expected exactly two </script closing tags (the D3 CDN tag + the template\'s own inline script), found ' + scriptCloseCount + ' in: ' + html);
 }
 
 // Spec-mandated Layer-1 coverage for buildReportPayload's actual math
@@ -182,9 +186,14 @@ function testPublishAggregatesKpisAndChartsCorrectly() {
   assert.ok(html.indexOf('>2<') !== -1, 'expected the distinct-order count in: ' + html);
   // avg(revenue) = 35 / 3 = 11.666... , format: decimal (2dp)
   assert.ok(html.indexOf('11.67') !== -1, 'expected the decimal-formatted average in: ' + html);
-  // groupBy category, sum(revenue): A = 30, B = 5
-  assert.ok(html.indexOf('>A<') !== -1 && html.indexOf('>30<') !== -1, 'expected category A\'s total (30) in: ' + html);
-  assert.ok(html.indexOf('>B<') !== -1 && html.indexOf('>5<') !== -1, 'expected category B\'s total (5) in: ' + html);
+  // groupBy category, sum(revenue): A = 30, B = 5 - charts render
+  // client-side now (Task 3), so the totals only exist in the embedded
+  // payload, not as literal SVG text.
+  var chartPayload = extractPayload(html).charts.filter(function (c) { return c.id === 'by_category'; })[0];
+  var totalsByGroup = {};
+  chartPayload.data.forEach(function (d) { totalsByGroup[d.groupValue] = d.total; });
+  assert.strictEqual(totalsByGroup.A, 30, 'expected category A total 30 in the chart payload, got: ' + JSON.stringify(chartPayload.data));
+  assert.strictEqual(totalsByGroup.B, 5, 'expected category B total 5 in the chart payload, got: ' + JSON.stringify(chartPayload.data));
 }
 
 // Companion to finding #1 in the whole-branch review: connectorTuplesForNode
@@ -356,6 +365,57 @@ function testPublishRawTableRendersFirstPageAndEmbedsFullData() {
   assert.ok(/DOMContentLoaded/.test(html), 'expected the pagination script to be emitted when tables[] is non-empty');
 }
 
+function testPublishChartRendersMountPointAndD3Script() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/<section class="chart" data-chart-id="by_category">/.test(html), 'expected a chart section with data-chart-id, got: ' + html);
+  assert.ok(/<div class="chart-canvas" id="chart-by_category"><\/div>/.test(html), 'expected an empty chart-canvas mount point, got: ' + html);
+  assert.ok(html.indexOf('https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js') !== -1, 'expected the pinned D3 CDN script tag, got: ' + html);
+  assert.ok(!/<svg/.test(html), 'expected no server-rendered <svg> now that charts draw client-side, got: ' + html);
+}
+
+function testPublishNoD3ScriptWithoutCharts() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['order_id', 'revenue'], [['o1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select validPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(html.indexOf('d3.min.js') === -1, 'expected no D3 script tag when config.charts is empty, got: ' + html);
+}
+
+function testPublishChartClientJsDispatchesByType() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'day', 'channel', 'revenue'], [['A', '1', 'online', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select chartsV2Publish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/function drawBarChart/.test(html), 'expected drawBarChart in the emitted script, got: ' + html);
+  assert.ok(/function drawLineChart/.test(html), 'expected drawLineChart in the emitted script, got: ' + html);
+  assert.ok(/function drawPieChart/.test(html), 'expected drawPieChart in the emitted script, got: ' + html);
+  assert.ok(/typeof d3 === "undefined"/.test(html), 'expected a d3-unavailable fallback guard, got: ' + html);
+}
+
+function testPublishAggregationFixtureStillHasNoStacking() {
+  // Sanity check that the plain (non-series) chart path still produces
+  // {groupValue, total} data, not the series {groupValue, values} shape -
+  // guards against Task 2/3 accidentally cross-wiring the two branches.
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var chart = extractPayload(getHtml()).charts[0];
+  assert.strictEqual(chart.data[0].total, 10, 'expected plain total shape, got: ' + JSON.stringify(chart.data));
+  assert.strictEqual(chart.seriesKeys, undefined, 'expected no seriesKeys on a non-series chart, got: ' + JSON.stringify(chart));
+}
+
 function testPublishNoPaginationScriptWithoutTables() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
@@ -363,7 +423,11 @@ function testPublishNoPaginationScriptWithoutTables() {
   var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
-  assert.ok(!/DOMContentLoaded/.test(html), 'expected no pagination script when config.tables is empty, got: ' + html);
+  // aggregationPublish has a chart (Task 3), so CHART_CLIENT_JS's own
+  // DOMContentLoaded listener is expected here - checking for that literal
+  // string would no longer isolate TABLE_PAGINATION_JS. Check instead for
+  // TABLE_PAGINATION_JS's own table-block query, which only it emits.
+  assert.ok(html.indexOf('querySelectorAll(".table-block")') === -1, 'expected no pagination script when config.tables is empty, got: ' + html);
 }
 
 function testPublishLineChartSortsGroupsByNumericValue() {
@@ -489,5 +553,9 @@ module.exports = {
   testPublishLineChartSortsGroupsByNumericValue: testPublishLineChartSortsGroupsByNumericValue,
   testPublishLineChartSortsGroupsByDateString: testPublishLineChartSortsGroupsByDateString,
   testPublishSeriesChartBuildsDenseZeroFilledMatrix: testPublishSeriesChartBuildsDenseZeroFilledMatrix,
-  testPublishSeriesChartHandlesSpacesWithoutCollision: testPublishSeriesChartHandlesSpacesWithoutCollision
+  testPublishSeriesChartHandlesSpacesWithoutCollision: testPublishSeriesChartHandlesSpacesWithoutCollision,
+  testPublishChartRendersMountPointAndD3Script: testPublishChartRendersMountPointAndD3Script,
+  testPublishNoD3ScriptWithoutCharts: testPublishNoD3ScriptWithoutCharts,
+  testPublishChartClientJsDispatchesByType: testPublishChartClientJsDispatchesByType,
+  testPublishAggregationFixtureStillHasNoStacking: testPublishAggregationFixtureStillHasNoStacking
 };
