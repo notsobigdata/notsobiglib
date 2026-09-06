@@ -49,10 +49,38 @@ function testPublishValidRefProceedsPastValidation() {
   assert.ok(/BigQuery/.test(result.error), 'expected validation+ref-resolution to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
-function testPublishChartTypeOtherThanBarRejected() {
+function testPublishUnknownChartTypeRejected() {
   var result = runOne('badChartTypePublish');
   assert.strictEqual(result.status, 'failed');
-  assert.ok(/only "bar" is supported/.test(result.error), 'expected a chart-type error, got: ' + result.error);
+  assert.ok(/expected one of bar, line, pie/.test(result.error), 'expected a chart-type error, got: ' + result.error);
+}
+
+function testPublishChartSeriesOnNonBarRejected() {
+  var result = runOne('chartSeriesOnNonBarPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"series"\/"stacking", which only "bar" charts support/.test(result.error), 'expected a series-on-non-bar error, got: ' + result.error);
+}
+
+function testPublishChartDonutOnNonPieRejected() {
+  var result = runOne('chartDonutOnNonPiePublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"donut", which only "pie" charts support/.test(result.error), 'expected a donut-on-non-pie error, got: ' + result.error);
+}
+
+function testPublishChartBadStackingRejected() {
+  var result = runOne('chartBadStackingPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/expected "grouped" or "stacked"/.test(result.error), 'expected a stacking-enum error, got: ' + result.error);
+}
+
+function testPublishV2ChartTypesProceedPastValidation() {
+  var result = runOne('chartsV2Publish');
+  // Same proof pattern as testPublishValidRefProceedsPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
 function testPublishLayoutTypeOtherThanLinearRejected() {
@@ -122,8 +150,12 @@ function testPublishEscapesScriptCloseInEmbeddedPayload() {
   var html = getHtml();
   assert.ok(html, 'expected renderReportHtml\'s output to reach DriveApp.createFile');
 
+  // xssPublish has a chart, so Task 3 now also emits a second, legitimate
+  // <script src="..."> (the D3 CDN tag) alongside the inline payload
+  // script - two real closing tags is the correct baseline here, not a
+  // regression; the XSS-relevant assertion is that it's not more than that.
   var scriptCloseCount = html.split('</script').length - 1;
-  assert.strictEqual(scriptCloseCount, 1, 'expected exactly one </script closing tag (the template\'s own), found ' + scriptCloseCount + ' in: ' + html);
+  assert.strictEqual(scriptCloseCount, 2, 'expected exactly two </script closing tags (the D3 CDN tag + the template\'s own inline script), found ' + scriptCloseCount + ' in: ' + html);
 }
 
 // Spec-mandated Layer-1 coverage for buildReportPayload's actual math
@@ -154,9 +186,14 @@ function testPublishAggregatesKpisAndChartsCorrectly() {
   assert.ok(html.indexOf('>2<') !== -1, 'expected the distinct-order count in: ' + html);
   // avg(revenue) = 35 / 3 = 11.666... , format: decimal (2dp)
   assert.ok(html.indexOf('11.67') !== -1, 'expected the decimal-formatted average in: ' + html);
-  // groupBy category, sum(revenue): A = 30, B = 5
-  assert.ok(html.indexOf('>A<') !== -1 && html.indexOf('>30<') !== -1, 'expected category A\'s total (30) in: ' + html);
-  assert.ok(html.indexOf('>B<') !== -1 && html.indexOf('>5<') !== -1, 'expected category B\'s total (5) in: ' + html);
+  // groupBy category, sum(revenue): A = 30, B = 5 - charts render
+  // client-side now (Task 3), so the totals only exist in the embedded
+  // payload, not as literal SVG text.
+  var chartPayload = extractPayload(html).charts.filter(function (c) { return c.id === 'by_category'; })[0];
+  var totalsByGroup = {};
+  chartPayload.data.forEach(function (d) { totalsByGroup[d.groupValue] = d.total; });
+  assert.strictEqual(totalsByGroup.A, 30, 'expected category A total 30 in the chart payload, got: ' + JSON.stringify(chartPayload.data));
+  assert.strictEqual(totalsByGroup.B, 5, 'expected category B total 5 in the chart payload, got: ' + JSON.stringify(chartPayload.data));
 }
 
 // Companion to finding #1 in the whole-branch review: connectorTuplesForNode
@@ -364,6 +401,267 @@ function testPublishCsvExportNeutralizesFormulaInjection() {
   assert.ok(/\/\^\[=\+@-\]\//.test(html), 'expected csvField to guard against a leading =/+/-/@ formula-trigger character, got: ' + html);
 }
 
+function testPublishChartRendersMountPointAndD3Script() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/<section class="chart" data-chart-id="by_category">/.test(html), 'expected a chart section with data-chart-id, got: ' + html);
+  assert.ok(/<div class="chart-canvas" id="chart-by_category"><\/div>/.test(html), 'expected an empty chart-canvas mount point, got: ' + html);
+  assert.ok(html.indexOf('https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js') !== -1, 'expected the pinned D3 CDN script tag, got: ' + html);
+  assert.ok(!/<svg/.test(html), 'expected no server-rendered <svg> now that charts draw client-side, got: ' + html);
+}
+
+function testPublishNoD3ScriptWithoutCharts() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['order_id', 'revenue'], [['o1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select validPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(html.indexOf('d3.min.js') === -1, 'expected no D3 script tag when config.charts is empty, got: ' + html);
+}
+
+function testPublishChartClientJsDispatchesByType() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'day', 'channel', 'revenue'], [['A', '1', 'online', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select chartsV2Publish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/function drawBarChart/.test(html), 'expected drawBarChart in the emitted script, got: ' + html);
+  assert.ok(/function drawLineChart/.test(html), 'expected drawLineChart in the emitted script, got: ' + html);
+  assert.ok(/function drawPieChart/.test(html), 'expected drawPieChart in the emitted script, got: ' + html);
+  assert.ok(/typeof d3 === "undefined"/.test(html), 'expected a d3-unavailable fallback guard, got: ' + html);
+}
+
+// Regression test for a rendering defect found in review: SVG/CSS gives a
+// stylesheet's `fill` property priority over a presentation attribute set
+// via .attr("fill", ...) - REPORT_CSS's ".chart-bar { fill: var(--teal); }"
+// would silently override any per-item fill set with .attr("fill", ...),
+// so pie slices, stacked/grouped bar segments, and the line chart's path
+// would all render filled instead of respecting the intended fill. Three
+// of the four call sites below are color-scaled (pie slices, stacked bar
+// segments, grouped bar segments - each picks a per-item color via
+// color(...)); the fourth (the line chart's path) isn't color-scaled at
+// all, it just needs fill suppressed to "none" so the stroke alone
+// renders - same underlying CSS-vs-attr priority bug, caught a second
+// time later in the same review pass. .style("fill", ...) sets an inline
+// style, which does win over the stylesheet, for both cases. This can't
+// be rendered/checked in a browser here, so it's a plain string-presence
+// check on the emitted script, same ceiling CHART_CLIENT_JS's other
+// regex-based tests accept. The plain (non-series) bar path is
+// untouched - it never sets a per-item fill and keeps relying on
+// .chart-bar's CSS fill.
+function testPublishChartClientJsUsesStyleForColorScaledFills() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'day', 'channel', 'revenue'], [['A', '1', 'online', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select chartsV2Publish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var styleFillCount = (html.match(/\.style\("fill"/g) || []).length;
+  assert.strictEqual(styleFillCount, 4, 'expected .style("fill" on all 4 call sites (pie slices, stacked bars, grouped bars, and the line chart\'s fill:none path), got ' + styleFillCount + ' in: ' + html);
+  assert.ok(!/\.attr\("fill", function \(d\) \{ return color\(/.test(html), 'expected no remaining .attr("fill", ...color(...)) calls (should be .style now), got: ' + html);
+  assert.ok(!/\.attr\("fill", "none"\)/.test(html), 'expected no remaining .attr("fill", "none") call on the line chart path (should be .style now), got: ' + html);
+}
+
+// Whole-branch review finding #3: the D3 CDN script tag had no
+// Subresource Integrity - a pinned version number pins a path, not the
+// bytes served at it, and this library gets eval()'d with live OAuth
+// access into a page that also embeds the user's full BigQuery result
+// set. SRI pins the exact bytes the browser will accept.
+function testPublishD3ScriptHasSubresourceIntegrity() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var scriptTagMatch = html.match(/<script src="https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/d3\/[^"]+"[^>]*><\/script>/);
+  assert.ok(scriptTagMatch, 'expected a D3 CDN <script> tag in: ' + html);
+  var scriptTag = scriptTagMatch[0];
+  assert.ok(scriptTag.indexOf('integrity="sha512-') !== -1, 'expected an integrity="sha512-..." attribute on the D3 script tag, got: ' + scriptTag);
+  assert.ok(scriptTag.indexOf('crossorigin="anonymous"') !== -1, 'expected a crossorigin="anonymous" attribute on the D3 script tag, got: ' + scriptTag);
+}
+
+// Whole-branch review finding #4: tables[] already rejects a duplicate
+// id before any other per-table check could mask it (see
+// testPublishDuplicateTableIdRejected above); charts[] had no equivalent
+// guard, even though CHART_CLIENT_JS's DOMContentLoaded handler resolves
+// a chart the exact same way tables do
+// (`payload.charts.filter(c => c.id === chartId)[0]`), so a duplicate
+// chart id would silently mis-bind a mount point rather than throwing at
+// config time.
+function testPublishDuplicateChartIdRejected() {
+  var result = runOne('duplicateChartIdPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/duplicate chart id "dup"/.test(result.error), 'expected a duplicate-chart-id error, got: ' + result.error);
+}
+
+// Whole-branch review finding #13: `var chartType = chart.type || 'bar';`
+// (the default-to-bar fallback for an omitted chart.type) had zero test
+// coverage. Proves both that validation accepts a chart with no "type"
+// key at all, and that buildChartPayload produces the plain
+// {groupValue, total} shape (not the series {groupValue, values} matrix)
+// for it, exactly like an explicit type: 'bar' would.
+function testPublishChartTypeOmittedDefaultsToBar() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10'], ['B', '20']]);
+
+  var result = ctx.NotSoBigData.cli('run --select chartTypeOmittedPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var chart = extractPayload(getHtml()).charts[0];
+
+  assert.strictEqual(chart.type, 'bar', 'expected an omitted chart.type to default to "bar" in the payload, got: ' + JSON.stringify(chart));
+  assert.strictEqual(chart.seriesKeys, undefined, 'expected no seriesKeys on a default-type chart, got: ' + JSON.stringify(chart));
+  var totalsByGroup = {};
+  chart.data.forEach(function (d) { totalsByGroup[d.groupValue] = d.total; });
+  assert.strictEqual(totalsByGroup.A, 10, 'expected plain {groupValue, total} shape for A, got: ' + JSON.stringify(chart.data));
+  assert.strictEqual(totalsByGroup.B, 20, 'expected plain {groupValue, total} shape for B, got: ' + JSON.stringify(chart.data));
+}
+
+function testPublishChartSeriesLinkKeyWithoutSeriesRejected() {
+  var result = runOne('chartSeriesLinkKeyWithoutSeriesPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"seriesLinkKey", which only "bar" charts with "series" support/.test(result.error), 'expected a seriesLinkKey-without-series error, got: ' + result.error);
+}
+
+function testPublishLinkKeyChartsProceedPastValidation() {
+  var result = runOne('linkKeyChartsPublish');
+  // Same proof pattern as testPublishV2ChartTypesProceedPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
+}
+
+function testPublishChartPayloadPassesThroughLinkKeys() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [
+    ['A', 'online', '1', '10']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  var byCategory = payload.charts.filter(function (c) { return c.id === 'by_category'; })[0];
+  assert.strictEqual(byCategory.linkKey, 'category', 'expected linkKey passed through, got: ' + JSON.stringify(byCategory));
+  assert.strictEqual(byCategory.seriesLinkKey, undefined, 'expected no seriesLinkKey on a non-series chart, got: ' + JSON.stringify(byCategory));
+
+  var byCategoryChannel = payload.charts.filter(function (c) { return c.id === 'by_category_channel'; })[0];
+  assert.strictEqual(byCategoryChannel.linkKey, 'category', 'expected linkKey passed through on the series chart, got: ' + JSON.stringify(byCategoryChannel));
+  assert.strictEqual(byCategoryChannel.seriesLinkKey, 'channel', 'expected seriesLinkKey passed through, got: ' + JSON.stringify(byCategoryChannel));
+
+  var trend = payload.charts.filter(function (c) { return c.id === 'trend'; })[0];
+  assert.strictEqual(trend.linkKey, undefined, 'expected no linkKey on an unlinked chart, got: ' + JSON.stringify(trend));
+  assert.ok(!Object.prototype.hasOwnProperty.call(trend, 'linkKey'), 'expected linkKey to be genuinely absent after the JSON round-trip, got: ' + JSON.stringify(trend));
+}
+
+function testPublishChartClientJsIncludesSelectionModule() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/function chartSelectionFor/.test(html), 'expected chartSelectionFor in the emitted script, got: ' + html);
+  assert.ok(/function selectionsEqual/.test(html), 'expected selectionsEqual in the emitted script, got: ' + html);
+  assert.ok(/function selectionMatches/.test(html), 'expected selectionMatches in the emitted script, got: ' + html);
+  assert.ok(/function handleChartClick/.test(html), 'expected handleChartClick in the emitted script, got: ' + html);
+  assert.ok(/function applyHighlight/.test(html), 'expected applyHighlight in the emitted script, got: ' + html);
+  assert.ok(/var currentSelection = null;/.test(html), 'expected the module-level currentSelection state, got: ' + html);
+}
+
+// Whole-branch review finding: a NULL groupValue/seriesValue must not
+// silently drop out of highlighting. D3's .attr(name, null) removes the
+// attribute rather than setting it, so every group/series-value accessor
+// must coerce through String(...) to keep null/undefined attribute-matchable.
+function testPublishChartClientJsCoercesGroupAndSeriesValuesToString() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var groupValueStringCount = (html.match(/data-group-value", function \(d\) \{ return String\(/g) || []).length;
+  assert.strictEqual(groupValueStringCount, 5, 'expected all 5 data-group-value accessors to coerce via String(...), got ' + groupValueStringCount + ' in: ' + html);
+  var seriesValueStringCount = (html.match(/data-series-value", function \(d\) \{ return String\(/g) || []).length;
+  assert.strictEqual(seriesValueStringCount, 2, 'expected both data-series-value accessors to coerce via String(...), got ' + seriesValueStringCount + ' in: ' + html);
+  assert.ok(/selection\[chart\.linkKey\] = String\(groupValue\);/.test(html), 'expected chartSelectionFor to coerce groupValue via String(...), got: ' + html);
+  assert.ok(/selection\[chart\.seriesLinkKey\] = String\(seriesValue\);/.test(html), 'expected chartSelectionFor to coerce seriesValue via String(...), got: ' + html);
+}
+
+function testPublishChartClientJsCallsApplyHighlightOnceOnLoad() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  // Two call sites total: applyHighlight()'s own definition never calls
+  // itself, so this counts (a) the DOMContentLoaded dispatcher's one call
+  // after drawing every chart and (b) handleChartClick's one call after
+  // updating currentSelection.
+  var callCount = (html.match(/applyHighlight\(\);/g) || []).length;
+  assert.strictEqual(callCount, 2, 'expected exactly 2 applyHighlight() call sites (DOMContentLoaded + handleChartClick), got ' + callCount + ' in: ' + html);
+}
+
+function testPublishChartClientJsWiresBarClickOnlyWhenInteractive() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/var interactive = !!\(chart\.linkKey \|\| chart\.seriesLinkKey\);/.test(html), 'expected drawBarChart\'s interactive flag, got: ' + html);
+  assert.ok(/data-group-value/.test(html), 'expected data-group-value attribute wiring in the emitted script, got: ' + html);
+  assert.ok(/data-series-value/.test(html), 'expected data-series-value attribute wiring for stacked/grouped bars, got: ' + html);
+}
+
+function testPublishChartClientJsWiresLineAndPieClickOnLinkKey() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  // drawLineChart and drawPieChart each gate their click wiring on a
+  // standalone "if (chart.linkKey) {" block (they have no seriesLinkKey
+  // concept at all) - anchored to end-of-line so this doesn't also match
+  // chartSelectionFor's/selectionMatches' one-line "if (chart.linkKey) {
+  // ... }" conditionals, which have trailing code after "{" on the same
+  // line and are a different thing entirely.
+  var lineOrPieGateCount = (html.match(/^\s*if \(chart\.linkKey\) \{$/gm) || []).length;
+  assert.strictEqual(lineOrPieGateCount, 2, 'expected exactly 2 standalone "if (chart.linkKey) {" gate blocks (drawLineChart + drawPieChart), got ' + lineOrPieGateCount + ' in: ' + html);
+}
+
+function testPublishAggregationFixtureStillHasNoStacking() {
+  // Sanity check that the plain (non-series) chart path still produces
+  // {groupValue, total} data, not the series {groupValue, values} shape -
+  // guards against Task 2/3 accidentally cross-wiring the two branches.
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var chart = extractPayload(getHtml()).charts[0];
+  assert.strictEqual(chart.data[0].total, 10, 'expected plain total shape, got: ' + JSON.stringify(chart.data));
+  assert.strictEqual(chart.seriesKeys, undefined, 'expected no seriesKeys on a non-series chart, got: ' + JSON.stringify(chart));
+}
+
 function testPublishNoPaginationScriptWithoutTables() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
@@ -371,7 +669,104 @@ function testPublishNoPaginationScriptWithoutTables() {
   var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
-  assert.ok(!/DOMContentLoaded/.test(html), 'expected no pagination script when config.tables is empty, got: ' + html);
+  // aggregationPublish has a chart (Task 3), so CHART_CLIENT_JS's own
+  // DOMContentLoaded listener is expected here - checking for that literal
+  // string would no longer isolate TABLE_PAGINATION_JS. Check instead for
+  // TABLE_PAGINATION_JS's own table-block query, which only it emits.
+  assert.ok(html.indexOf('querySelectorAll(".table-block")') === -1, 'expected no pagination script when config.tables is empty, got: ' + html);
+}
+
+function testPublishLineChartSortsGroupsByNumericValue() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['day', 'revenue'], [
+    ['3', '30'],
+    ['1', '10'],
+    ['2', '20']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select lineChartPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  var chart = payload.charts.filter(function (c) { return c.id === 'trend'; })[0];
+  assert.deepStrictEqual(chart.data.map(function (d) { return d.groupValue; }), ['1', '2', '3'],
+    'expected line chart groups sorted ascending numerically, got: ' + JSON.stringify(chart.data));
+}
+
+function testPublishLineChartSortsGroupsByDateString() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['order_date', 'revenue'], [
+    ['2026-01-03', '30'],
+    ['2026-01-01', '10'],
+    ['2026-01-02', '20']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select lineChartDatePublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  var chart = payload.charts.filter(function (c) { return c.id === 'trend'; })[0];
+  assert.deepStrictEqual(chart.data.map(function (d) { return d.groupValue; }), ['2026-01-01', '2026-01-02', '2026-01-03'],
+    'expected line chart groups sorted ascending by ISO date string, got: ' + JSON.stringify(chart.data));
+}
+
+function testPublishSeriesChartBuildsDenseZeroFilledMatrix() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue'], [
+    ['A', 'online', '10'],
+    ['A', 'store', '5'],
+    ['B', 'online', '20']
+    // B/store deliberately missing - proves zero-fill.
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select seriesChartPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  var chart = payload.charts.filter(function (c) { return c.id === 'by_category_channel'; })[0];
+
+  assert.deepStrictEqual(chart.seriesKeys, ['online', 'store'], 'expected seriesKeys in first-seen order, got: ' + JSON.stringify(chart.seriesKeys));
+  var groupA = chart.data.filter(function (d) { return d.groupValue === 'A'; })[0];
+  var groupB = chart.data.filter(function (d) { return d.groupValue === 'B'; })[0];
+  assert.strictEqual(groupA.values.online, 10, 'expected A/online = 10, got: ' + JSON.stringify(groupA));
+  assert.strictEqual(groupA.values.store, 5, 'expected A/store = 5, got: ' + JSON.stringify(groupA));
+  assert.strictEqual(groupB.values.online, 20, 'expected B/online = 20, got: ' + JSON.stringify(groupB));
+  assert.strictEqual(groupB.values.store, 0, 'expected B/store zero-filled to 0, got: ' + JSON.stringify(groupB));
+}
+
+function testPublishSeriesChartHandlesSpacesWithoutCollision() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['location', 'channel_type', 'revenue'], [
+    ['New York', 'Paid Search', '100'],
+    ['New', 'York Paid Search', '50'],  // Different combination, same concat result
+    ['New York', 'Organic', '25']
+    // Tests: 'New York' + 'Paid Search' and 'New' + 'York Paid Search'
+    // would both hash to 'New York Paid Search' with string key;
+    // nested maps keep them separate.
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select seriesChartWithSpacesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  var chart = payload.charts.filter(function (c) { return c.id === 'by_location_channel'; })[0];
+
+  assert.deepStrictEqual(chart.seriesKeys, ['Paid Search', 'York Paid Search', 'Organic'],
+    'expected seriesKeys in first-seen order, got: ' + JSON.stringify(chart.seriesKeys));
+  var groupNewYork = chart.data.filter(function (d) { return d.groupValue === 'New York'; })[0];
+  var groupNew = chart.data.filter(function (d) { return d.groupValue === 'New'; })[0];
+
+  // New York should have: Paid Search=100, York Paid Search=0 (zero-filled), Organic=25
+  assert.strictEqual(groupNewYork.values['Paid Search'], 100,
+    'expected New York / Paid Search = 100, got: ' + JSON.stringify(groupNewYork));
+  assert.strictEqual(groupNewYork.values['York Paid Search'], 0,
+    'expected New York / York Paid Search zero-filled to 0, got: ' + JSON.stringify(groupNewYork));
+  assert.strictEqual(groupNewYork.values.Organic, 25,
+    'expected New York / Organic = 25, got: ' + JSON.stringify(groupNewYork));
+
+  // New should have: Paid Search=0 (zero-filled), York Paid Search=50, Organic=0 (zero-filled)
+  assert.strictEqual(groupNew.values['Paid Search'], 0,
+    'expected New / Paid Search zero-filled to 0, got: ' + JSON.stringify(groupNew));
+  assert.strictEqual(groupNew.values['York Paid Search'], 50,
+    'expected New / York Paid Search = 50, got: ' + JSON.stringify(groupNew));
+  assert.strictEqual(groupNew.values.Organic, 0,
+    'expected New / Organic zero-filled to 0, got: ' + JSON.stringify(groupNew));
 }
 
 module.exports = {
@@ -380,7 +775,11 @@ module.exports = {
   testPublishKpiRequiresFieldUnlessCount: testPublishKpiRequiresFieldUnlessCount,
   testPublishRefMustResolveToBigQueryLocation: testPublishRefMustResolveToBigQueryLocation,
   testPublishValidRefProceedsPastValidation: testPublishValidRefProceedsPastValidation,
-  testPublishChartTypeOtherThanBarRejected: testPublishChartTypeOtherThanBarRejected,
+  testPublishUnknownChartTypeRejected: testPublishUnknownChartTypeRejected,
+  testPublishChartSeriesOnNonBarRejected: testPublishChartSeriesOnNonBarRejected,
+  testPublishChartDonutOnNonPieRejected: testPublishChartDonutOnNonPieRejected,
+  testPublishChartBadStackingRejected: testPublishChartBadStackingRejected,
+  testPublishV2ChartTypesProceedPastValidation: testPublishV2ChartTypesProceedPastValidation,
   testPublishLayoutTypeOtherThanLinearRejected: testPublishLayoutTypeOtherThanLinearRejected,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
@@ -398,5 +797,25 @@ module.exports = {
   testPublishRawTableRendersFirstPageAndEmbedsFullData: testPublishRawTableRendersFirstPageAndEmbedsFullData,
   testPublishCsvExportButtonAndScriptEmitted: testPublishCsvExportButtonAndScriptEmitted,
   testPublishCsvExportNeutralizesFormulaInjection: testPublishCsvExportNeutralizesFormulaInjection,
-  testPublishNoPaginationScriptWithoutTables: testPublishNoPaginationScriptWithoutTables
+  testPublishNoPaginationScriptWithoutTables: testPublishNoPaginationScriptWithoutTables,
+  testPublishLineChartSortsGroupsByNumericValue: testPublishLineChartSortsGroupsByNumericValue,
+  testPublishLineChartSortsGroupsByDateString: testPublishLineChartSortsGroupsByDateString,
+  testPublishSeriesChartBuildsDenseZeroFilledMatrix: testPublishSeriesChartBuildsDenseZeroFilledMatrix,
+  testPublishSeriesChartHandlesSpacesWithoutCollision: testPublishSeriesChartHandlesSpacesWithoutCollision,
+  testPublishChartRendersMountPointAndD3Script: testPublishChartRendersMountPointAndD3Script,
+  testPublishNoD3ScriptWithoutCharts: testPublishNoD3ScriptWithoutCharts,
+  testPublishChartClientJsDispatchesByType: testPublishChartClientJsDispatchesByType,
+  testPublishChartClientJsUsesStyleForColorScaledFills: testPublishChartClientJsUsesStyleForColorScaledFills,
+  testPublishAggregationFixtureStillHasNoStacking: testPublishAggregationFixtureStillHasNoStacking,
+  testPublishD3ScriptHasSubresourceIntegrity: testPublishD3ScriptHasSubresourceIntegrity,
+  testPublishDuplicateChartIdRejected: testPublishDuplicateChartIdRejected,
+  testPublishChartTypeOmittedDefaultsToBar: testPublishChartTypeOmittedDefaultsToBar,
+  testPublishChartSeriesLinkKeyWithoutSeriesRejected: testPublishChartSeriesLinkKeyWithoutSeriesRejected,
+  testPublishLinkKeyChartsProceedPastValidation: testPublishLinkKeyChartsProceedPastValidation,
+  testPublishChartPayloadPassesThroughLinkKeys: testPublishChartPayloadPassesThroughLinkKeys,
+  testPublishChartClientJsIncludesSelectionModule: testPublishChartClientJsIncludesSelectionModule,
+  testPublishChartClientJsCoercesGroupAndSeriesValuesToString: testPublishChartClientJsCoercesGroupAndSeriesValuesToString,
+  testPublishChartClientJsCallsApplyHighlightOnceOnLoad: testPublishChartClientJsCallsApplyHighlightOnceOnLoad,
+  testPublishChartClientJsWiresBarClickOnlyWhenInteractive: testPublishChartClientJsWiresBarClickOnlyWhenInteractive,
+  testPublishChartClientJsWiresLineAndPieClickOnLinkKey: testPublishChartClientJsWiresLineAndPieClickOnLinkKey
 };
