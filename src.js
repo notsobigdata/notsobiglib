@@ -3327,7 +3327,7 @@ var NotSoBigData = (function () {
       if (!target || target.type !== 'bigquery' || !target.projectId || !target.dataset || !target.table) {
         return;
       }
-      index[node.name] = qualifiedTableRef(target.projectId, target.dataset, target.table);
+      index[node.name] = { projectId: target.projectId, dataset: target.dataset, table: target.table };
     });
     return index;
   }
@@ -3535,6 +3535,32 @@ var NotSoBigData = (function () {
   // the two functions differ only in what they do with the compiled SQL
   // (run it vs. return it), not in how a ref() gets substituted.
   //
+  // The two-source ref() lookup (declared model, or a bigquery-target move
+  // node) as structured data, extracted out of buildRefResolver() below so
+  // publish.js can resolve a source.ref to {projectId, dataset, table}
+  // without formatting it into a SQL relation string first - see
+  // src/model.md's "resolveRefLocation" note for why this crosses the
+  // model.js/publish.js boundary the same way resolveDriveWriteTarget()
+  // already crosses move.js/cli.js. Returns null (not a throw) when refName
+  // matches neither source - each caller has its own, more specific error
+  // message to raise (buildRefResolver's mentions {{ ref() }}; publish's
+  // mentions source.ref).
+  function resolveRefLocation(refName, registry, moveBigQueryTargets) {
+    if (has(registry.models, refName)) {
+      var config = resolveModelConfig(refName, registry);
+      ['projectId', 'dataset'].forEach(function (key) {
+        if (!config[key]) {
+          throw new Error('model(): "' + refName + '" is missing "' + key + '" - set it on notsobigdataModels or on this model entry.');
+        }
+      });
+      return { projectId: config.projectId, dataset: config.dataset, table: config.name };
+    }
+    if (has(moveBigQueryTargets, refName)) {
+      return moveBigQueryTargets[refName];
+    }
+    return null;
+  }
+
   // Not a model - must be a bigquery-target move node lookup, which is a
   // cheap lookup, not a fresh resolution - same "redundant re-validation,
   // cheap defense in depth" posture the model branch already has via
@@ -3545,13 +3571,11 @@ var NotSoBigData = (function () {
   // statement.
   function buildRefResolver(config, registry) {
     return function (refName) {
-      if (has(registry.models, refName)) {
-        return qualifiedRelation(resolveModelConfig(refName, registry));
+      var location = resolveRefLocation(refName, registry, config.moveRefTargets);
+      if (!location) {
+        throw new Error('model(): "' + config.name + '" has {{ ref(\'' + refName + '\') }}, which does not match a declared model or a move node with a bigquery target.');
       }
-      if (has(config.moveRefTargets, refName)) {
-        return config.moveRefTargets[refName];
-      }
-      throw new Error('model(): "' + config.name + '" has {{ ref(\'' + refName + '\') }}, which does not match a declared model or a move node with a bigquery target.');
+      return qualifiedTableRef(location.projectId, location.dataset, location.table);
     };
   }
 
