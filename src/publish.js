@@ -86,6 +86,9 @@ function validatePublishConfig(config) {
     if (chart.donut !== undefined && chartType !== 'pie') {
       throw new Error('publish(): chart "' + chart.id + '" has "donut", which only "pie" charts support.');
     }
+    if (chart.seriesLinkKey && !(chartType === 'bar' && chart.series)) {
+      throw new Error('publish(): chart "' + chart.id + '" has "seriesLinkKey", which only "bar" charts with "series" support.');
+    }
   });
   var seenTableIds = emptyMap();
   (config.tables || []).forEach(function (table) {
@@ -345,7 +348,7 @@ function buildChartPayload(chart, rows) {
       });
       return { groupValue: groupKey, values: values };
     });
-    return { id: chart.id, title: chart.title, type: chartType, series: chart.series, stacking: chart.stacking || 'grouped', seriesKeys: seriesKeys, data: data };
+    return { id: chart.id, title: chart.title, type: chartType, series: chart.series, stacking: chart.stacking || 'grouped', seriesKeys: seriesKeys, data: data, linkKey: chart.linkKey, seriesLinkKey: chart.seriesLinkKey };
   }
   var grouped = groupRowsBy(rows, chart.groupBy);
   var data = grouped.order.map(function (key) {
@@ -354,7 +357,7 @@ function buildChartPayload(chart, rows) {
   if (chartType === 'line') {
     data.sort(function (a, b) { return compareGroupValues(a.groupValue, b.groupValue); });
   }
-  return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data };
+  return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data, linkKey: chart.linkKey };
 }
 
 function buildReportPayload(config, rows) {
