@@ -223,6 +223,20 @@ function testPublishTableFormatMustBeKnownEnum() {
   assert.ok(/expected one of string, currency, integer, decimal/.test(result.error), 'expected a format-enum error, got: ' + result.error);
 }
 
+// Whole-branch review finding #1: two tables[] entries sharing an id
+// render fine on the static first page (each section keeps its own
+// server-rendered rows) but silently swap datasets the moment the
+// client-side pager's `payload.tables.filter(t => t.id === tableId)[0]`
+// resolves the wrong (first-match) table on "Next"/"Previous". Both
+// entries here are otherwise individually valid 'raw' tables, so this
+// also proves the duplicate-id check fires before any other per-table
+// check could mask it.
+function testPublishDuplicateTableIdRejected() {
+  var result = runOne('duplicateTableIdPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/duplicate table id "dup"/.test(result.error), 'expected a duplicate-table-id error, got: ' + result.error);
+}
+
 function testPublishValidTablesProceedPastValidation() {
   var result = runOne('tablesPublish');
   // Same proof pattern as testPublishValidRefProceedsPastValidation: no
@@ -342,6 +356,7 @@ module.exports = {
   testPublishAggregatedTableRequiresMetrics: testPublishAggregatedTableRequiresMetrics,
   testPublishAggregatedMetricRequiresFieldUnlessCount: testPublishAggregatedMetricRequiresFieldUnlessCount,
   testPublishTableFormatMustBeKnownEnum: testPublishTableFormatMustBeKnownEnum,
+  testPublishDuplicateTableIdRejected: testPublishDuplicateTableIdRejected,
   testPublishValidTablesProceedPastValidation: testPublishValidTablesProceedPastValidation,
   testPublishBuildsRawAndAggregatedTablePayloads: testPublishBuildsRawAndAggregatedTablePayloads,
   testPublishRawTableRendersFirstPageAndEmbedsFullData: testPublishRawTableRendersFirstPageAndEmbedsFullData,

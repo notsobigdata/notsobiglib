@@ -193,3 +193,23 @@ var badTableFormatPublish = {
   target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-format.html' },
   tables: [{ id: 'bad', title: 'Bad', mode: 'raw', columns: [{ field: 'revenue', format: 'percent' }] }]
 };
+
+// Two tables sharing an id, each otherwise a valid 'raw' table - proves
+// the duplicate-id check fires before any other per-table validation
+// would mask it (see publish.test.js's
+// testPublishDuplicateTableIdRejected and the whole-branch review
+// finding it fixes: the client-side pager resolves a table by
+// `payload.tables.filter(t => t.id === tableId)[0]`, so a duplicate id
+// silently mis-binds pagination with no error, rather than throwing at
+// config time).
+var duplicateTableIdPublish = {
+  kind: 'publish',
+  name: 'duplicateTableIdPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'dup-table-id.html' },
+  tables: [
+    { id: 'dup', title: 'First', mode: 'raw', columns: [{ field: 'revenue' }] },
+    { id: 'dup', title: 'Second', mode: 'raw', columns: [{ field: 'category' }] }
+  ]
+};

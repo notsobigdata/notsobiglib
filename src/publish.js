@@ -49,7 +49,14 @@ function validatePublishConfig(config) {
       throw new Error('publish(): chart "' + chart.id + '" has type "' + chart.type + '" - only "bar" is supported.');
     }
   });
+  var seenTableIds = emptyMap();
   (config.tables || []).forEach(function (table) {
+    if (table.id && has(seenTableIds, table.id)) {
+      throw new Error('publish(): duplicate table id "' + table.id + '".');
+    }
+    if (table.id) {
+      seenTableIds[table.id] = true;
+    }
     if (!table.id || !table.title || ['raw', 'aggregated'].indexOf(table.mode) === -1) {
       throw new Error('publish(): every table needs "id", "title", and mode "raw" or "aggregated".');
     }
@@ -144,6 +151,23 @@ function fetchTableRows(projectId, dataset, table) {
   return rows;
 }
 
+// Groups rows by the value of `field`, preserving first-seen key order -
+// shared by charts[] and tables[]'s aggregated mode so the grouping logic
+// exists once.
+function groupRowsBy(rows, field) {
+  var groups = emptyMap();
+  var order = [];
+  rows.forEach(function (row) {
+    var key = row[field];
+    if (!has(groups, key)) {
+      groups[key] = [];
+      order.push(key);
+    }
+    groups[key].push(row);
+  });
+  return { groups: groups, order: order };
+}
+
 function computeAggregate(rows, agg, field) {
   if (agg === 'count') {
     return rows.length;
@@ -211,16 +235,9 @@ function buildRawTablePayload(table, rows) {
 // returned (not run through formatValue), matching how charts already
 // render chart.data[].groupValue directly with no formatting step.
 function buildAggregatedTablePayload(table, rows) {
-  var groups = emptyMap();
-  var order = [];
-  rows.forEach(function (row) {
-    var key = row[table.groupBy];
-    if (!has(groups, key)) {
-      groups[key] = [];
-      order.push(key);
-    }
-    groups[key].push(row);
-  });
+  var grouped = groupRowsBy(rows, table.groupBy);
+  var groups = grouped.groups;
+  var order = grouped.order;
   var columns = [{ key: table.groupBy, label: table.groupBy }].concat(table.metrics.map(function (metric) {
     return { key: metric.label, label: metric.label };
   }));
@@ -241,18 +258,9 @@ function buildReportPayload(config, rows) {
     return { label: kpi.label, value: value, formatted: formatValue(value, kpi.format) };
   });
   var charts = (config.charts || []).map(function (chart) {
-    var groups = emptyMap();
-    var order = [];
-    rows.forEach(function (row) {
-      var key = row[chart.groupBy];
-      if (!has(groups, key)) {
-        groups[key] = [];
-        order.push(key);
-      }
-      groups[key].push(row);
-    });
-    var data = order.map(function (key) {
-      return { groupValue: key, total: computeAggregate(groups[key], chart.metric.agg, chart.metric.field) };
+    var grouped = groupRowsBy(rows, chart.groupBy);
+    var data = grouped.order.map(function (key) {
+      return { groupValue: key, total: computeAggregate(grouped.groups[key], chart.metric.agg, chart.metric.field) };
     });
     return { id: chart.id, title: chart.title, data: data };
   });
