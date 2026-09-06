@@ -223,6 +223,6 @@ function renderReportHtml(payload, config) {
     + '<title>' + escapeHtml(config.target.fileName) + '</title>'
     + '<style>' + REPORT_CSS + '</style></head><body>'
     + '<main><div class="kpis">' + kpiCards + '</div>' + chartSections + '</main>'
-    + '<script>window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload) + ';</script>'
+    + '<script>window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';</script>'
     + '</body></html>';
 }

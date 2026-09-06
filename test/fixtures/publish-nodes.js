@@ -48,3 +48,16 @@ var nonBigQueryRefPublish = {
   target: { type: 'drive', folderId: 'folder-id', fileName: 'sales.html' },
   kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }]
 };
+
+// Has a chart (validPublish doesn't) so a shimmed BigQuery row can carry a
+// malicious groupValue through buildReportPayload into renderReportHtml's
+// embedded JSON payload - see publish.test.js's script-close escaping test.
+var xssPublish = {
+  kind: 'publish',
+  name: 'xssPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'xss.html' },
+  kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }],
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }]
+};
