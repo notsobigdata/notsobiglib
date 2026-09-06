@@ -45,12 +45,8 @@ function testPublishValidRefProceedsPastValidation() {
   // this Node test never provides. Failing here with a BigQuery-shaped
   // error, not a config/ref error, is exactly what proves validation and
   // resolution both succeeded.
-  //
-  // ponytail: temporarily also accepts a ReferenceError on fetchTableRows,
-  // which doesn't exist until Task 3 - tighten back to /BigQuery/ once
-  // that function lands.
   assert.strictEqual(result.status, 'failed');
-  assert.ok(/BigQuery|fetchTableRows/.test(result.error), 'expected validation+ref-resolution to pass and fail only past that point, got: ' + result.error);
+  assert.ok(/BigQuery/.test(result.error), 'expected validation+ref-resolution to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
 module.exports = {

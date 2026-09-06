@@ -144,7 +144,7 @@ actually see. Full command behavior — `--select`/`--exclude` precedence,
 what each command returns, logging, the run manifest, and how a node is
 declared → **[docs/cli.md](docs/cli.md)**.
 
-## The two kinds
+## The three kinds
 
 - **`move`** — moves data from A to B, the "EL" of "ELT": Sheets, Drive
   (CSV/XLSX/JSON), BigQuery, external APIs, and your own custom functions,
@@ -158,6 +158,11 @@ declared → **[docs/cli.md](docs/cli.md)**.
   doesn't itself load, with optional freshness checks and column-level
   tests of its own, checked via `cli('sources')`. Full config →
   **[docs/model.md](docs/model.md)**.
+- **`publish`** — turns a table a `move`/`model` node already
+  materialized in BigQuery into a self-contained `.html` dashboard in
+  Drive: KPIs and a bar chart, computed in JS, no CDN, no build step.
+  Reads via `Tabledata.list` (no query job, no query cost) — never runs
+  its own SQL. Full config → **[docs/publish.md](docs/publish.md)**.
 
 ## Scheduling
 
