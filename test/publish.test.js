@@ -403,6 +403,32 @@ function testPublishChartClientJsDispatchesByType() {
   assert.ok(/typeof d3 === "undefined"/.test(html), 'expected a d3-unavailable fallback guard, got: ' + html);
 }
 
+// Regression test for a rendering defect found in review: SVG/CSS gives a
+// stylesheet's `fill` property priority over a presentation attribute set
+// via .attr("fill", ...) - REPORT_CSS's ".chart-bar { fill: var(--teal); }"
+// would silently override any per-item color set with .attr("fill", ...),
+// so pie slices and stacked/grouped bar segments would all render in one
+// color despite the color scale. .style("fill", ...) sets an inline style,
+// which does win over the stylesheet. This can't be rendered/checked in a
+// browser here, so it's a plain string-presence check on the emitted
+// script, same ceiling CHART_CLIENT_JS's other regex-based tests accept -
+// three color-scaled call sites (pie slices, stacked bar segments, grouped
+// bar segments) must use .style("fill", not .attr("fill", a color(...)
+// call. The plain (non-series) bar path is untouched - it never sets a
+// per-item fill and keeps relying on .chart-bar's CSS fill.
+function testPublishChartClientJsUsesStyleForColorScaledFills() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'day', 'channel', 'revenue'], [['A', '1', 'online', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select chartsV2Publish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var styleFillCount = (html.match(/\.style\("fill"/g) || []).length;
+  assert.strictEqual(styleFillCount, 3, 'expected .style("fill" on all 3 color-scaled call sites (pie slices, stacked bars, grouped bars), got ' + styleFillCount + ' in: ' + html);
+  assert.ok(!/\.attr\("fill", function \(d\) \{ return color\(/.test(html), 'expected no remaining .attr("fill", ...color(...)) calls (should be .style now), got: ' + html);
+}
+
 function testPublishAggregationFixtureStillHasNoStacking() {
   // Sanity check that the plain (non-series) chart path still produces
   // {groupValue, total} data, not the series {groupValue, values} shape -
@@ -557,5 +583,6 @@ module.exports = {
   testPublishChartRendersMountPointAndD3Script: testPublishChartRendersMountPointAndD3Script,
   testPublishNoD3ScriptWithoutCharts: testPublishNoD3ScriptWithoutCharts,
   testPublishChartClientJsDispatchesByType: testPublishChartClientJsDispatchesByType,
+  testPublishChartClientJsUsesStyleForColorScaledFills: testPublishChartClientJsUsesStyleForColorScaledFills,
   testPublishAggregationFixtureStillHasNoStacking: testPublishAggregationFixtureStillHasNoStacking
 };
