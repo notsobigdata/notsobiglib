@@ -91,7 +91,7 @@ function fetchTableRows(projectId, dataset, table) {
   do {
     var response = BigQuery.Tabledata.list(projectId, dataset, table, pageToken ? { pageToken: pageToken } : {});
     (response.rows || []).forEach(function (row) {
-      var record = {};
+      var record = emptyMap();
       row.f.forEach(function (cell, index) {
         record[fieldNames[index]] = cell.v;
       });
