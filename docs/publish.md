@@ -2,10 +2,14 @@
 
 `publish` turns a table another node already materialized in BigQuery
 (a `move` node with a `bigquery` target, or a `model`) into a self-
-contained `.html` dashboard file in Drive: KPI numbers, one bar chart,
-and paginated tables, computed in JS at generation time and embedded
-inline. No CDN, no build step, no server — the file works standalone
-once downloaded.
+contained `.html` dashboard file in Drive: KPI numbers, D3-rendered
+charts (bar, line, pie), and paginated tables, computed in JS at
+generation time and embedded inline. KPIs and tables have no external
+dependency and work fully offline once downloaded; **any report with a
+non-empty `charts[]` needs internet access at the moment a human opens
+the file**, since chart rendering loads D3 from a CDN in the viewer's
+browser. Generating the report (`cli('run')`, including unattended
+scheduled runs) is unaffected — only viewing a chart requires network.
 
 `publish` never runs its own SQL or query job. It reads the referenced
 table's stored data directly via BigQuery's `Tabledata.list` (a storage
@@ -26,8 +30,15 @@ var salesPublish = {
     { label: 'Orders', agg: 'count_distinct', field: 'order_id', format: 'integer' }
   ],
   charts: [
-    { id: 'by_category', type: 'bar', title: 'By category',
-      groupBy: 'category_name', metric: { agg: 'sum', field: 'revenue' } }
+    { id: 'by_category', type: 'bar', title: 'Revenue by category',
+      groupBy: 'category_name', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'trend', type: 'line', title: 'Revenue by day',
+      groupBy: 'order_date', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'share', type: 'pie', title: 'Share by category', donut: true,
+      groupBy: 'category_name', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'by_category_channel', type: 'bar', title: 'By category and channel',
+      groupBy: 'category_name', series: 'channel', stacking: 'stacked',
+      metric: { agg: 'sum', field: 'revenue' } }
   ]
 };
 ```
@@ -38,14 +49,51 @@ var salesPublish = {
 - `kpis[]` — `agg` is `sum`/`avg`/`count`/`count_distinct`; `field` is
   required unless `agg` is `count`. `format` is `string`/`currency`/
   `integer`/`decimal` (fixed `en-US`/`$` formatting in this version).
-- `charts[]` — one `bar` chart per entry, aggregated by `groupBy` in JS
-  (never in SQL, never in the browser).
 - `target` — a Drive file, same shape as `move`'s drive target
   (`folderId` + `fileName`). Without `upsertByName: true` (or an explicit
   `fileId`), every `cli('run')` creates a brand-new file — fine for a
   one-off, but a dashboard regenerated on a schedule needs
   `upsertByName: true` (see [docs/move.md](move.md)'s `target.upsertByName`)
   or it will pile up duplicate files in the folder on every run.
+
+### `charts[]`
+
+```javascript
+charts: [
+  { id: 'by_category', type: 'bar', title: 'Revenue by category',
+    groupBy: 'category_name', metric: { agg: 'sum', field: 'revenue' } },
+  { id: 'trend', type: 'line', title: 'Revenue by day',
+    groupBy: 'order_date', metric: { agg: 'sum', field: 'revenue' } },
+  { id: 'share', type: 'pie', title: 'Share by category', donut: true,
+    groupBy: 'category_name', metric: { agg: 'sum', field: 'revenue' } },
+  { id: 'by_category_channel', type: 'bar', title: 'By category and channel',
+    groupBy: 'category_name', series: 'channel', stacking: 'stacked',
+    metric: { agg: 'sum', field: 'revenue' } }
+]
+```
+
+- `type` is `bar` (default), `line`, or `pie`. All three aggregate the
+  same way (`groupBy` + `metric`) — `line` additionally sorts its
+  result ascending by `groupValue` (numeric if it parses as a number,
+  otherwise as a string, which also sorts ISO-format dates correctly);
+  `bar`/`pie` keep first-seen order.
+- `series` (bar only) adds a second grouping dimension, rendering as
+  grouped or stacked bars per `stacking` (`'grouped'` default, or
+  `'stacked'`).
+- `donut` (pie only) sets an inner radius on the same `groupBy`/`metric`
+  aggregation — it doesn't change the computed data.
+- Charts render via D3, loaded from a pinned-version CDN URL in the
+  browser — see "Charts require internet to view" below.
+
+#### Charts require internet to view
+
+`publish` no longer works fully offline once `charts[]` is non-empty:
+the generated `.html` loads D3 from a CDN the moment a human opens it
+in a browser. If that request fails (no internet, or a corporate
+network blocking the CDN domain), each chart falls back to a plain
+list of its computed values instead of a blank area — the numbers
+stay readable, the visual chart does not render. KPIs and `tables[]`
+are unaffected either way; they have no external dependency.
 
 ### `tables[]`
 
@@ -118,9 +166,14 @@ pager needs to page through without re-formatting anything.
 ## What's not here yet
 
 Filters, drill-down, per-block `source` overrides, cross-file
-navigation, a `board` tree layout, and CSV export are all planned but
-not implemented — see
-`docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s "Future
-direction" section. Column-header sort, search, and CSV export for the
-`tables[]` block specifically are also not implemented — see
-`docs/superpowers/specs/2026-09-06-publish-table-block-design.md`'s §1.
+navigation, and a `board` tree layout are all planned but not
+implemented — see `docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s
+"Future direction" section (CSV export from that list now ships, see
+`tables[]` above). Cross-chart interactivity (one chart reacting to
+another's click/selection within the same file) is planned as a
+follow-up to the D3 chart engine — see
+`docs/superpowers/specs/2026-09-06-publish-d3-charts-design.md`.
+Column-header sort and search for the `tables[]` block, and `filters`/
+`linkTo` generally, are deliberately deferred until that follow-up is
+designed, since they overlap with it — see that spec's "Relationship
+to filters/linkTo" section.
