@@ -121,7 +121,9 @@ charts: [
   dimension" this chart's `groupBy` represents. Clicking a bar/slice/point
   in a chart that declares `linkKey` dims every element, in every *other*
   chart that declares the **same** `linkKey` string, that doesn't match the
-  clicked value. Clicking the same element again clears the selection.
+  clicked value. Clicking the same value again clears the selection —
+  even from a different chart, since the selection is keyed by value,
+  not by which element was clicked.
 - `seriesLinkKey` (bar + `series` only) does the same for the `series`
   dimension of a grouped/stacked bar. Clicking a segment selects **both**
   its `groupBy` and `series` values together — another chart only lights
