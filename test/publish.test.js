@@ -546,6 +546,26 @@ function testPublishChartClientJsIncludesSelectionModule() {
   assert.ok(/var currentSelection = null;/.test(html), 'expected the module-level currentSelection state, got: ' + html);
 }
 
+// Whole-branch review finding: a NULL groupValue/seriesValue must not
+// silently drop out of highlighting. D3's .attr(name, null) removes the
+// attribute rather than setting it, so every group/series-value accessor
+// must coerce through String(...) to keep null/undefined attribute-matchable.
+function testPublishChartClientJsCoercesGroupAndSeriesValuesToString() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select linkKeyChartsPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var groupValueStringCount = (html.match(/data-group-value", function \(d\) \{ return String\(/g) || []).length;
+  assert.strictEqual(groupValueStringCount, 5, 'expected all 5 data-group-value accessors to coerce via String(...), got ' + groupValueStringCount + ' in: ' + html);
+  var seriesValueStringCount = (html.match(/data-series-value", function \(d\) \{ return String\(/g) || []).length;
+  assert.strictEqual(seriesValueStringCount, 2, 'expected both data-series-value accessors to coerce via String(...), got ' + seriesValueStringCount + ' in: ' + html);
+  assert.ok(/selection\[chart\.linkKey\] = String\(groupValue\);/.test(html), 'expected chartSelectionFor to coerce groupValue via String(...), got: ' + html);
+  assert.ok(/selection\[chart\.seriesLinkKey\] = String\(seriesValue\);/.test(html), 'expected chartSelectionFor to coerce seriesValue via String(...), got: ' + html);
+}
+
 function testPublishChartClientJsCallsApplyHighlightOnceOnLoad() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
@@ -756,6 +776,7 @@ module.exports = {
   testPublishLinkKeyChartsProceedPastValidation: testPublishLinkKeyChartsProceedPastValidation,
   testPublishChartPayloadPassesThroughLinkKeys: testPublishChartPayloadPassesThroughLinkKeys,
   testPublishChartClientJsIncludesSelectionModule: testPublishChartClientJsIncludesSelectionModule,
+  testPublishChartClientJsCoercesGroupAndSeriesValuesToString: testPublishChartClientJsCoercesGroupAndSeriesValuesToString,
   testPublishChartClientJsCallsApplyHighlightOnceOnLoad: testPublishChartClientJsCallsApplyHighlightOnceOnLoad,
   testPublishChartClientJsWiresBarClickOnlyWhenInteractive: testPublishChartClientJsWiresBarClickOnlyWhenInteractive,
   testPublishChartClientJsWiresLineAndPieClickOnLinkKey: testPublishChartClientJsWiresLineAndPieClickOnLinkKey

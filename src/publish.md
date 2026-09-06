@@ -80,10 +80,10 @@ chart types and had shakier native pie/donut support than D3's own
 changes.
 
 `buildChartPayload` stays pure and server-side in this phase — no
-aggregation happens in the browser. Cross-chart interactivity (Phase
-2, not designed yet) is the point where the browser will need to
-re-aggregate against a shared filter/selection state; this phase
-deliberately doesn't build that machinery early.
+aggregation happens in the browser. Cross-chart interactivity (Phase 2,
+shipped — see below) deliberately doesn't re-aggregate either, only
+dims already-rendered elements; a future `filters[]` dropdown is where
+client-side re-aggregation would actually need to happen.
 
 **Set a per-item chart color with `.style('fill', ...)`, never
 `.attr('fill', ...)`.** `REPORT_CSS`'s `.chart-bar { fill: var(--teal); }`
