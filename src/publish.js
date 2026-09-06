@@ -38,7 +38,7 @@ function validatePublishConfig(config) {
       throw new Error('publish(): kpi "' + kpi.label + '" has agg "' + kpi.agg + '", which requires "field".');
     }
     if (PUBLISH_VALUE_FORMATS.indexOf(kpi.format) === -1) {
-      throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected "currency", "integer", or "decimal".');
+      throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
     }
   });
   (config.charts || []).forEach(function (chart) {
