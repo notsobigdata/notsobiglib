@@ -52,7 +52,7 @@ Task 3 for the fixture-first `notsobigtests` companion this needs.
 
 `buildRawTablePayload`/`buildAggregatedTablePayload` (both in
 `src/publish.js`) converge on the exact same `{id, title, pageSize,
-columns: [{key,label}], rows: [[cell,...]]}` shape before
+columns: [{key,label,format}], rows: [[cell,...]]}` shape before
 `renderReportHtml` ever sees them — every cell already formatted to a
 string, the same way `kpi.formatted` already is. That convergence is
 deliberate: `renderTableSection()` and `TABLE_CLIENT_JS` don't know
@@ -69,12 +69,14 @@ existing per-`.table-block` `forEach` (renamed from
 `TABLE_PAGINATION_JS` once it grew a second responsibility), not a
 separate `DOMContentLoaded` listener — it already has `table`/`tableId`
 in scope from the pager setup, so wiring the button there is one more
-`addEventListener` call, not new lookup logic. It always exports the
-full `table.rows` set (not just the visible page), since that data is
-already embedded for the pager and slicing it down for export would be
-a step backward. `csvField()` is a plain top-level function in the same
-JS string, not folded into the `forEach`, since it's pure and doesn't
-need per-section scope.
+`addEventListener` call, not new lookup logic. It exports whatever the
+search box currently matches (`visibleRows()`, not just the visible
+page — see "Sort/search compare on the formatted cell" below), since
+that data is already embedded for the pager and slicing it down for
+export would be a step backward; with no search text that's every row,
+same as before sort/search existed. `csvField()` is a plain top-level
+function in the same JS string, not folded into the `forEach`, since
+it's pure and doesn't need per-section scope.
 
 `csvField()` also guards against CSV formula injection (CWE-1236):
 `table.rows` cells come from a live BigQuery table `publish()` never
@@ -83,6 +85,31 @@ validates for injection safety (same untrusted-data posture as the
 starting with `=`/`+`/`-`/`@` would otherwise be parsed as a formula by
 Excel/Sheets the moment a human opens the exported file, so a leading
 `'` is prefixed before the existing quote/comma/newline escaping runs.
+
+## Sort/search compare on the formatted cell, not a re-fetched raw value
+
+`table.rows` cells are already formatted display strings (`"$1,234.56"`,
+not `1234.56`) — deliberately, per the section above, since the pager
+and CSV export both need exactly that string. Sorting a `currency`/
+`integer`/`decimal` column against those strings as text would put
+`"$20.00"` before `"$5.00"`, so `sortableValue()` strips everything but
+digits/dot/minus and compares the resulting number instead; `"string"`
+columns (and the aggregated groupBy column, which is always `"string"`)
+compare as lowercased text. This is why `columns[]` now carries
+`format` alongside `key`/`label` — the client-side sort has no other
+way to know which comparison a given column needs. The alternative
+(embedding both a raw and a formatted value per cell, mirroring
+`kpi`/`chart`'s `{value, formatted}` shape) was rejected: it would
+double every cell's payload size for a benefit only sort needs, when
+stripping the formatting back out is a one-line regex.
+
+Search and sort both read from `table.rows`/`table.columns` — the
+config object holding the *currently active* dataset, which
+`window.__PUBLISH_TABLE_REPLACERS__` already swaps wholesale on a
+`filters[]` change (see below). `sortColumn`/`sortDir`/`searchQuery`
+live one level up, outside that swap, so a search/sort a viewer already
+has active survives a filter dropdown change instead of silently
+resetting.
 
 ## Why D3 over Chart.js/p5.js/a declarative grammar
 
