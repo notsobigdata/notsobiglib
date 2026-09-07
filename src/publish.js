@@ -610,19 +610,32 @@ function rowsForBlock(block, defaultRows, blockRowsByRef) {
 
 // Attaches a block's own "detail" drill-down data to its already-built
 // payload object - {groupBy, series, columns, rows}, where `rows` is
-// exactly the same resolved row set (rowsForBlock's result) the block's
-// own aggregate/chart was computed from, so a group's detail always
-// matches what's currently on screen. `series` is undefined for a table
-// or a non-series chart - harmless, the client only reads it when a
-// chart's own series field is also present. No-op (returns `built`
-// unchanged) when the block didn't declare "detail" - kept in the same
-// FILTER_REUSED_FUNCTIONS_JS list buildChartPayload/buildRawTablePayload/
-// buildAggregatedTablePayload already live in, since a reactsTo block's
-// client-side recompute (applyFilterToChart/applyFilterToTable below)
-// needs to re-run this too, not just the server-side build.
+// rowsForBlock's result (the block's own resolved row set) trimmed down
+// to only the fields the client ever reads off a detail row: each
+// declared detail.columns[i].field (rendered in the modal), plus
+// groupBy/series (used to filter rows by the clicked group/segment) -
+// never the row's full source-table shape, so a column outside those
+// three never reaches the embedded __PUBLISH_PAYLOAD__ even though the
+// aggregate/chart itself was computed from every column. `series` is
+// undefined for a table or a non-series chart - harmless, the client
+// only reads it when a chart's own series field is also present. No-op
+// (returns `built` unchanged) when the block didn't declare "detail" -
+// kept in the same FILTER_REUSED_FUNCTIONS_JS list buildChartPayload/
+// buildRawTablePayload/buildAggregatedTablePayload already live in,
+// since a reactsTo block's client-side recompute (applyFilterToChart/
+// applyFilterToTable below) needs to re-run this too, not just the
+// server-side build.
 function withDetail(built, block, rows) {
   if (block.detail) {
-    built.detail = { groupBy: block.groupBy, series: block.series, columns: block.detail.columns, rows: rows };
+    var fields = block.detail.columns.map(function (column) { return column.field; });
+    if (block.groupBy) { fields.push(block.groupBy); }
+    if (block.series) { fields.push(block.series); }
+    var trimmedRows = rows.map(function (row) {
+      var trimmed = emptyMap();
+      fields.forEach(function (field) { trimmed[field] = row[field]; });
+      return trimmed;
+    });
+    built.detail = { groupBy: block.groupBy, series: block.series, columns: block.detail.columns, rows: trimmedRows };
   }
   return built;
 }

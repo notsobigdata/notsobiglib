@@ -659,6 +659,35 @@ function testPublishDetailAttachedToChartAndTablePayloadsWhenConfigured() {
   assert.strictEqual(table.detail.rows.length, 3, 'expected the table\'s own resolved rows (all 3), got: ' + JSON.stringify(table.detail.rows));
 }
 
+// Security regression: the source table can carry columns the block never
+// declared in detail.columns/groupBy/series (e.g. an internal-only field
+// like margin) - withDetail must trim each embedded row down to exactly
+// the fields the client-side modal/filter code reads, never ship the rest
+// of the source row into __PUBLISH_PAYLOAD__.
+function testPublishDetailRowsExcludeFieldsOutsideColumnsGroupByAndSeries() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue', 'internal_margin'], [
+    ['A', 'o1', '10', '4'],
+    ['A', 'o2', '20', '8'],
+    ['B', 'o3', '5', '1']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  var chart = payload.charts.filter(function (c) { return c.id === 'by_category'; })[0];
+  chart.detail.rows.forEach(function (row) {
+    assert.deepStrictEqual(Object.keys(row).sort(), ['category', 'order_id', 'revenue'], 'expected only groupBy + detail.columns fields, got: ' + JSON.stringify(row));
+    assert.strictEqual(row.internal_margin, undefined, 'expected internal_margin to never reach the embedded payload, got: ' + JSON.stringify(row));
+  });
+
+  var table = payload.tables.filter(function (t) { return t.id === 'by_category_table'; })[0];
+  table.detail.rows.forEach(function (row) {
+    assert.deepStrictEqual(Object.keys(row).sort(), ['category', 'order_id', 'revenue'], 'expected only groupBy + detail.columns fields, got: ' + JSON.stringify(row));
+    assert.strictEqual(row.internal_margin, undefined, 'expected internal_margin to never reach the embedded payload, got: ' + JSON.stringify(row));
+  });
+}
+
 function testPublishNoDetailFieldOnPayloadWithoutDetailConfigured() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
@@ -1633,6 +1662,7 @@ module.exports = {
   testPublishLinkKeyChartsProceedPastValidation: testPublishLinkKeyChartsProceedPastValidation,
   testPublishChartPayloadPassesThroughLinkKeys: testPublishChartPayloadPassesThroughLinkKeys,
   testPublishDetailAttachedToChartAndTablePayloadsWhenConfigured: testPublishDetailAttachedToChartAndTablePayloadsWhenConfigured,
+  testPublishDetailRowsExcludeFieldsOutsideColumnsGroupByAndSeries: testPublishDetailRowsExcludeFieldsOutsideColumnsGroupByAndSeries,
   testPublishNoDetailFieldOnPayloadWithoutDetailConfigured: testPublishNoDetailFieldOnPayloadWithoutDetailConfigured,
   testPublishChartClientJsIncludesSelectionModule: testPublishChartClientJsIncludesSelectionModule,
   testPublishChartClientJsCoercesGroupAndSeriesValuesToString: testPublishChartClientJsCoercesGroupAndSeriesValuesToString,
