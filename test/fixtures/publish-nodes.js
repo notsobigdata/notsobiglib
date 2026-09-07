@@ -703,3 +703,13 @@ var detailPublish = {
     metrics: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }],
     detail: { columns: [{ field: 'order_id', label: 'Order' }, { field: 'revenue', label: 'Revenue', format: 'currency' }] } }]
 };
+
+var seriesChartWithDetailPublish = {
+  kind: 'publish',
+  name: 'seriesChartWithDetailPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'series-detail.html' },
+  charts: [{ id: 'by_category_channel', type: 'bar', title: 'By category and channel', groupBy: 'category', series: 'channel',
+    metric: { agg: 'sum', field: 'revenue' }, detail: { columns: [{ field: 'revenue', format: 'currency' }] } }]
+};

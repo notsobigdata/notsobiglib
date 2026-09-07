@@ -731,7 +731,7 @@ function testPublishChartClientJsWiresBarClickOnlyWhenInteractive() {
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
 
-  assert.ok(/var interactive = !!\(chart\.linkKey \|\| chart\.seriesLinkKey \|\| chart\.linkTo\);/.test(html), 'expected drawBarChart\'s interactive flag (widened for linkTo), got: ' + html);
+  assert.ok(/var interactive = !!\(chart\.linkKey \|\| chart\.seriesLinkKey \|\| chart\.linkTo \|\| chart\.detail\);/.test(html), 'expected drawBarChart\'s interactive flag (widened for detail), got: ' + html);
   assert.ok(/data-group-value/.test(html), 'expected data-group-value attribute wiring in the emitted script, got: ' + html);
   assert.ok(/data-series-value/.test(html), 'expected data-series-value attribute wiring for stacked/grouped bars, got: ' + html);
 }
@@ -750,8 +750,8 @@ function testPublishChartClientJsWiresLineAndPieClickOnLinkKey() {
   // doesn't also match chartSelectionFor's/selectionMatches' one-line "if
   // (chart.linkKey) { ... }" conditionals, which have trailing code after
   // "{" on the same line and are a different thing entirely.
-  var lineOrPieGateCount = (html.match(/^\s*if \(chart\.linkKey \|\| chart\.linkTo\) \{$/gm) || []).length;
-  assert.strictEqual(lineOrPieGateCount, 2, 'expected exactly 2 standalone "if (chart.linkKey || chart.linkTo) {" gate blocks (drawLineChart + drawPieChart), got ' + lineOrPieGateCount + ' in: ' + html);
+  var lineOrPieGateCount = (html.match(/^\s*if \(chart\.linkKey \|\| chart\.linkTo \|\| chart\.detail\) \{$/gm) || []).length;
+  assert.strictEqual(lineOrPieGateCount, 2, 'expected exactly 2 standalone "if (chart.linkKey || chart.linkTo || chart.detail) {" gate blocks (drawLineChart + drawPieChart), got ' + lineOrPieGateCount + ' in: ' + html);
 }
 
 function testPublishChartClientJsHandlesLinkToClickNavigation() {
@@ -770,6 +770,32 @@ function testPublishChartClientJsHandlesLinkToClickNavigation() {
   assert.ok(/window\.open\(url, "_blank"\);/.test(html), 'expected the new-tab navigation call, got: ' + html);
   assert.ok(/window\.location\.href = url;/.test(html), 'expected the same-tab navigation fallback, got: ' + html);
   assert.ok(/encodeURIComponent\(chart\.linkTo\.field\)/.test(html), 'expected the query param to be built from linkTo.field, got: ' + html);
+}
+
+function testPublishChartClientJsHandlesDetailClick() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [['A', 'o1', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/if \(chart\.detail\) \{/.test(html), 'expected handleChartClick\'s detail branch in the emitted script, got: ' + html);
+  assert.ok(/openDetailModal\(chart\.title \+ ": " \+ groupValue/.test(html), 'expected the detail branch to open the modal, got: ' + html);
+}
+
+function testPublishSeriesChartPassesSeriesValueThroughToDetailClick() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue'], [['A', 'online', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select seriesChartWithDetailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  // Both the stacked and grouped series-bar click handlers must pass the
+  // clicked series' value through when the chart has "detail" (not just
+  // when it has seriesLinkKey, which detail is mutually exclusive with).
+  var passthroughCount = (html.match(/chart\.seriesLinkKey \|\| chart\.detail \? seriesKey : undefined/g) || []).length
+    + (html.match(/chart\.seriesLinkKey \|\| chart\.detail \? d\.key : undefined/g) || []).length;
+  assert.strictEqual(passthroughCount, 2, 'expected both series-bar click handlers to widen their seriesValue passthrough for chart.detail, got ' + passthroughCount + ' in: ' + html);
 }
 
 function testPublishLinkToRequiresNode() {
@@ -1614,6 +1640,8 @@ module.exports = {
   testPublishChartClientJsWiresBarClickOnlyWhenInteractive: testPublishChartClientJsWiresBarClickOnlyWhenInteractive,
   testPublishChartClientJsWiresLineAndPieClickOnLinkKey: testPublishChartClientJsWiresLineAndPieClickOnLinkKey,
   testPublishChartClientJsHandlesLinkToClickNavigation: testPublishChartClientJsHandlesLinkToClickNavigation,
+  testPublishChartClientJsHandlesDetailClick: testPublishChartClientJsHandlesDetailClick,
+  testPublishSeriesChartPassesSeriesValueThroughToDetailClick: testPublishSeriesChartPassesSeriesValueThroughToDetailClick,
   testPublishLinkToRequiresNode: testPublishLinkToRequiresNode,
   testPublishLinkToRequiresField: testPublishLinkToRequiresField,
   testPublishLinkToNewTabMustBeBoolean: testPublishLinkToNewTabMustBeBoolean,
