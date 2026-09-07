@@ -4125,6 +4125,17 @@ var NotSoBigData = (function () {
       if (chart.seriesLinkKey && !(chartType === 'bar' && chart.series)) {
         throw new Error('publish(): chart "' + chart.id + '" has "seriesLinkKey", which only "bar" charts with "series" support.');
       }
+      if (chart.linkTo) {
+        if (!chart.linkTo.node || !chart.linkTo.field) {
+          throw new Error('publish(): chart "' + chart.id + '" has "linkTo", which requires "node" and "field".');
+        }
+        if (chart.linkTo.newTab !== undefined && typeof chart.linkTo.newTab !== 'boolean') {
+          throw new Error('publish(): chart "' + chart.id + '" has linkTo.newTab "' + chart.linkTo.newTab + '", which must be a boolean.');
+        }
+        if (chart.linkKey || chart.seriesLinkKey) {
+          throw new Error('publish(): chart "' + chart.id + '" has both "linkTo" and "linkKey"/"seriesLinkKey" - these are mutually exclusive.');
+        }
+      }
       validateReactsTo('chart', chart.id, chart.reactsTo, seenFilterFields);
     });
     var seenTableIds = emptyMap();
@@ -4190,16 +4201,89 @@ var NotSoBigData = (function () {
     return location;
   }
 
+  // Pure half of linkTo's cross-node resolution: confirms chart.linkTo.node
+  // names a declared publish node whose target is stable (upsertByName -
+  // without it the destination's file id, and therefore this URL, would
+  // change on its very next run) and whose filters[] can actually receive
+  // the field this chart will send on click (the same typo-guard reasoning
+  // validateReactsTo already applies to reactsTo, just across two nodes
+  // instead of one). Never touches Drive - see resolveLinkToUrl below for
+  // the one live call this splits off from, mirroring resolvePublishSource/
+  // fetchTableRows' own pure-resolution-vs-live-I/O split. Returns the
+  // target node's own config for resolveLinkToUrl to read .target off of.
+  function validateLinkToTarget(chart, allNodes) {
+    var targetNode = (allNodes || []).filter(function (node) { return node.name === chart.linkTo.node; })[0];
+    if (!targetNode) {
+      throw new Error('publish(): chart "' + chart.id + '" has linkTo.node "' + chart.linkTo.node + '", which doesn\'t match any declared node.');
+    }
+    if (targetNode.kind !== 'publish') {
+      throw new Error('publish(): chart "' + chart.id + '" has linkTo.node "' + chart.linkTo.node + '", which is a "' + targetNode.kind + '" node, not "publish".');
+    }
+    var targetConfig = targetNode.config;
+    if (!targetConfig.target || !targetConfig.target.upsertByName) {
+      throw new Error('publish(): chart "' + chart.id + '" links to "' + chart.linkTo.node + '", which needs target.upsertByName: true for a stable link.');
+    }
+    var hasMatchingFilter = (targetConfig.filters || []).some(function (filter) { return filter.field === chart.linkTo.field; });
+    if (!hasMatchingFilter) {
+      throw new Error('publish(): chart "' + chart.id + '" links to "' + chart.linkTo.node + '" on field "' + chart.linkTo.field + '", but that node has no filters[] entry for that field.');
+    }
+    return targetConfig;
+  }
+
+  // The one live call validateLinkToTarget's result feeds - reuses move.js's
+  // own upsertByName lookup (resolveDriveTargetFileId) rather than
+  // duplicating "find an existing file by folder+name" a second time. Comes
+  // back null when the destination has never actually been published yet
+  // (nothing to link to), which is a real, expected first-run gap rather
+  // than a bug - see docs/publish.md's linkTo section.
+  function resolveLinkToUrl(targetConfig) {
+    var fileId = resolveDriveTargetFileId(targetConfig.target);
+    if (!fileId) {
+      throw new Error('publish(): linkTo target "' + targetConfig.target.fileName + '" hasn\'t been published yet - run it at least once before linking to it.');
+    }
+    return 'https://drive.google.com/file/d/' + fileId + '/view';
+  }
+
+  // Produces a copy of config with every chart's linkTo swapped from
+  // {node, field, newTab} (declared) to {url, field, newTab} (resolved) -
+  // buildChartPayload/buildFilterableConfig downstream (including the
+  // client-side re-invocation of buildChartPayload via
+  // FILTER_REUSED_FUNCTIONS_JS, which must never call DriveApp) never need
+  // to know about node names, only the already-resolved url. A no-op copy
+  // when no chart declares linkTo, so a report with none pays no cost.
+  function resolveConfigLinkTargets(config, allNodes) {
+    if (!(config.charts || []).some(function (chart) { return chart.linkTo; })) {
+      return config;
+    }
+    var charts = (config.charts || []).map(function (chart) {
+      if (!chart.linkTo) { return chart; }
+      var targetConfig = validateLinkToTarget(chart, allNodes);
+      var url = resolveLinkToUrl(targetConfig);
+      var resolvedChart = {};
+      Object.keys(chart).forEach(function (key) { resolvedChart[key] = chart[key]; });
+      resolvedChart.linkTo = { url: url, field: chart.linkTo.field, newTab: chart.linkTo.newTab !== false };
+      return resolvedChart;
+    });
+    var resolvedConfig = {};
+    Object.keys(config).forEach(function (key) { resolvedConfig[key] = config[key]; });
+    resolvedConfig.charts = charts;
+    return resolvedConfig;
+  }
+
   // The EXECUTORS.publish entry. allNodes is optional and only used to
-  // resolve source.ref - move()/model() ignore the same argument today
-  // (see cli.js's widened runNodes()), so this is the only kind that reads
-  // it so far.
+  // resolve source.ref and any chart's linkTo.node - move()/model() ignore
+  // the same argument today (see cli.js's widened runNodes()), so this is
+  // the only kind that reads it so far. resolveConfigLinkTargets runs after
+  // fetchTableRows (not before) purely so an un-shimmed Node test's "proceeds
+  // past validation" proof keeps failing at the same BigQuery call every
+  // other such test already fails at, linkTo or not.
   function publish(config, allNodes) {
     validatePublishConfig(config);
     var location = resolvePublishSource(config.source.ref, allNodes);
     var rows = fetchTableRows(location.projectId, location.dataset, location.table);
-    var payload = buildReportPayload(config, rows);
-    var html = renderReportHtml(payload, config);
+    var resolvedConfig = resolveConfigLinkTargets(config, allNodes);
+    var payload = buildReportPayload(resolvedConfig, rows);
+    var html = renderReportHtml(payload, resolvedConfig);
     var fileId = resolveDriveWriteTarget(config.target);
     var writtenFileId = writeDriveText(fileId, config.target, html, MimeType.HTML);
     return { rowCount: rows.length, driveFileId: writtenFileId };
@@ -4386,7 +4470,7 @@ var NotSoBigData = (function () {
         });
         return { groupValue: groupKey, values: values };
       });
-      return { id: chart.id, title: chart.title, type: chartType, series: chart.series, stacking: chart.stacking || 'grouped', seriesKeys: seriesKeys, data: data, linkKey: chart.linkKey, seriesLinkKey: chart.seriesLinkKey };
+      return { id: chart.id, title: chart.title, type: chartType, series: chart.series, stacking: chart.stacking || 'grouped', seriesKeys: seriesKeys, data: data, linkKey: chart.linkKey, seriesLinkKey: chart.seriesLinkKey, linkTo: chart.linkTo };
     }
     var grouped = groupRowsBy(rows, chart.groupBy);
     var data = grouped.order.map(function (key) {
@@ -4395,7 +4479,7 @@ var NotSoBigData = (function () {
     if (chartType === 'line') {
       data.sort(function (a, b) { return compareGroupValues(a.groupValue, b.groupValue); });
     }
-    return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data, linkKey: chart.linkKey };
+    return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data, linkKey: chart.linkKey, linkTo: chart.linkTo };
   }
 
   // Distinct values for one filters[] field, sorted ascending as plain
@@ -4588,6 +4672,31 @@ var NotSoBigData = (function () {
     '  if (typeof currentSelection !== "undefined") { currentSelection = null; }',
     '  if (typeof applyHighlight === "function") { applyHighlight(); }',
     '}',
+    // linkTo's destination-side counterpart to handleChartClick's
+    // navigation: a query-string field matching one of this report's own
+    // filters[] pre-selects that dropdown and recomputes on load, exactly
+    // as if a human had picked it - no separate config needed on this side,
+    // since matching field names is the only contract the two ends share.
+    // A value with no matching option (typo, or the source row's value
+    // isn't one of this report\'s own distinct values) is ignored rather
+    // than forced, so an unrelated/stale query string never leaves the page
+    // stuck on a dead filter selection.
+    'function applyFiltersFromQueryString() {',
+    '  var params = new URLSearchParams(window.location.search);',
+    '  var payload = window.__PUBLISH_PAYLOAD__;',
+    '  var applied = false;',
+    '  Array.prototype.forEach.call(document.querySelectorAll("[data-filter-field]"), function (select) {',
+    '    var field = select.getAttribute("data-filter-field");',
+    '    if (!params.has(field)) { return; }',
+    '    var value = params.get(field);',
+    '    var filter = payload.filters.filter(function (f) { return f.field === field; })[0];',
+    '    if (!filter || filter.options.indexOf(value) === -1) { return; }',
+    '    activeFilters[field] = value;',
+    '    select.value = value;',
+    '    applied = true;',
+    '  });',
+    '  if (applied) { applyFilters(); }',
+    '}',
     'document.addEventListener("DOMContentLoaded", function () {',
     '  Array.prototype.forEach.call(document.querySelectorAll("[data-filter-field]"), function (select) {',
     '    select.addEventListener("change", function () {',
@@ -4597,6 +4706,7 @@ var NotSoBigData = (function () {
     '      applyFilters();',
     '    });',
     '  });',
+    '  applyFiltersFromQueryString();',
     '});'
   ].join('\n');
 
@@ -4807,6 +4917,11 @@ var NotSoBigData = (function () {
     '  return relevant.every(function (key) { return elementSelection[key] === currentSelection[key]; });',
     '}',
     'function handleChartClick(chart, groupValue, seriesValue) {',
+    '  if (chart.linkTo) {',
+    '    var url = chart.linkTo.url + "?" + encodeURIComponent(chart.linkTo.field) + "=" + encodeURIComponent(groupValue);',
+    '    if (chart.linkTo.newTab) { window.open(url, "_blank"); } else { window.location.href = url; }',
+    '    return;',
+    '  }',
     '  var clicked = chartSelectionFor(chart, groupValue, seriesValue);',
     '  currentSelection = (currentSelection && selectionsEqual(currentSelection, clicked)) ? null : clicked;',
     '  applyHighlight();',
@@ -4833,7 +4948,7 @@ var NotSoBigData = (function () {
     '  var groupValues = chart.data.map(function (d) { return d.groupValue; });',
     '  var y = d3.scaleBand().domain(groupValues).range([margin.top, height - margin.bottom]).padding(0.2);',
     '  var color = d3.scaleOrdinal().range(["var(--teal)", "var(--coral)", "var(--ink-soft)", "var(--teal-soft)"]);',
-    '  var interactive = !!(chart.linkKey || chart.seriesLinkKey);',
+    '  var interactive = !!(chart.linkKey || chart.seriesLinkKey || chart.linkTo);',
     '  if (chart.seriesKeys && chart.seriesKeys.length) {',
     '    color.domain(chart.seriesKeys);',
     '    if (chart.stacking === "stacked") {',
@@ -4906,7 +5021,7 @@ var NotSoBigData = (function () {
     '  svg.append("path").datum(chart.data).attr("class", "chart-bar").style("fill", "none").attr("stroke", "#3F6659").attr("stroke-width", 2).attr("d", line);',
     '  var points = svg.append("g").selectAll("circle").data(chart.data).join("circle")',
     '    .attr("class", "chart-bar").attr("cx", function (d) { return x(d.groupValue); }).attr("cy", function (d) { return y(d.total); }).attr("r", 3);',
-    '  if (chart.linkKey) {',
+    '  if (chart.linkKey || chart.linkTo) {',
     '    points.attr("data-group-value", function (d) { return String(d.groupValue); }).style("cursor", "pointer")',
     '      .on("click", function (event, d) { handleChartClick(chart, d.groupValue, undefined); });',
     '  }',
@@ -4925,7 +5040,7 @@ var NotSoBigData = (function () {
     '  var pieData = pieGen(chart.data);',
     '  var slices = svg.selectAll("path").data(pieData).join("path")',
     '    .attr("class", "chart-bar").style("fill", function (d) { return color(d.data.groupValue); }).attr("d", arcGen);',
-    '  if (chart.linkKey) {',
+    '  if (chart.linkKey || chart.linkTo) {',
     '    slices.attr("data-group-value", function (d) { return String(d.data.groupValue); }).style("cursor", "pointer")',
     '      .on("click", function (event, d) { handleChartClick(chart, d.data.groupValue, undefined); });',
     '  }',

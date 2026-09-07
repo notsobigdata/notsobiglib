@@ -241,3 +241,45 @@ own separate `page`/`table` state, silently desyncing from the first the
 moment a filter changes (clicking "Next" would then page through stale,
 pre-filter data). One shared closure, one small always-on hook, is the
 only version of this that can't drift out of sync with itself.
+
+## `linkTo` resolves at generation time, splitting pure validation from the one live Drive call
+
+Mirroring `resolvePublishSource`/`fetchTableRows`'s own split:
+`validateLinkToTarget(chart, allNodes)` is pure (node exists, is `kind:
+'publish'`, has `target.upsertByName`, has a matching `filters[]` field)
+and is fully Node-testable with a fixture `allNodes` list; the one live
+call, `resolveLinkToUrl`, just reuses `move.js`'s own
+`resolveDriveTargetFileId` (a live `getFolderById(...).getFilesByName(...)`
+lookup, the exact primitive `upsertByName` targets already use) rather
+than writing a second "does this file already exist" check. `publish()`
+calls `resolveConfigLinkTargets` *after* `fetchTableRows`, not before —
+purely so a config with a valid `linkTo` still fails an un-shimmed Node
+test at the same "BigQuery is not defined" point every other "proceeds
+past validation" test already does, rather than failing one call earlier
+at an equally-un-shimmed `DriveApp`. Nothing about correctness depends on
+this ordering; only test-suite consistency does.
+
+The resolved shape (`{url, field, newTab}`) replaces the declared shape
+(`{node, field, newTab}`) on a *copy* of `config.charts`, never the
+original — `buildChartPayload` (reused verbatim client-side via
+`FILTER_REUSED_FUNCTIONS_JS`, see above) must never gain a reference to
+`DriveApp`, so all node-name resolution happens once, server-side, before
+that function ever sees the chart config. A report with no `linkTo`
+anywhere pays for none of this: `resolveConfigLinkTargets` returns the
+original `config` object unchanged.
+
+`linkTo` and `linkKey`/`seriesLinkKey` are mutually exclusive on one
+chart by validation, not by runtime precedence — a click either
+highlights same-page elements or navigates away, and letting a chart
+declare both would mean picking a silent winner between two config keys
+that both fired. `handleChartClick`'s `linkTo` branch returns early,
+before `chartSelectionFor`/`applyHighlight` ever run, so this couldn't
+silently do both even if validation were ever removed.
+
+On the destination side, `applyFiltersFromQueryString()` deliberately
+reuses `activeFilters`/`applyFilters()` — the exact state a `<select>`
+change already mutates — rather than a separate "initial filter" code
+path. A query-string value that doesn't match one of that filter's own
+computed `options` is silently skipped (not forced into `activeFilters`),
+so a stale or unrelated link never leaves a report stuck filtered to a
+value that matches zero rows.

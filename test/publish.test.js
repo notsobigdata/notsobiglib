@@ -101,8 +101,15 @@ function testPublishLayoutTypeOtherThanLinearRejected() {
 // Tabledata.list should appear to return (one array of cell values per
 // row, in fieldNames order); the returned function reads back whatever
 // HTML DriveApp.createFile most recently received.
-function shimBigQueryAndDrive(ctx, fieldNames, rowValues) {
+// existingFilesByName (optional) - a { fileName: fileId } map of files
+// linkTo's resolveDriveTargetFileId should find already sitting in the
+// fake folder, for testing linkTo's upsertByName lookup against a
+// destination that has (or hasn't) been published before. Every existing
+// call site omits this and gets the harmless default (getFilesByName
+// finds nothing), same as a real folder these tests never populated.
+function shimBigQueryAndDrive(ctx, fieldNames, rowValues, existingFilesByName) {
   var capturedHtml = null;
+  existingFilesByName = existingFilesByName || {};
   ctx.MimeType = { HTML: 'text/html' };
   ctx.BigQuery = {
     Tables: {
@@ -126,6 +133,14 @@ function shimBigQueryAndDrive(ctx, fieldNames, rowValues) {
         createFile: function (name, content) {
           capturedHtml = content;
           return { getId: function () { return 'fake-file-id'; } };
+        },
+        getFilesByName: function (name) {
+          var fileId = existingFilesByName[name];
+          var consumed = false;
+          return {
+            hasNext: function () { return !consumed && fileId !== undefined; },
+            next: function () { consumed = true; return { getId: function () { return fileId; } }; }
+          };
         }
       };
     }
@@ -653,7 +668,7 @@ function testPublishChartClientJsWiresBarClickOnlyWhenInteractive() {
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
 
-  assert.ok(/var interactive = !!\(chart\.linkKey \|\| chart\.seriesLinkKey\);/.test(html), 'expected drawBarChart\'s interactive flag, got: ' + html);
+  assert.ok(/var interactive = !!\(chart\.linkKey \|\| chart\.seriesLinkKey \|\| chart\.linkTo\);/.test(html), 'expected drawBarChart\'s interactive flag (widened for linkTo), got: ' + html);
   assert.ok(/data-group-value/.test(html), 'expected data-group-value attribute wiring in the emitted script, got: ' + html);
   assert.ok(/data-series-value/.test(html), 'expected data-series-value attribute wiring for stacked/grouped bars, got: ' + html);
 }
@@ -667,13 +682,180 @@ function testPublishChartClientJsWiresLineAndPieClickOnLinkKey() {
   var html = getHtml();
 
   // drawLineChart and drawPieChart each gate their click wiring on a
-  // standalone "if (chart.linkKey) {" block (they have no seriesLinkKey
-  // concept at all) - anchored to end-of-line so this doesn't also match
-  // chartSelectionFor's/selectionMatches' one-line "if (chart.linkKey) {
-  // ... }" conditionals, which have trailing code after "{" on the same
-  // line and are a different thing entirely.
-  var lineOrPieGateCount = (html.match(/^\s*if \(chart\.linkKey\) \{$/gm) || []).length;
-  assert.strictEqual(lineOrPieGateCount, 2, 'expected exactly 2 standalone "if (chart.linkKey) {" gate blocks (drawLineChart + drawPieChart), got ' + lineOrPieGateCount + ' in: ' + html);
+  // standalone "if (chart.linkKey || chart.linkTo) {" block (they have no
+  // seriesLinkKey concept at all) - anchored to end-of-line so this
+  // doesn't also match chartSelectionFor's/selectionMatches' one-line "if
+  // (chart.linkKey) { ... }" conditionals, which have trailing code after
+  // "{" on the same line and are a different thing entirely.
+  var lineOrPieGateCount = (html.match(/^\s*if \(chart\.linkKey \|\| chart\.linkTo\) \{$/gm) || []).length;
+  assert.strictEqual(lineOrPieGateCount, 2, 'expected exactly 2 standalone "if (chart.linkKey || chart.linkTo) {" gate blocks (drawLineChart + drawPieChart), got ' + lineOrPieGateCount + ' in: ' + html);
+}
+
+function testPublishChartClientJsHandlesLinkToClickNavigation() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  // handleChartClick's linkTo branch is static CHART_CLIENT_JS, emitted
+  // whenever any chart exists at all - aggregationPublish has a chart but
+  // no linkTo, so this proves the branch is always present, not just
+  // conditionally included for reports that happen to use it.
+  assert.ok(/if \(chart\.linkTo\) \{/.test(html), 'expected handleChartClick\'s linkTo branch in the emitted script, got: ' + html);
+  assert.ok(/window\.open\(url, "_blank"\);/.test(html), 'expected the new-tab navigation call, got: ' + html);
+  assert.ok(/window\.location\.href = url;/.test(html), 'expected the same-tab navigation fallback, got: ' + html);
+  assert.ok(/encodeURIComponent\(chart\.linkTo\.field\)/.test(html), 'expected the query param to be built from linkTo.field, got: ' + html);
+}
+
+function testPublishLinkToRequiresNode() {
+  var result = runOne('linkToMissingNodePublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"linkTo", which requires "node" and "field"/.test(result.error), 'expected a linkTo node/field error, got: ' + result.error);
+}
+
+function testPublishLinkToRequiresField() {
+  var result = runOne('linkToMissingFieldPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"linkTo", which requires "node" and "field"/.test(result.error), 'expected a linkTo node/field error, got: ' + result.error);
+}
+
+function testPublishLinkToNewTabMustBeBoolean() {
+  var result = runOne('linkToBadNewTabPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/linkTo\.newTab "yes", which must be a boolean/.test(result.error), 'expected a linkTo.newTab type error, got: ' + result.error);
+}
+
+function testPublishLinkToCannotCombineWithLinkKey() {
+  var result = runOne('linkToWithLinkKeyPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/both "linkTo" and "linkKey"\/"seriesLinkKey"/.test(result.error), 'expected a linkTo/linkKey mutual-exclusion error, got: ' + result.error);
+}
+
+function testPublishLinkToCannotCombineWithSeriesLinkKey() {
+  var result = runOne('linkToWithSeriesLinkKeyPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/both "linkTo" and "linkKey"\/"seriesLinkKey"/.test(result.error), 'expected a linkTo/seriesLinkKey mutual-exclusion error, got: ' + result.error);
+}
+
+// The remaining linkTo checks (unknown node, wrong kind, missing
+// upsertByName, missing matching filter) all live in
+// resolveConfigLinkTargets/validateLinkToTarget, which run after
+// fetchTableRows - so these need BigQuery shimmed to get past that call,
+// but never reach the one live Drive lookup (resolveLinkToUrl), since
+// each fails at an earlier, pure check first.
+function testPublishLinkToUnknownNodeRejected() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select linkToUnknownNodePublish').nodes[0];
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/linkTo\.node "nonExistentNodeXYZ", which doesn't match any declared node/.test(result.error), 'expected an unknown-linkTo-node error, got: ' + result.error);
+}
+
+function testPublishLinkToNonPublishNodeRejected() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select linkToNonPublishNodePublish').nodes[0];
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/which is a "move" node, not "publish"/.test(result.error), 'expected a wrong-kind linkTo error, got: ' + result.error);
+}
+
+function testPublishLinkToRequiresUpsertByNameOnTarget() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select linkToSourceNoUpsertPublish').nodes[0];
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/needs target\.upsertByName: true for a stable link/.test(result.error), 'expected an upsertByName error, got: ' + result.error);
+}
+
+function testPublishLinkToRequiresMatchingFilterFieldOnTarget() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select linkToSourceNoMatchingFilterPublish').nodes[0];
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/has no filters\[\] entry for that field/.test(result.error), 'expected a missing-matching-filter error, got: ' + result.error);
+}
+
+function testPublishLinkToValidConfigProceedsPastValidation() {
+  var result = runOne('linkToSourcePublish');
+  // Same proof pattern as testPublishLinkKeyChartsProceedPastValidation:
+  // no shim in this test at all, so a config that gets all the way past
+  // both config validation and linkTo's own cross-node checks fails next
+  // at the un-shimmed BigQuery call (fetchTableRows runs before
+  // resolveConfigLinkTargets - see publish()'s ordering), not before it.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
+}
+
+function testPublishLinkToNotYetPublishedRejected() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  // No existingFilesByName entry for linkToTargetPublish's fileName - the
+  // destination has never been published, so resolveDriveTargetFileId's
+  // getFilesByName lookup comes back empty.
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select linkToSourcePublish').nodes[0];
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/hasn't been published yet/.test(result.error), 'expected a not-yet-published linkTo error, got: ' + result.error);
+  assert.strictEqual(getHtml(), null, 'expected no file to have been written when linkTo resolution fails');
+}
+
+function testPublishLinkToResolvesUrlAndEmbedsInChartPayload() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']], { 'category-detail.html': 'existing-file-id' });
+  var result = ctx.NotSoBigData.cli('run --select linkToSourcePublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var chart = extractPayload(getHtml()).charts[0];
+  assert.deepStrictEqual(chart.linkTo, { url: 'https://drive.google.com/file/d/existing-file-id/view', field: 'category', newTab: true },
+    'expected linkTo resolved to the destination\'s Drive URL with newTab defaulting to true, got: ' + JSON.stringify(chart.linkTo));
+}
+
+function testPublishLinkToNewTabFalseRespected() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']], { 'category-detail.html': 'existing-file-id' });
+  var result = ctx.NotSoBigData.cli('run --select linkToSourceNewTabFalsePublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var chart = extractPayload(getHtml()).charts[0];
+  assert.strictEqual(chart.linkTo.newTab, false, 'expected an explicit newTab: false to survive resolution, got: ' + JSON.stringify(chart.linkTo));
+}
+
+// linkTo's destination-side behavior: on load, a matching query-string
+// field pre-selects that filter's dropdown and recomputes exactly like a
+// human choosing it from the <select> would - the same activeFilters/
+// applyFilters() plumbing the dropdowns themselves already trigger. This
+// doesn't need linkTo resolved anywhere - it only depends on the
+// destination report's own filters[], exactly as a human pasting the same
+// URL by hand would trigger it too.
+function testPublishFilterClientJsAppliesMatchingQueryStringFilterOnLoad() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [
+    ['A', 'online', '10', '1'],
+    ['A', 'store', '5', '2'],
+    ['B', 'online', '20', '3']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var engine = runClientEngine(extractInlineScript(html), 2, ['category', 'channel'], '?category=A');
+
+  assert.strictEqual(engine.context.activeFilters.category, 'A', 'expected the query-string category to become the active filter, got: ' + JSON.stringify(engine.context.activeFilters));
+  assert.strictEqual(engine.filterSelects.category.value, 'A', 'expected the category <select> to reflect the query-string value, got: ' + engine.filterSelects.category.value);
+  assert.strictEqual(engine.kpiValueNodes[0].textContent, '$15.00', 'expected the KPI to already be recomputed against category=A on load (10 + 5), got: ' + engine.kpiValueNodes[0].textContent);
+}
+
+function testPublishFilterClientJsIgnoresQueryStringValueNotInFilterOptions() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [
+    ['A', 'online', '10', '1'],
+    ['B', 'online', '20', '3']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var engine = runClientEngine(extractInlineScript(html), 2, ['category', 'channel'], '?category=NotARealCategory');
+
+  assert.strictEqual(engine.context.activeFilters.category, undefined, 'expected an unmatched query-string value to be ignored, got: ' + JSON.stringify(engine.context.activeFilters));
+  assert.strictEqual(engine.kpiValueNodes[0].textContent, '', 'expected no recompute to have run at all (stub KPI values start empty), got: ' + engine.kpiValueNodes[0].textContent);
 }
 
 function testPublishFilterRequiresFieldAndLabel() {
@@ -988,7 +1170,13 @@ function extractInlineScript(html) {
 // returns an empty array, and getElementById returns null so
 // applyFilterToChart's "if (!container) { return; }" guard exits before
 // ever touching d3 (which this stub doesn't provide at all).
-function runClientEngine(scriptText, kpiCount) {
+// filterFields/locationSearch (both optional) back linkTo's destination-
+// side behavior: applyFiltersFromQueryString() reads window.location.search
+// at DOMContentLoaded time and looks up the page's own [data-filter-field]
+// <select>s, so this stub actually fires DOMContentLoaded (unlike a plain
+// noop) and exposes one fake <select> per named field for a test to
+// inspect afterwards.
+function runClientEngine(scriptText, kpiCount, filterFields, locationSearch) {
   var kpiValueNodes = [];
   var kpiCards = [];
   for (var i = 0; i < kpiCount; i += 1) {
@@ -1000,21 +1188,35 @@ function runClientEngine(scriptText, kpiCount) {
       };
     })(i);
   }
+  var filterSelects = {};
+  (filterFields || []).forEach(function (field) {
+    filterSelects[field] = {
+      value: '',
+      getAttribute: function (name) { return name === 'data-filter-field' ? field : null; },
+      addEventListener: function () {}
+    };
+  });
   var noop = function () {};
   var sandbox = {
     console: console,
+    URLSearchParams: URLSearchParams,
     document: {
-      querySelectorAll: function (selector) { return selector === '.kpi' ? kpiCards : []; },
+      querySelectorAll: function (selector) {
+        if (selector === '.kpi') { return kpiCards; }
+        if (selector === '[data-filter-field]') { return Object.keys(filterSelects).map(function (field) { return filterSelects[field]; }); }
+        return [];
+      },
       querySelector: function () { return null; },
       getElementById: function () { return null; },
-      addEventListener: noop,
+      addEventListener: function (event, handler) { if (event === 'DOMContentLoaded') { handler(); } },
       createElement: function () { return { setAttribute: noop, appendChild: noop, style: {} }; }
     }
   };
   sandbox.window = sandbox;
+  sandbox.window.location = { search: locationSearch || '' };
   vm.createContext(sandbox);
   vm.runInContext(scriptText, sandbox, { filename: 'filter-client.js' });
-  return { context: sandbox, kpiValueNodes: kpiValueNodes };
+  return { context: sandbox, kpiValueNodes: kpiValueNodes, filterSelects: filterSelects };
 }
 
 // Minimal DOM stub for TABLE_CLIENT_JS's own DOMContentLoaded-time setup -
@@ -1246,6 +1448,22 @@ module.exports = {
   testPublishChartClientJsCallsApplyHighlightOnceOnLoad: testPublishChartClientJsCallsApplyHighlightOnceOnLoad,
   testPublishChartClientJsWiresBarClickOnlyWhenInteractive: testPublishChartClientJsWiresBarClickOnlyWhenInteractive,
   testPublishChartClientJsWiresLineAndPieClickOnLinkKey: testPublishChartClientJsWiresLineAndPieClickOnLinkKey,
+  testPublishChartClientJsHandlesLinkToClickNavigation: testPublishChartClientJsHandlesLinkToClickNavigation,
+  testPublishLinkToRequiresNode: testPublishLinkToRequiresNode,
+  testPublishLinkToRequiresField: testPublishLinkToRequiresField,
+  testPublishLinkToNewTabMustBeBoolean: testPublishLinkToNewTabMustBeBoolean,
+  testPublishLinkToCannotCombineWithLinkKey: testPublishLinkToCannotCombineWithLinkKey,
+  testPublishLinkToCannotCombineWithSeriesLinkKey: testPublishLinkToCannotCombineWithSeriesLinkKey,
+  testPublishLinkToUnknownNodeRejected: testPublishLinkToUnknownNodeRejected,
+  testPublishLinkToNonPublishNodeRejected: testPublishLinkToNonPublishNodeRejected,
+  testPublishLinkToRequiresUpsertByNameOnTarget: testPublishLinkToRequiresUpsertByNameOnTarget,
+  testPublishLinkToRequiresMatchingFilterFieldOnTarget: testPublishLinkToRequiresMatchingFilterFieldOnTarget,
+  testPublishLinkToValidConfigProceedsPastValidation: testPublishLinkToValidConfigProceedsPastValidation,
+  testPublishLinkToNotYetPublishedRejected: testPublishLinkToNotYetPublishedRejected,
+  testPublishLinkToResolvesUrlAndEmbedsInChartPayload: testPublishLinkToResolvesUrlAndEmbedsInChartPayload,
+  testPublishLinkToNewTabFalseRespected: testPublishLinkToNewTabFalseRespected,
+  testPublishFilterClientJsAppliesMatchingQueryStringFilterOnLoad: testPublishFilterClientJsAppliesMatchingQueryStringFilterOnLoad,
+  testPublishFilterClientJsIgnoresQueryStringValueNotInFilterOptions: testPublishFilterClientJsIgnoresQueryStringValueNotInFilterOptions,
   testPublishFilterRequiresFieldAndLabel: testPublishFilterRequiresFieldAndLabel,
   testPublishDuplicateFilterFieldRejected: testPublishDuplicateFilterFieldRejected,
   testPublishReactsToMustBeNonEmptyArray: testPublishReactsToMustBeNonEmptyArray,
