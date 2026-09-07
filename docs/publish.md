@@ -56,6 +56,30 @@ var salesPublish = {
   `upsertByName: true` (see [docs/move.md](move.md)'s `target.upsertByName`)
   or it will pile up duplicate files in the folder on every run.
 
+### Per-block `source` override
+
+Any single `kpi`/`chart`/`table` entry can pull from a different table
+than the report's own `source.ref`, by declaring its own `source` in the
+same shape:
+
+```javascript
+kpis: [
+  { label: 'Total revenue', agg: 'sum', field: 'revenue', format: 'currency' },
+  { label: 'Refunds', agg: 'sum', field: 'amount', format: 'currency',
+    source: { type: 'ref', ref: 'refundsModel' } }   // a different table
+]
+```
+
+- `block.source.ref` must be listed in `dependsOn`, exactly like the
+  report's own `source.ref`, and must resolve to a `move`-with-`bigquery`-
+  target or `model` node — the same rule, just per block.
+- Mutually exclusive with that block's own `reactsTo`: filter recompute
+  runs entirely against the report's default row set, so a block reading
+  from elsewhere has nothing there for a filter change to recompute
+  against. A block with its own `source` simply never reacts to filters.
+- Every block sharing the same overridden `ref` fetches it once, not once
+  per block.
+
 ### `charts[]`
 
 ```javascript
@@ -327,7 +351,7 @@ tables: [
 
 ## What's not here yet
 
-`expandable`/`detail` drill-down, per-block `source` overrides, and a
-`board` tree layout are all planned but not implemented — see
+`expandable`/`detail` drill-down and a `board` tree layout are planned
+but not implemented — see
 `docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s "Future
 direction" section.

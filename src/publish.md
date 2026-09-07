@@ -294,3 +294,38 @@ path. A query-string value that doesn't match one of that filter's own
 computed `options` is silently skipped (not forced into `activeFilters`),
 so a stale or unrelated link never leaves a report stuck filtered to a
 value that matches zero rows.
+
+## Per-block `source` override
+
+`block.source` reuses `config.source`'s exact shape and validation
+(`validateBlockSource` mirrors the checks `validatePublishConfig`
+already runs on the top-level `source`, just parameterized by
+`blockType`/`blockId`/`dependsOn`), rather than inventing a second
+schema for "a ref plus a dependsOn requirement". `fetchBlockSourceRows`
+collects the *distinct* refs used across `kpis`/`charts`/`tables` before
+fetching anything, so three blocks overriding to the same node still
+issue one `Tabledata.list` call, not three - the same "don't refetch
+what you already have" instinct `resolveConfigLinkTargets`'s no-`linkTo`
+early return has, just for a different resource.
+
+`fetchBlockSourceRows` runs *before* the report's own default
+`fetchTableRows` call in `publish()`, not after - deliberately, so an
+invalid block `source.ref` (wrong node, wrong kind, not a bigquery
+location) fails at `resolvePublishSource`'s own throw, a pure/no-I/O
+check, rather than only surfacing after the default source's live
+BigQuery call already ran. Ordering the two fetches the other way would
+still be *correct*, just slower to fail on a bad block ref in a report
+whose default source is itself expensive to read.
+
+Mutually exclusive with `reactsTo` on the same block, enforced in
+`validateBlockSource`: `FILTER_CLIENT_JS`'s `filteredRowsFor` only ever
+slices the report's one default row set (`payload.rows`), so a block
+reading from a different table has nothing there for a filter change to
+recompute against - rather than teach the client-side filter engine
+about multiple row sets for a niche combination, the two are just
+declared incompatible up front. `buildReportPayload`'s three block loops
+each pick a block's own rows over the default via one `rowsForBlock`
+helper; nothing below that point (`buildChartPayload`,
+`buildRawTablePayload`, `buildAggregatedTablePayload`) needed to change,
+since they already took `rows` as a parameter rather than reaching for
+a shared closure variable.
