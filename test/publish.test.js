@@ -1,6 +1,7 @@
 // test/publish.test.js
 var assert = require('assert');
 var path = require('path');
+var vm = require('vm');
 var harness = require('./harness');
 
 function fixture(name) {
@@ -649,6 +650,179 @@ function testPublishChartClientJsWiresLineAndPieClickOnLinkKey() {
   assert.strictEqual(lineOrPieGateCount, 2, 'expected exactly 2 standalone "if (chart.linkKey) {" gate blocks (drawLineChart + drawPieChart), got ' + lineOrPieGateCount + ' in: ' + html);
 }
 
+function testPublishFilterRequiresFieldAndLabel() {
+  var result = runOne('badFilterMissingLabelPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/every filter needs "field" and "label"/.test(result.error), 'expected a filter field/label error, got: ' + result.error);
+}
+
+function testPublishDuplicateFilterFieldRejected() {
+  var result = runOne('duplicateFilterFieldPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/duplicate filter field "category"/.test(result.error), 'expected a duplicate-filter-field error, got: ' + result.error);
+}
+
+function testPublishReactsToMustBeNonEmptyArray() {
+  var result = runOne('emptyReactsToPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"reactsTo", which must be a non-empty array/.test(result.error), 'expected a reactsTo-empty-array error, got: ' + result.error);
+}
+
+function testPublishReactsToMustReferenceDeclaredFilter() {
+  var result = runOne('reactsToUndeclaredFilterPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"channel" is not a declared filter field/.test(result.error), 'expected a reactsTo-undeclared-field error, got: ' + result.error);
+}
+
+function testPublishFiltersProceedPastValidation() {
+  var result = runOne('filtersPublish');
+  // Same proof pattern as testPublishV2ChartTypesProceedPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
+}
+
+function testPublishFilterPayloadAbsentWithoutFilters() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  assert.ok(!Object.prototype.hasOwnProperty.call(payload, 'rows'), 'expected no payload.rows without filters[], got keys: ' + Object.keys(payload).join(', '));
+  assert.ok(!Object.prototype.hasOwnProperty.call(payload, 'filters'), 'expected no payload.filters without filters[], got keys: ' + Object.keys(payload).join(', '));
+  assert.ok(!Object.prototype.hasOwnProperty.call(payload, 'filterableConfig'), 'expected no payload.filterableConfig without filters[], got keys: ' + Object.keys(payload).join(', '));
+}
+
+function testPublishFilterPayloadIncludesRowsAndSortedDistinctOptions() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [
+    ['B', 'online', '10', '1'],
+    ['A', 'store', '20', '2'],
+    ['A', 'online', '5', '3']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  assert.strictEqual(payload.rows.length, 3, 'expected all 3 raw rows embedded, got: ' + JSON.stringify(payload.rows));
+
+  var categoryFilter = payload.filters.filter(function (f) { return f.field === 'category'; })[0];
+  assert.deepStrictEqual(categoryFilter.options, ['A', 'B'], 'expected sorted distinct category options, got: ' + JSON.stringify(categoryFilter));
+  var channelFilter = payload.filters.filter(function (f) { return f.field === 'channel'; })[0];
+  assert.deepStrictEqual(channelFilter.options, ['online', 'store'], 'expected sorted distinct channel options, got: ' + JSON.stringify(channelFilter));
+}
+
+function testPublishFilterableConfigOnlyIncludesReactsToBlocks() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [['A', 'online', '10', '1']]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  // filtersPublish's "Rows" kpi has no reactsTo - only "Revenue" (index 0
+  // in config.kpis) should appear.
+  assert.strictEqual(payload.filterableConfig.kpis.length, 1, 'expected only the reactsTo-bearing kpi, got: ' + JSON.stringify(payload.filterableConfig.kpis));
+  assert.strictEqual(payload.filterableConfig.kpis[0].index, 0, 'expected the Revenue kpi at its original config.kpis index 0, got: ' + JSON.stringify(payload.filterableConfig.kpis[0]));
+  assert.deepStrictEqual(payload.filterableConfig.kpis[0].config.reactsTo, ['category', 'channel']);
+
+  assert.strictEqual(payload.filterableConfig.charts.length, 1);
+  assert.strictEqual(payload.filterableConfig.charts[0].id, 'trend');
+  assert.deepStrictEqual(payload.filterableConfig.charts[0].reactsTo, ['category']);
+
+  assert.strictEqual(payload.filterableConfig.tables.length, 1);
+  assert.strictEqual(payload.filterableConfig.tables[0].id, 'orders');
+  assert.deepStrictEqual(payload.filterableConfig.tables[0].reactsTo, ['category', 'channel']);
+}
+
+function testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [['A', 'online', '10', '1']]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  var kpiIndexes = payload.filterableConfig.kpis.map(function (entry) { return entry.index; });
+  assert.strictEqual(kpiIndexes.indexOf(1), -1, 'expected the "Rows" kpi (config.kpis index 1, no reactsTo) to be absent from filterableConfig.kpis, got indexes: ' + JSON.stringify(kpiIndexes));
+}
+
+function testPublishFiltersMarkupRenderedWhenConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [
+    ['B', 'online', '10', '1'],
+    ['A', 'store', '20', '2']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/<div class="filters">/.test(html), 'expected a filters bar, got: ' + html);
+  assert.ok(/data-filter-field="category"/.test(html), 'expected a category filter select, got: ' + html);
+  assert.ok(/data-filter-field="channel"/.test(html), 'expected a channel filter select, got: ' + html);
+  assert.ok(/<option value="">All<\/option>/.test(html), 'expected an "All" default option, got: ' + html);
+  assert.ok(/<option value="A">A<\/option>/.test(html), 'expected a distinct-value option, got: ' + html);
+}
+
+function testPublishNoFiltersMarkupOrClientJsWithoutFilters() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(!/class="filters"/.test(html), 'expected no filters markup, got: ' + html);
+  assert.ok(!/function applyFilters/.test(html), 'expected no FILTER_CLIENT_JS, got: ' + html);
+  assert.ok(!/function filteredRowsFor/.test(html), 'expected no filter-engine wiring, got: ' + html);
+}
+
+function testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [['A', 'online', '10', '1']]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  ['computeAggregate', 'groupRowsBy', 'compareGroupValues', 'formatValue', 'buildChartPayload', 'buildRawTablePayload', 'buildAggregatedTablePayload', 'emptyMap', 'has'].forEach(function (name) {
+    assert.ok(new RegExp('function ' + name + '\\(').test(html), 'expected the reused function "' + name + '" verbatim in the emitted script, got: ' + html);
+  });
+}
+
+function testPublishFilterClientJsResetsHighlightSelectionOnApply() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [['A', 'online', '10', '1']]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/if \(typeof currentSelection !== "undefined"\) \{ currentSelection = null; \}/.test(html), 'expected applyFilters to reset any chart-highlight selection, got: ' + html);
+  assert.ok(/if \(typeof applyHighlight === "function"\) \{ applyHighlight\(\); \}/.test(html), 'expected applyFilters to re-run applyHighlight, got: ' + html);
+}
+
+function testPublishFilterClientJsWiresSelectChangeEvents() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [['A', 'online', '10', '1']]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/querySelectorAll\("\[data-filter-field\]"\)/.test(html), 'expected the filter-select wiring query, got: ' + html);
+  assert.ok(/select\.addEventListener\("change"/.test(html), 'expected a change listener on each filter select, got: ' + html);
+}
+
+function testPublishTableClientJsAlwaysExposesReplacerHook() {
+  // Whether or not filters[] is configured - see this plan's Task 3 note
+  // on why this is unconditional, matching CHART_CLIENT_JS's own
+  // "always-on scaffolding, opt-in behavior" precedent from the chart-
+  // interactivity phase (docs/superpowers/specs/2026-09-06-publish-chart-
+  // interactivity-design.md).
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/__PUBLISH_TABLE_REPLACERS__/.test(html), 'expected the table replacer hook regardless of filters[], got: ' + html);
+}
+
 function testPublishAggregationFixtureStillHasNoStacking() {
   // Sanity check that the plain (non-series) chart path still produces
   // {groupValue, total} data, not the series {groupValue, values} shape -
@@ -769,6 +943,97 @@ function testPublishSeriesChartHandlesSpacesWithoutCollision() {
     'expected New / Organic zero-filled to 0, got: ' + JSON.stringify(groupNew));
 }
 
+// Pulls the report's one inline <script>...</script> (the bare-tag one -
+// the D3 CDN tag always carries a "src" attribute, so this regex can't
+// match that one instead) back out so it can actually be executed, not
+// just regex-matched like every other filters[] test in this file.
+function extractInlineScript(html) {
+  var match = html.match(/<script>([\s\S]*)<\/script>/);
+  assert.ok(match, 'expected a bare inline <script> in: ' + html);
+  return match[1];
+}
+
+// Minimal browser stub - just enough surface for FILTER_CLIENT_JS/
+// CHART_CLIENT_JS/TABLE_CLIENT_JS's actual DOMContentLoaded-time and
+// applyFilters()-time DOM calls to run without throwing. Not a general
+// DOM: querySelectorAll(".kpi") is the only selector that returns
+// anything real (one stub node per kpi card, each holding the mutable
+// ".kpi-value" textContent this test asserts on) - every other selector
+// returns an empty array, and getElementById returns null so
+// applyFilterToChart's "if (!container) { return; }" guard exits before
+// ever touching d3 (which this stub doesn't provide at all).
+function runClientEngine(scriptText, kpiCount) {
+  var kpiValueNodes = [];
+  var kpiCards = [];
+  for (var i = 0; i < kpiCount; i += 1) {
+    (function (index) {
+      var valueNode = { textContent: '' };
+      kpiValueNodes[index] = valueNode;
+      kpiCards[index] = {
+        querySelector: function (selector) { return selector === '.kpi-value' ? valueNode : null; }
+      };
+    })(i);
+  }
+  var noop = function () {};
+  var sandbox = {
+    console: console,
+    document: {
+      querySelectorAll: function (selector) { return selector === '.kpi' ? kpiCards : []; },
+      querySelector: function () { return null; },
+      getElementById: function () { return null; },
+      addEventListener: noop,
+      createElement: function () { return { setAttribute: noop, appendChild: noop, style: {} }; }
+    }
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(scriptText, sandbox, { filename: 'filter-client.js' });
+  return { context: sandbox, kpiValueNodes: kpiValueNodes };
+}
+
+// Regression test for whole-branch review finding #1: every other
+// filters[] test in this file only regexes the generated HTML text and
+// never actually runs the emitted client engine, which is exactly how a
+// bug in filteredRowsFor's null-vs-empty-array return shipped past a
+// full green test suite. This one loads the real emitted <script> into a
+// vm context and drives it end to end: filter to category "A" (checking
+// the KPI actually recomputes), then reset back to "All" and confirm the
+// KPI returns to its original, full/unfiltered value - the reset path
+// that was broken (a filtered block stayed stuck on stale data forever
+// once its one active filter was cleared).
+function testPublishFilterResetRecomputesKpiBackToUnfilteredValue() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [
+    ['A', 'online', '10', '1'],
+    ['A', 'store', '5', '2'],
+    ['B', 'online', '20', '3']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var engine = runClientEngine(extractInlineScript(html), 2);
+
+  // The stub DOM's kpi-value nodes start empty (real page load fills them
+  // from server-rendered markup, which this stub doesn't parse) - one
+  // no-filters applyFilters() call reproduces the same baseline, since
+  // filteredRowsFor with nothing active now returns every row (the fix
+  // under test). "Revenue" is filtersPublish's config.kpis index 0,
+  // format currency - full unfiltered sum: 10 + 5 + 20 = 35.
+  engine.context.applyFilters();
+  assert.strictEqual(engine.kpiValueNodes[0].textContent, '$35.00', 'expected the initial unfiltered KPI value, got: ' + engine.kpiValueNodes[0].textContent);
+
+  engine.context.activeFilters.category = 'A';
+  engine.context.applyFilters();
+  assert.strictEqual(engine.kpiValueNodes[0].textContent, '$15.00', 'expected the KPI to recompute against category=A rows only (10 + 5), got: ' + engine.kpiValueNodes[0].textContent);
+
+  // Reset to "All" - what the real <select> does when its value goes
+  // back to "" (see FILTER_CLIENT_JS's change handler: "delete
+  // activeFilters[field]").
+  delete engine.context.activeFilters.category;
+  engine.context.applyFilters();
+  assert.strictEqual(engine.kpiValueNodes[0].textContent, '$35.00', 'expected the KPI to recompute back to the full unfiltered sum after resetting the filter to All, got: ' + engine.kpiValueNodes[0].textContent);
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -817,5 +1082,21 @@ module.exports = {
   testPublishChartClientJsCoercesGroupAndSeriesValuesToString: testPublishChartClientJsCoercesGroupAndSeriesValuesToString,
   testPublishChartClientJsCallsApplyHighlightOnceOnLoad: testPublishChartClientJsCallsApplyHighlightOnceOnLoad,
   testPublishChartClientJsWiresBarClickOnlyWhenInteractive: testPublishChartClientJsWiresBarClickOnlyWhenInteractive,
-  testPublishChartClientJsWiresLineAndPieClickOnLinkKey: testPublishChartClientJsWiresLineAndPieClickOnLinkKey
+  testPublishChartClientJsWiresLineAndPieClickOnLinkKey: testPublishChartClientJsWiresLineAndPieClickOnLinkKey,
+  testPublishFilterRequiresFieldAndLabel: testPublishFilterRequiresFieldAndLabel,
+  testPublishDuplicateFilterFieldRejected: testPublishDuplicateFilterFieldRejected,
+  testPublishReactsToMustBeNonEmptyArray: testPublishReactsToMustBeNonEmptyArray,
+  testPublishReactsToMustReferenceDeclaredFilter: testPublishReactsToMustReferenceDeclaredFilter,
+  testPublishFiltersProceedPastValidation: testPublishFiltersProceedPastValidation,
+  testPublishFilterPayloadAbsentWithoutFilters: testPublishFilterPayloadAbsentWithoutFilters,
+  testPublishFilterPayloadIncludesRowsAndSortedDistinctOptions: testPublishFilterPayloadIncludesRowsAndSortedDistinctOptions,
+  testPublishFilterableConfigOnlyIncludesReactsToBlocks: testPublishFilterableConfigOnlyIncludesReactsToBlocks,
+  testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured: testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured,
+  testPublishFiltersMarkupRenderedWhenConfigured: testPublishFiltersMarkupRenderedWhenConfigured,
+  testPublishNoFiltersMarkupOrClientJsWithoutFilters: testPublishNoFiltersMarkupOrClientJsWithoutFilters,
+  testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim: testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim,
+  testPublishFilterClientJsResetsHighlightSelectionOnApply: testPublishFilterClientJsResetsHighlightSelectionOnApply,
+  testPublishFilterClientJsWiresSelectChangeEvents: testPublishFilterClientJsWiresSelectChangeEvents,
+  testPublishTableClientJsAlwaysExposesReplacerHook: testPublishTableClientJsAlwaysExposesReplacerHook,
+  testPublishFilterResetRecomputesKpiBackToUnfilteredValue: testPublishFilterResetRecomputesKpiBackToUnfilteredValue
 };

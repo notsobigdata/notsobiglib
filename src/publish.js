@@ -33,6 +33,26 @@ var D3_CDN_URL = 'https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js';
 // trusted.
 var D3_CDN_INTEGRITY = 'sha512-vc58qvvBdrDR4etbxMdlTt4GBQk1qjvyORR2nrsPsFPyrs+/u5c3+1Ct6upOgdZoIl7eq6k3a1UPDSNAQi/32A==';
 
+// Shared by the kpis/charts/tables validation loops below - reactsTo,
+// when present, must be a non-empty array of field names each matching a
+// declared filters[] entry. Typo protection: publish() has no other way
+// to know a report author meant to reference a filter that doesn't
+// exist, so an undeclared field throws here rather than silently never
+// reacting to anything at report-view time.
+function validateReactsTo(blockType, blockId, reactsTo, filterFields) {
+  if (reactsTo === undefined) {
+    return;
+  }
+  if (!Array.isArray(reactsTo) || !reactsTo.length) {
+    throw new Error('publish(): ' + blockType + ' "' + blockId + '" has "reactsTo", which must be a non-empty array.');
+  }
+  reactsTo.forEach(function (field) {
+    if (!has(filterFields, field)) {
+      throw new Error('publish(): ' + blockType + ' "' + blockId + '" has "reactsTo: [' + field + ']", but "' + field + '" is not a declared filter field.');
+    }
+  });
+}
+
 // Every check a publish node's config must pass before anything is
 // fetched or written - same "throw new Error('publish(): ...')"
 // convention move()/model() already use. Field-by-field, not a schema
@@ -51,6 +71,16 @@ function validatePublishConfig(config) {
   if (config.layout && config.layout.type !== 'linear') {
     throw new Error('publish(): layout.type "' + config.layout.type + '" - only "linear" is supported.');
   }
+  var seenFilterFields = emptyMap();
+  (config.filters || []).forEach(function (filter) {
+    if (!filter.field || !filter.label) {
+      throw new Error('publish(): every filter needs "field" and "label".');
+    }
+    if (has(seenFilterFields, filter.field)) {
+      throw new Error('publish(): duplicate filter field "' + filter.field + '".');
+    }
+    seenFilterFields[filter.field] = true;
+  });
   (config.kpis || []).forEach(function (kpi) {
     if (!kpi.label || !kpi.agg) {
       throw new Error('publish(): every kpi needs "label" and "agg".');
@@ -61,6 +91,7 @@ function validatePublishConfig(config) {
     if (PUBLISH_VALUE_FORMATS.indexOf(kpi.format) === -1) {
       throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
     }
+    validateReactsTo('kpi', kpi.label, kpi.reactsTo, seenFilterFields);
   });
   var seenChartIds = emptyMap();
   (config.charts || []).forEach(function (chart) {
@@ -89,6 +120,7 @@ function validatePublishConfig(config) {
     if (chart.seriesLinkKey && !(chartType === 'bar' && chart.series)) {
       throw new Error('publish(): chart "' + chart.id + '" has "seriesLinkKey", which only "bar" charts with "series" support.');
     }
+    validateReactsTo('chart', chart.id, chart.reactsTo, seenFilterFields);
   });
   var seenTableIds = emptyMap();
   (config.tables || []).forEach(function (table) {
@@ -101,6 +133,7 @@ function validatePublishConfig(config) {
     if (!table.id || !table.title || ['raw', 'aggregated'].indexOf(table.mode) === -1) {
       throw new Error('publish(): every table needs "id", "title", and mode "raw" or "aggregated".');
     }
+    validateReactsTo('table', table.id, table.reactsTo, seenFilterFields);
     if (table.mode === 'raw') {
       if (!Array.isArray(table.columns) || !table.columns.length) {
         throw new Error('publish(): table "' + table.id + '" has mode "raw", which requires a non-empty "columns" array.');
@@ -360,6 +393,53 @@ function buildChartPayload(chart, rows) {
   return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data, linkKey: chart.linkKey };
 }
 
+// Distinct values for one filters[] field, sorted ascending as plain
+// strings - a dropdown's option list, not a plotted axis, so no need for
+// compareGroupValues' numeric-aware sort (that sort exists for chart
+// axes, this is for picking a value).
+function computeFilterOptions(rows, field) {
+  var seen = emptyMap();
+  var options = [];
+  rows.forEach(function (row) {
+    var value = row[field];
+    if (value === null || value === undefined) { return; }
+    if (!has(seen, value)) {
+      seen[value] = true;
+      options.push(value);
+    }
+  });
+  options.sort();
+  return options;
+}
+
+// The original declared config for every kpi/chart/table that opted into
+// at least one filter via reactsTo - the client needs each block's own
+// config object (agg/field/format, groupBy/metric/type/series/stacking,
+// mode/columns/groupBy/metrics/pageSize) to re-call the same build
+// functions client-side against filtered rows. A block that never opted
+// in is omitted entirely, keeping this payload section exactly as large
+// as the feature's actual footprint. kpis carry their own index into
+// config.kpis (charts/tables don't need this - they already have a
+// unique .id the DOM is keyed by) since KPI cards render with no id/data
+// attribute of their own, and DOM order is otherwise the only way to
+// find "the third KPI card" back again from the client.
+function buildFilterableConfig(config) {
+  function reactive(block) {
+    return Array.isArray(block.reactsTo) && block.reactsTo.length > 0;
+  }
+  var kpis = [];
+  (config.kpis || []).forEach(function (kpi, index) {
+    if (reactive(kpi)) {
+      kpis.push({ index: index, config: kpi });
+    }
+  });
+  return {
+    kpis: kpis,
+    charts: (config.charts || []).filter(reactive),
+    tables: (config.tables || []).filter(reactive)
+  };
+}
+
 function buildReportPayload(config, rows) {
   var kpis = (config.kpis || []).map(function (kpi) {
     var value = computeAggregate(rows, kpi.agg, kpi.field);
@@ -371,7 +451,15 @@ function buildReportPayload(config, rows) {
   var tables = (config.tables || []).map(function (table) {
     return table.mode === 'raw' ? buildRawTablePayload(table, rows) : buildAggregatedTablePayload(table, rows);
   });
-  return { kpis: kpis, charts: charts, tables: tables };
+  var payload = { kpis: kpis, charts: charts, tables: tables };
+  if (config.filters && config.filters.length) {
+    payload.rows = rows;
+    payload.filters = config.filters.map(function (filter) {
+      return { field: filter.field, label: filter.label, options: computeFilterOptions(rows, filter.field) };
+    });
+    payload.filterableConfig = buildFilterableConfig(config);
+  }
+  return payload;
 }
 
 function escapeHtml(value) {
@@ -409,7 +497,100 @@ var REPORT_CSS = [
   '.table-block th, .table-block td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); font-variant-numeric: tabular-nums; }',
   '.table-pager { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-family: var(--mono); font-size: 12px; }',
   '.table-pager button { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 8px; cursor: pointer; }',
-  '.table-pager button:disabled { color: var(--ink-soft); cursor: default; }'
+  '.table-pager button:disabled { color: var(--ink-soft); cursor: default; }',
+  '.filters { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }',
+  '.filter { font-family: var(--mono); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }',
+  '.filter select { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 6px; }'
+].join('\n');
+
+// One <select> per filters[] entry: an "All" option plus every distinct
+// value already computed server-side in payload.filters[].options (see
+// computeFilterOptions). data-filter-field is what FILTER_CLIENT_JS reads
+// back to know which row field a given <select>'s change event affects.
+function renderFiltersSection(filters) {
+  var controls = filters.map(function (filter) {
+    var optionTags = filter.options.map(function (value) {
+      return '<option value="' + escapeHtml(value) + '">' + escapeHtml(value) + '</option>';
+    }).join('');
+    return '<label class="filter">' + escapeHtml(filter.label)
+      + '<select data-filter-field="' + escapeHtml(filter.field) + '"><option value="">All</option>' + optionTags + '</select></label>';
+  }).join('');
+  return '<div class="filters">' + controls + '</div>';
+}
+
+// The exact functions filters[] needs to re-run client-side, serialized
+// once at module load (these are static function references, so this
+// only runs once no matter how many reports get generated in one run) -
+// reused verbatim rather than hand-ported, so any future change to any
+// of them is automatically correct in the browser too. See the design
+// spec's §4 for the "why toString()" rationale and its one constraint:
+// none of these nine functions may ever reference a GAS-only global
+// (BigQuery, DriveApp, Utilities, etc.) - doing so would silently break
+// filters[] only in the browser, not caught by any Node test. A named
+// function declaration's .toString() output is itself valid top-level
+// source, so no wrapping is needed - it drops straight into the
+// generated <script> as ordinary, hoisted function declarations.
+var FILTER_REUSED_FUNCTIONS_JS = [
+  emptyMap, has, computeAggregate, groupRowsBy, compareGroupValues,
+  formatValue, buildChartPayload, buildRawTablePayload, buildAggregatedTablePayload
+].map(function (fn) { return fn.toString(); }).join('\n');
+
+// The filter dropdowns' own wiring: composes every currently-active
+// (non-"All") filter with AND semantics, recomputes only the
+// kpis/charts/tables that opted in via reactsTo (payload.filterableConfig,
+// see buildFilterableConfig), and leaves everything else exactly as
+// currently rendered. Reuses FILTER_REUSED_FUNCTIONS_JS's functions and
+// CHART_CLIENT_JS/TABLE_CLIENT_JS's existing draw/pagination machinery -
+// this module never re-implements drawing or pagination itself.
+var FILTER_CLIENT_JS = [
+  'var activeFilters = emptyMap();',
+  'function filteredRowsFor(reactsTo) {',
+  '  var relevant = reactsTo.filter(function (f) { return has(activeFilters, f); });',
+  '  var rows = window.__PUBLISH_PAYLOAD__.rows;',
+  '  if (!relevant.length) { return rows; }',
+  '  return rows.filter(function (row) { return relevant.every(function (f) { return row[f] === activeFilters[f]; }); });',
+  '}',
+  'function applyFilterToKpi(entry) {',
+  '  var filteredRows = filteredRowsFor(entry.config.reactsTo);',
+  '  var value = computeAggregate(filteredRows, entry.config.agg, entry.config.field);',
+  '  var card = document.querySelectorAll(".kpi")[entry.index];',
+  '  if (card) { card.querySelector(".kpi-value").textContent = formatValue(value, entry.config.format); }',
+  '}',
+  'function applyFilterToChart(chartConfig) {',
+  '  var filteredRows = filteredRowsFor(chartConfig.reactsTo);',
+  '  var newChart = buildChartPayload(chartConfig, filteredRows);',
+  '  var container = document.getElementById("chart-" + chartConfig.id);',
+  '  if (!container) { return; }',
+  '  while (container.firstChild) { container.removeChild(container.firstChild); }',
+  '  if (typeof d3 === "undefined") { renderChartFallback(container.id, newChart); return; }',
+  '  if (newChart.type === "line") { drawLineChart(container.id, newChart); }',
+  '  else if (newChart.type === "pie") { drawPieChart(container.id, newChart); }',
+  '  else { drawBarChart(container.id, newChart); }',
+  '}',
+  'function applyFilterToTable(tableConfig) {',
+  '  var filteredRows = filteredRowsFor(tableConfig.reactsTo);',
+  '  var newTable = tableConfig.mode === "raw" ? buildRawTablePayload(tableConfig, filteredRows) : buildAggregatedTablePayload(tableConfig, filteredRows);',
+  '  var replace = window.__PUBLISH_TABLE_REPLACERS__ && window.__PUBLISH_TABLE_REPLACERS__[tableConfig.id];',
+  '  if (replace) { replace(newTable); }',
+  '}',
+  'function applyFilters() {',
+  '  var payload = window.__PUBLISH_PAYLOAD__;',
+  '  payload.filterableConfig.kpis.forEach(applyFilterToKpi);',
+  '  payload.filterableConfig.charts.forEach(applyFilterToChart);',
+  '  payload.filterableConfig.tables.forEach(applyFilterToTable);',
+  '  if (typeof currentSelection !== "undefined") { currentSelection = null; }',
+  '  if (typeof applyHighlight === "function") { applyHighlight(); }',
+  '}',
+  'document.addEventListener("DOMContentLoaded", function () {',
+  '  Array.prototype.forEach.call(document.querySelectorAll("[data-filter-field]"), function (select) {',
+  '    select.addEventListener("change", function () {',
+  '      var field = select.getAttribute("data-filter-field");',
+  '      if (select.value === "") { delete activeFilters[field]; }',
+  '      else { activeFilters[field] = select.value; }',
+  '      applyFilters();',
+  '    });',
+  '  });',
+  '});'
 ].join('\n');
 
 // Static first page (readable with zero JS, same as the KPI cards/SVG
@@ -483,6 +664,13 @@ var TABLE_CLIENT_JS = [
   '      prevBtn.disabled = page === 0;',
   '      nextBtn.disabled = page >= pageCount - 1;',
   '    }',
+  '    window.__PUBLISH_TABLE_REPLACERS__ = window.__PUBLISH_TABLE_REPLACERS__ || {};',
+  '    window.__PUBLISH_TABLE_REPLACERS__[tableId] = function (newTable) {',
+  '      table = newTable;',
+  '      page = 0;',
+  '      pageCount = Math.max(1, Math.ceil(table.rows.length / table.pageSize));',
+  '      render();',
+  '    };',
   '    prevBtn.addEventListener("click", function () { if (page > 0) { page -= 1; render(); } });',
   '    nextBtn.addEventListener("click", function () { if (page < pageCount - 1) { page += 1; render(); } });',
   '    csvBtn.addEventListener("click", function () {',
@@ -691,6 +879,7 @@ var CHART_CLIENT_JS = [
 ].join('\n');
 
 function renderReportHtml(payload, config) {
+  var filtersSection = (payload.filters && payload.filters.length) ? renderFiltersSection(payload.filters) : '';
   var kpiCards = payload.kpis.map(function (kpi) {
     return '<div class="kpi"><div class="kpi-label">' + escapeHtml(kpi.label) + '</div>'
       + '<div class="kpi-value">' + escapeHtml(kpi.formatted) + '</div></div>';
@@ -707,11 +896,14 @@ function renderReportHtml(payload, config) {
   if (payload.charts.length) {
     script += CHART_CLIENT_JS;
   }
+  if (payload.filters && payload.filters.length) {
+    script += FILTER_REUSED_FUNCTIONS_JS + FILTER_CLIENT_JS;
+  }
   var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
   return '<!doctype html><html><head><meta charset="utf-8">'
     + '<title>' + escapeHtml(config.target.fileName) + '</title>'
     + '<style>' + REPORT_CSS + '</style>' + d3Script + '</head><body>'
-    + '<main><div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections + '</main>'
+    + '<main>' + filtersSection + '<div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections + '</main>'
     + '<script>' + script + '</script>'
     + '</body></html>';
 }
