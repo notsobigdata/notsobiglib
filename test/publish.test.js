@@ -370,6 +370,39 @@ function testPublishTableHeadersSortableAndSearchInputRendered() {
   assert.ok(/<th class="table-sortable" data-col-index="1">Revenue<\/th>/.test(section), 'expected a sortable "Revenue" header in: ' + section);
 }
 
+function testPublishTableDetailToggleRenderedOnlyWhenConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [['A', 'o1', '10'], ['B', 'o2', '5']]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var sectionMatch = html.match(/<section class="table-block" data-table-id="by_category_table">[\s\S]*?<\/section>/);
+  assert.ok(sectionMatch, 'expected the by_category_table section in: ' + html);
+  var section = sectionMatch[0];
+  assert.ok(/class="table-detail-toggle"/.test(section), 'expected a detail toggle button, got: ' + section);
+  assert.ok(/data-group-value="A"/.test(section), 'expected the toggle to carry the row\'s raw groupBy value, got: ' + section);
+}
+
+function testPublishNoTableDetailToggleWithoutDetailConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(!/<button[^>]*class="table-detail-toggle"/.test(html), 'expected no detail toggle button markup without detail configured, got: ' + html);
+}
+
+function testPublishTableClientJsOpensDetailModalOnToggleClick() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [['A', 'o1', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/table\.detail/.test(html), 'expected TABLE_CLIENT_JS to reference table.detail, got: ' + html);
+  assert.ok(/openDetailModal\(table\.title/.test(html), 'expected the toggle handler to call openDetailModal, got: ' + html);
+}
+
 function testPublishRawTableRendersFirstPageAndEmbedsFullData() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [
@@ -1393,6 +1426,7 @@ function runTableClientEngine(scriptText, columnCount) {
     addEventListener: function (event, handler) { if (event === 'input') { searchOnInput = handler; } },
     type: function (value) { this.value = value; searchOnInput(); }
   };
+  var sectionClickHandler = null;
   var section = {
     getAttribute: function (name) { return name === 'data-table-id' ? 'recent_orders' : null; },
     querySelector: function (selector) {
@@ -1404,7 +1438,8 @@ function runTableClientEngine(scriptText, columnCount) {
       if (selector === '.table-search') { return searchInput; }
       return null;
     },
-    querySelectorAll: function (selector) { return selector === '.table-sortable' ? headerCells : []; }
+    querySelectorAll: function (selector) { return selector === '.table-sortable' ? headerCells : []; },
+    addEventListener: function (event, handler) { if (event === 'click') { sectionClickHandler = handler; } }
   };
   var lastBlobParts = null;
   var sandbox = {
@@ -1623,6 +1658,9 @@ module.exports = {
   testPublishTableClientJsAlwaysExposesReplacerHook: testPublishTableClientJsAlwaysExposesReplacerHook,
   testPublishFilterResetRecomputesKpiBackToUnfilteredValue: testPublishFilterResetRecomputesKpiBackToUnfilteredValue,
   testPublishTableHeadersSortableAndSearchInputRendered: testPublishTableHeadersSortableAndSearchInputRendered,
+  testPublishTableDetailToggleRenderedOnlyWhenConfigured: testPublishTableDetailToggleRenderedOnlyWhenConfigured,
+  testPublishNoTableDetailToggleWithoutDetailConfigured: testPublishNoTableDetailToggleWithoutDetailConfigured,
+  testPublishTableClientJsOpensDetailModalOnToggleClick: testPublishTableClientJsOpensDetailModalOnToggleClick,
   testPublishTableClientJsSortsCurrencyColumnNumerically: testPublishTableClientJsSortsCurrencyColumnNumerically,
   testPublishTableClientJsSearchNarrowsRowsAndCsvExport: testPublishTableClientJsSearchNarrowsRowsAndCsvExport
 };

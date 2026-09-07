@@ -4700,7 +4700,6 @@ var NotSoBigData = (function () {
     '.filters { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }',
     '.filter { font-family: var(--mono); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }',
     '.filter select { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 6px; }',
-    '.table-detail-toggle { font-family: var(--mono); font-size: 12px; background: none; border: none; cursor: pointer; padding: 0 4px; }',
     '.detail-modal-backdrop { position: fixed; inset: 0; background: rgba(31, 36, 33, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }',
     '.detail-modal { background: var(--paper); border: 1px solid var(--paper-line); padding: 16px; max-width: 90vw; max-height: 80vh; overflow: auto; }',
     '.detail-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }',
@@ -4709,6 +4708,10 @@ var NotSoBigData = (function () {
     '.detail-modal table { border-collapse: collapse; font-family: var(--mono); font-size: 12px; }',
     '.detail-modal th, .detail-modal td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); }'
   ].join('\n');
+
+  // CSS for table detail toggle button, only emitted when detail is configured
+  // on at least one table or chart.
+  var TABLE_DETAIL_CSS = '.table-detail-toggle { font-family: var(--mono); font-size: 12px; background: none; border: none; cursor: pointer; padding: 0 4px; }';
 
   // One <select> per filters[] entry: an "All" option plus every distinct
   // value already computed server-side in payload.filters[].options (see
@@ -4893,6 +4896,33 @@ var NotSoBigData = (function () {
     'document.addEventListener("keydown", function (event) { if (event.key === "Escape") { closeDetailModal(); } });'
   ].join('\n');
 
+  // Table detail toggle button creation and handler, wired inside TABLE_CLIENT_JS's
+  // render() forEach and per-section closure when hasDetail is true, so they read the
+  // closure's fresh `table` variable after a reactsTo filter recompute.
+  var TABLE_DETAIL_RENDER_JS = [
+    '        if (table.detail) {',
+    '          var detailTd = document.createElement("td");',
+    '          var toggle = document.createElement("button");',
+    '          toggle.type = "button";',
+    '          toggle.className = "table-detail-toggle";',
+    '          toggle.textContent = "\\u25B8";',
+    '          toggle.setAttribute("data-group-value", row[0]);',
+    '          detailTd.appendChild(toggle);',
+    '          tr.appendChild(detailTd);',
+    '        }'
+  ].join('\n');
+
+  var TABLE_DETAIL_TOGGLE_HANDLER_JS = [
+    '    section.addEventListener("click", function (event) {',
+    '      var toggle = event.target.closest && event.target.closest(".table-detail-toggle");',
+    '      if (!toggle || !table.detail) { return; }',
+    '      var groupValue = toggle.getAttribute("data-group-value");',
+    '      var matching = table.detail.rows.filter(function (row) { return row[table.detail.groupBy] === groupValue; });',
+    '      var built = buildRawTablePayload({ columns: table.detail.columns }, matching);',
+    '      openDetailModal(table.title + ": " + groupValue, built.columns, built.rows);',
+    '    });'
+  ].join('\n');
+
   // Static first page (readable with zero JS, same as the KPI cards/SVG
   // chart above) plus inert-without-JS pager controls. table.rows already
   // holds every row, pre-formatted (see buildRawTablePayload/
@@ -4905,13 +4935,15 @@ var NotSoBigData = (function () {
     var headerCells = table.columns.map(function (column, index) {
       return '<th class="table-sortable" data-col-index="' + index + '">' + escapeHtml(column.label) + '</th>';
     }).join('');
+    var detailHeaderCell = table.detail ? '<th></th>' : '';
     var bodyRows = firstPageRows.map(function (row) {
-      return '<tr>' + row.map(function (cell) { return '<td>' + escapeHtml(cell) + '</td>'; }).join('') + '</tr>';
+      var detailCell = table.detail ? '<td><button type="button" class="table-detail-toggle" data-group-value="' + escapeHtml(row[0]) + '">▸</button></td>' : '';
+      return '<tr>' + detailCell + row.map(function (cell) { return '<td>' + escapeHtml(cell) + '</td>'; }).join('') + '</tr>';
     }).join('');
     return '<section class="table-block" data-table-id="' + escapeHtml(table.id) + '">'
       + '<h2>' + escapeHtml(table.title) + '</h2>'
       + '<input type="text" class="table-search" placeholder="Search...">'
-      + '<table><thead><tr>' + headerCells + '</tr></thead><tbody>' + bodyRows + '</tbody></table>'
+      + '<table><thead><tr>' + detailHeaderCell + headerCells + '</tr></thead><tbody>' + bodyRows + '</tbody></table>'
       + '<div class="table-pager">'
       + '<button type="button" class="table-prev" disabled>Previous</button>'
       + '<span class="table-page-label">Page 1 of ' + pageCount + '</span>'
@@ -4997,6 +5029,16 @@ var NotSoBigData = (function () {
     '      var start = page * table.pageSize;',
     '      visible.slice(start, start + table.pageSize).forEach(function (row) {',
     '        var tr = document.createElement("tr");',
+    '        if (table.detail) {',
+    '          var detailTd = document.createElement("td");',
+    '          var toggle = document.createElement("button");',
+    '          toggle.type = "button";',
+    '          toggle.className = "table-detail-toggle";',
+    '          toggle.textContent = "\\u25B8";',
+    '          toggle.setAttribute("data-group-value", row[0]);',
+    '          detailTd.appendChild(toggle);',
+    '          tr.appendChild(detailTd);',
+    '        }',
     '        row.forEach(function (cell) {',
     '          var td = document.createElement("td");',
     '          td.textContent = cell;',
@@ -5053,9 +5095,7 @@ var NotSoBigData = (function () {
     '      a.click();',
     '      document.body.removeChild(a);',
     '      URL.revokeObjectURL(url);',
-    '    });',
-    '  });',
-    '});'
+    '    });'
   ].join('\n');
 
   // Client-side chart draw dispatch, mirroring TABLE_PAGINATION_JS's
@@ -5266,6 +5306,10 @@ var NotSoBigData = (function () {
     var script = 'window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';';
     if (payload.tables.length) {
       script += TABLE_CLIENT_JS;
+      if (hasDetail) {
+        script += TABLE_DETAIL_TOGGLE_HANDLER_JS;
+      }
+      script += '\n  });\n});';
     }
     if (payload.charts.length) {
       script += CHART_CLIENT_JS;
@@ -5279,9 +5323,10 @@ var NotSoBigData = (function () {
       script += DETAIL_CLIENT_JS;
     }
     var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
+    var css = REPORT_CSS + (hasDetail ? TABLE_DETAIL_CSS : '');
     return '<!doctype html><html><head><meta charset="utf-8">'
       + '<title>' + escapeHtml(config.target.fileName) + '</title>'
-      + '<style>' + REPORT_CSS + '</style>' + d3Script + '</head><body>'
+      + '<style>' + css + '</style>' + d3Script + '</head><body>'
       + '<main>' + filtersSection + '<div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections + '</main>'
       + '<script>' + script + '</script>'
       + '</body></html>';
