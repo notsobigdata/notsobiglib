@@ -329,3 +329,44 @@ helper; nothing below that point (`buildChartPayload`,
 `buildRawTablePayload`, `buildAggregatedTablePayload`) needed to change,
 since they already took `rows` as a parameter rather than reaching for
 a shared closure variable.
+
+## Detail drill-down
+
+`withDetail` — the helper that computes which raw rows belong to a clicked
+group (a chart value, or a table aggregation row) — lives as a plain JS
+function in both the server-side `buildReportPayload` step and the
+client-side recompute path, mirroring `buildChartPayload`'s own twin lives
+in `FILTER_REUSED_FUNCTIONS_JS`. A filtered report's modal always shows the
+raw rows *behind the currently-active filter state*, not a snapshot from
+generation time — if a human clicks a group while a filter is active, the
+modal's "show 5 matching orders" count reflects that filter, and if they
+change the filter afterward, the modal updates too. This requires
+`withDetail` to be reserialized into the client script just like
+`buildChartPayload` is, so both functions stay pure (zero GAS-only APIs)
+and a future change to the filtering logic automatically propagates to
+both paths with nothing to remember to keep in sync.
+
+`DETAIL_REUSED_FUNCTIONS_JS` is a separate, tiny module from
+`FILTER_REUSED_FUNCTIONS_JS` (containing `buildChartPayload` and friends)
+because the two sets of functions are independent: a report with detail
+drill-down and no filters never needs `FILTER_REUSED_FUNCTIONS_JS` at all,
+just `DETAIL_REUSED_FUNCTIONS_JS`. If we had merged them into one bundle,
+every report with detail would pay for `buildChartPayload`'s serialization
+even if filters weren't declared — and vice versa, every filtered report
+with no detail would carry `withDetail` it never uses. Keeping them separate
+means `buildReportHtml` conditionally includes each module only when needed,
+the same way it gates `TABLE_CLIENT_JS` on `tables[]` existing.
+
+The table-detail click listener (the expand-row toggle) lives inside
+`TABLE_CLIENT_JS`'s existing per-section `forEach` closure, not in a
+separate global delegated listener, for the same reason the "Export CSV"
+button does: it already has `table`/`tableId`/`detail` in scope, and it
+reuses the pagination state closure without risking desyncs if a filter
+recomputes mid-view. When `FILTER_CLIENT_JS` runs `__PUBLISH_TABLE_REPLACERS__[tableId](...)`
+to swap in a newly-filtered table, the closure's `table` variable updates
+automatically. If the detail modal were listening globally via
+`document.addEventListener('click', ...)`, it would have to look up the
+table's current config from `window.__PUBLISH_PAYLOAD__.tables` — but that
+would show a stale copy if a filter just ran and swapped `payload.tables`
+with newly-filtered rows. One shared closure, one click handler holding the
+live reference, is the only version that stays in sync.
