@@ -878,6 +878,58 @@ function testPublishBlockSourceOverrideFetchesFromItsOwnRef() {
   assert.strictEqual(table.rows.length, 2, 'expected the overridden table to hold the secondary table\'s 2 rows, got: ' + JSON.stringify(table.rows));
 }
 
+function testPublishKpiDetailRejected() {
+  var result = runOne('kpiWithDetailPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/kpi "Total revenue" has "detail", which only "chart" and "table" support/.test(result.error), 'expected a kpi-detail-unsupported error, got: ' + result.error);
+}
+
+function testPublishDetailRequiresNonEmptyColumns() {
+  var result = runOne('detailEmptyColumnsPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"detail", which must be \{ columns: \[\.\.\.\] \} with a non-empty "columns" array/.test(result.error), 'expected a detail-columns error, got: ' + result.error);
+}
+
+function testPublishDetailColumnRequiresField() {
+  var result = runOne('detailColumnMissingFieldPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/has a detail column missing "field"/.test(result.error), 'expected a detail-column-field error, got: ' + result.error);
+}
+
+function testPublishDetailColumnFormatMustBeKnownEnum() {
+  var result = runOne('detailColumnBadFormatPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/detail column "amount" has format "percent" - expected one of string, currency, integer, decimal/.test(result.error), 'expected a detail-column-format error, got: ' + result.error);
+}
+
+function testPublishDetailOnRawTableRejected() {
+  var result = runOne('detailOnRawTablePublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/table "raw_with_detail" has "detail", which only "aggregated" tables support/.test(result.error), 'expected a detail-on-raw-table error, got: ' + result.error);
+}
+
+function testPublishChartDetailCannotCombineWithLinkKey() {
+  var result = runOne('chartDetailWithLinkKeyPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/both "detail" and "linkKey"\/"seriesLinkKey" - these are mutually exclusive/.test(result.error), 'expected a detail/linkKey mutual-exclusion error, got: ' + result.error);
+}
+
+function testPublishChartDetailCannotCombineWithLinkTo() {
+  var result = runOne('chartDetailWithLinkToPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/both "detail" and "linkTo" - these are mutually exclusive/.test(result.error), 'expected a detail/linkTo mutual-exclusion error, got: ' + result.error);
+}
+
+function testPublishValidDetailProceedsPastValidation() {
+  var result = runOne('detailPublish');
+  // Same proof pattern as testPublishValidRefProceedsPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
+}
+
 function testPublishFilterRequiresFieldAndLabel() {
   var result = runOne('badFilterMissingLabelPublish');
   assert.strictEqual(result.status, 'failed');
@@ -1486,6 +1538,14 @@ module.exports = {
   testPublishBlockSourceUnknownRefRejected: testPublishBlockSourceUnknownRefRejected,
   testPublishBlockSourceCannotCombineWithReactsTo: testPublishBlockSourceCannotCombineWithReactsTo,
   testPublishBlockSourceOverrideFetchesFromItsOwnRef: testPublishBlockSourceOverrideFetchesFromItsOwnRef,
+  testPublishKpiDetailRejected: testPublishKpiDetailRejected,
+  testPublishDetailRequiresNonEmptyColumns: testPublishDetailRequiresNonEmptyColumns,
+  testPublishDetailColumnRequiresField: testPublishDetailColumnRequiresField,
+  testPublishDetailColumnFormatMustBeKnownEnum: testPublishDetailColumnFormatMustBeKnownEnum,
+  testPublishDetailOnRawTableRejected: testPublishDetailOnRawTableRejected,
+  testPublishChartDetailCannotCombineWithLinkKey: testPublishChartDetailCannotCombineWithLinkKey,
+  testPublishChartDetailCannotCombineWithLinkTo: testPublishChartDetailCannotCombineWithLinkTo,
+  testPublishValidDetailProceedsPastValidation: testPublishValidDetailProceedsPastValidation,
   testPublishFilterRequiresFieldAndLabel: testPublishFilterRequiresFieldAndLabel,
   testPublishDuplicateFilterFieldRejected: testPublishDuplicateFilterFieldRejected,
   testPublishReactsToMustBeNonEmptyArray: testPublishReactsToMustBeNonEmptyArray,

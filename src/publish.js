@@ -75,6 +75,28 @@ function validateBlockSource(blockType, blockId, block, dependsOn) {
   }
 }
 
+// A kpi/chart/table's own "detail" drill-down config - { columns: [...] },
+// same column shape as a raw table's own columns (field/label/format).
+// Shape-only check; the "which block types may have detail at all" rule
+// (charts always, aggregated tables only, never kpis) is enforced at
+// each call site below since the restriction differs per block type.
+function validateDetail(blockType, blockId, detail) {
+  if (detail === undefined) {
+    return;
+  }
+  if (!Array.isArray(detail.columns) || !detail.columns.length) {
+    throw new Error('publish(): ' + blockType + ' "' + blockId + '" has "detail", which must be { columns: [...] } with a non-empty "columns" array.');
+  }
+  detail.columns.forEach(function (column) {
+    if (!column.field) {
+      throw new Error('publish(): ' + blockType + ' "' + blockId + '" has a detail column missing "field".');
+    }
+    if (column.format && PUBLISH_VALUE_FORMATS.indexOf(column.format) === -1) {
+      throw new Error('publish(): ' + blockType + ' "' + blockId + '" detail column "' + column.field + '" has format "' + column.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
+    }
+  });
+}
+
 // Every check a publish node's config must pass before anything is
 // fetched or written - same "throw new Error('publish(): ...')"
 // convention move()/model() already use. Field-by-field, not a schema
@@ -115,6 +137,9 @@ function validatePublishConfig(config) {
     }
     validateReactsTo('kpi', kpi.label, kpi.reactsTo, seenFilterFields);
     validateBlockSource('kpi', kpi.label, kpi, config.dependsOn);
+    if (kpi.detail) {
+      throw new Error('publish(): kpi "' + kpi.label + '" has "detail", which only "chart" and "table" support.');
+    }
   });
   var seenChartIds = emptyMap();
   (config.charts || []).forEach(function (chart) {
@@ -154,6 +179,15 @@ function validatePublishConfig(config) {
         throw new Error('publish(): chart "' + chart.id + '" has both "linkTo" and "linkKey"/"seriesLinkKey" - these are mutually exclusive.');
       }
     }
+    if (chart.detail) {
+      if (chart.linkKey || chart.seriesLinkKey) {
+        throw new Error('publish(): chart "' + chart.id + '" has both "detail" and "linkKey"/"seriesLinkKey" - these are mutually exclusive.');
+      }
+      if (chart.linkTo) {
+        throw new Error('publish(): chart "' + chart.id + '" has both "detail" and "linkTo" - these are mutually exclusive.');
+      }
+    }
+    validateDetail('chart', chart.id, chart.detail);
     validateReactsTo('chart', chart.id, chart.reactsTo, seenFilterFields);
     validateBlockSource('chart', chart.id, chart, config.dependsOn);
   });
@@ -170,6 +204,10 @@ function validatePublishConfig(config) {
     }
     validateReactsTo('table', table.id, table.reactsTo, seenFilterFields);
     validateBlockSource('table', table.id, table, config.dependsOn);
+    if (table.detail && table.mode !== 'aggregated') {
+      throw new Error('publish(): table "' + table.id + '" has "detail", which only "aggregated" tables support.');
+    }
+    validateDetail('table', table.id, table.detail);
     if (table.mode === 'raw') {
       if (!Array.isArray(table.columns) || !table.columns.length) {
         throw new Error('publish(): table "' + table.id + '" has mode "raw", which requires a non-empty "columns" array.');
