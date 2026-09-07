@@ -4747,7 +4747,7 @@ var NotSoBigData = (function () {
   // reused verbatim rather than hand-ported, so any future change to any
   // of them is automatically correct in the browser too. See the design
   // spec's §4 for the "why toString()" rationale and its one constraint:
-  // none of these nine functions may ever reference a GAS-only global
+  // none of these ten functions may ever reference a GAS-only global
   // (BigQuery, DriveApp, Utilities, etc.) - doing so would silently break
   // filters[] only in the browser, not caught by any Node test. A named
   // function declaration's .toString() output is itself valid top-level

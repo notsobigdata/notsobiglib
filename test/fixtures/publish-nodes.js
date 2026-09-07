@@ -713,3 +713,27 @@ var seriesChartWithDetailPublish = {
   charts: [{ id: 'by_category_channel', type: 'bar', title: 'By category and channel', groupBy: 'category', series: 'channel',
     metric: { agg: 'sum', field: 'revenue' }, detail: { columns: [{ field: 'revenue', format: 'currency' }] } }]
 };
+
+// Combines filters[] + reactsTo + detail on both a table and a chart -
+// the one combination none of the fixtures above exercise, needed to prove
+// the modal reflects the currently-active filter rather than a stale
+// snapshot (design spec §3's headline requirement). reactsTo names
+// "channel", a field that is NOT the groupBy - so filtering by channel
+// narrows which rows fall into a given category group without changing
+// which groups exist, exactly the scenario that would go stale if
+// withDetail's rows were snapshotted once at generation time instead of
+// recomputed against filteredRowsFor's current result.
+var filtersWithDetailPublish = {
+  kind: 'publish',
+  name: 'filtersWithDetailPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'filters-with-detail.html' },
+  filters: [{ field: 'channel', label: 'Channel' }],
+  charts: [{ id: 'by_category_chart', type: 'bar', title: 'By category', groupBy: 'category',
+    metric: { agg: 'sum', field: 'revenue' }, reactsTo: ['channel'],
+    detail: { columns: [{ field: 'order_id', label: 'Order' }, { field: 'revenue', label: 'Revenue', format: 'currency' }] } }],
+  tables: [{ id: 'by_category_table', title: 'By category', mode: 'aggregated', groupBy: 'category',
+    metrics: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }], reactsTo: ['channel'],
+    detail: { columns: [{ field: 'order_id', label: 'Order' }, { field: 'revenue', label: 'Revenue', format: 'currency' }] } }]
+};

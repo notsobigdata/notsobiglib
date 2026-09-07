@@ -1435,6 +1435,31 @@ function runClientEngine(scriptText, kpiCount, filterFields, locationSearch) {
   return { context: sandbox, kpiValueNodes: kpiValueNodes, filterSelects: filterSelects };
 }
 
+// A generic createElement stub good enough for openDetailModal's real DOM
+// building (div/h3/button/table/thead/tbody/th/td, chained via real
+// appendChild calls) - unlike the old leaf-only "{ textContent: '' }"
+// stub, every node here tracks its own childNodes/parentNode so a test can
+// walk the actual tree openDetailModal built, the same way a real browser
+// would render it. 'tr' keeps its pre-existing "_cells" alias (just the
+// same childNodes array under an older name) so TABLE_CLIENT_JS's own
+// row-rendering tests (bodyRows(), below) keep working unchanged.
+function makeStubElement(tag) {
+  var attributes = {};
+  var el = {
+    tagName: tag,
+    childNodes: [],
+    className: '', id: '', textContent: '', type: '',
+    parentNode: null,
+    appendChild: function (child) { el.childNodes.push(child); child.parentNode = el; return child; },
+    removeChild: function (child) { var i = el.childNodes.indexOf(child); if (i !== -1) { el.childNodes.splice(i, 1); } child.parentNode = null; },
+    addEventListener: function (event, handler) { el._listeners = el._listeners || {}; el._listeners[event] = handler; },
+    setAttribute: function (name, value) { attributes[name] = String(value); },
+    getAttribute: function (name) { return Object.prototype.hasOwnProperty.call(attributes, name) ? attributes[name] : null; }
+  };
+  if (tag === 'tr') { el._cells = el.childNodes; }
+  return el;
+}
+
 // Minimal DOM stub for TABLE_CLIENT_JS's own DOMContentLoaded-time setup -
 // unlike runClientEngine above (which never fires DOMContentLoaded, since
 // FILTER_CLIENT_JS's applyFilters() is invoked directly), TABLE_CLIENT_JS's
@@ -1443,8 +1468,15 @@ function runClientEngine(scriptText, kpiCount, filterFields, locationSearch) {
 // handler immediately. Captures just enough of one .table-block section
 // (tbody rows as plain string arrays, the sortable <th>s, the search input,
 // the CSV button) to drive it exactly the way a browser click/keystroke
-// would.
-function runTableClientEngine(scriptText, columnCount) {
+// would. tableId defaults to 'recent_orders' (every pre-existing call site's
+// fixture uses that id) - a test driving a different fixture's table passes
+// its own id explicitly. document.body/getElementById track real appended
+// nodes (by id) so openDetailModal/closeDetailModal - real DOM calls, not
+// stubbed away - actually work; window.location/URLSearchParams are here
+// too since FILTER_CLIENT_JS's DOMContentLoaded listener (present whenever
+// the emitted script also has filters[]) unconditionally calls
+// applyFiltersFromQueryString() on load.
+function runTableClientEngine(scriptText, columnCount, tableId) {
   var headerCells = [];
   for (var i = 0; i < columnCount; i += 1) {
     (function (index) {
@@ -1483,7 +1515,7 @@ function runTableClientEngine(scriptText, columnCount) {
   };
   var sectionClickHandler = null;
   var section = {
-    getAttribute: function (name) { return name === 'data-table-id' ? 'recent_orders' : null; },
+    getAttribute: function (name) { return name === 'data-table-id' ? (tableId || 'recent_orders') : null; },
     querySelector: function (selector) {
       if (selector === 'tbody') { return tbody; }
       if (selector === '.table-prev') { return prevBtn; }
@@ -1497,32 +1529,69 @@ function runTableClientEngine(scriptText, columnCount) {
     addEventListener: function (event, handler) { if (event === 'click') { sectionClickHandler = handler; } }
   };
   var lastBlobParts = null;
+  var bodyChildren = [];
+  var body = {
+    appendChild: function (child) { child.parentNode = body; bodyChildren.push(child); },
+    removeChild: function (child) { var i = bodyChildren.indexOf(child); if (i !== -1) { bodyChildren.splice(i, 1); } child.parentNode = null; }
+  };
   var sandbox = {
     console: console,
     Blob: function (parts) { lastBlobParts = parts; return { parts: parts }; },
     URL: { createObjectURL: function () { return 'blob://fake'; }, revokeObjectURL: function () {} },
+    URLSearchParams: URLSearchParams,
     document: {
       querySelectorAll: function (selector) { return selector === '.table-block' ? [section] : []; },
       querySelector: function () { return null; },
-      getElementById: function () { return null; },
+      getElementById: function (id) { return bodyChildren.filter(function (el) { return el.id === id; })[0] || null; },
       addEventListener: function (event, handler) { if (event === 'DOMContentLoaded') { handler(); } },
       createElement: function (tag) {
-        if (tag === 'tr') { var cells = []; return { appendChild: function (td) { cells.push(td); }, _cells: cells }; }
         if (tag === 'a') { return { setAttribute: function () {}, click: function () {}, style: {} }; }
-        return { textContent: '' };
+        return makeStubElement(tag);
       },
-      body: { appendChild: function () {}, removeChild: function () {} }
+      body: body
     }
   };
   sandbox.window = sandbox;
+  sandbox.window.location = { search: '' };
   vm.createContext(sandbox);
   vm.runInContext(scriptText, sandbox, { filename: 'table-client.js' });
   return {
+    context: sandbox,
     clickHeader: function (index) { headerCells[index].click(); },
     search: function (value) { searchInput.type(value); },
     bodyRows: function () { return tbodyChildren.map(function (tr) { return tr._cells.map(function (td) { return td.textContent; }); }); },
     exportedCsv: function () { lastBlobParts = null; csvBtn.click(); return lastBlobParts[0]; },
-    pageLabel: function () { return pageLabel.textContent; }
+    pageLabel: function () { return pageLabel.textContent; },
+    // Drives the real click-delegation code in TABLE_DETAIL_TOGGLE_HANDLER_JS
+    // (event.target.closest(".table-detail-toggle")) with a synthetic event
+    // whose target is a minimal-but-real stub supporting .closest() - not a
+    // shortcut that calls some inner function directly, so a break in the
+    // actual delegation logic (e.g. the ".table-detail-toggle" selector
+    // typo'd, or the "!table.detail" guard reversed) fails this the same
+    // way it would fail in a real browser.
+    clickDetailToggle: function (groupValue) {
+      if (!sectionClickHandler) { throw new Error('no click handler registered on the table-block section - was "detail" configured on this table?'); }
+      var toggle = { getAttribute: function (name) { return name === 'data-group-value' ? groupValue : null; } };
+      var eventTarget = { closest: function (selector) { return selector === '.table-detail-toggle' ? toggle : null; } };
+      sectionClickHandler({ target: eventTarget });
+    },
+    // Walks the real DOM tree openDetailModal built (via the createElement/
+    // appendChild stub above) rather than re-deriving the modal's content
+    // any other way - null if no modal is currently open.
+    modalContents: function () {
+      var modal = bodyChildren.filter(function (el) { return el.id === 'publish-detail-modal'; })[0];
+      if (!modal) { return null; }
+      var box = modal.childNodes[0];
+      var header = box.childNodes[0];
+      var modalTable = box.childNodes[1];
+      var headRow = modalTable.childNodes[0].childNodes[0];
+      var modalTbody = modalTable.childNodes[1];
+      return {
+        title: header.childNodes[0].textContent,
+        headers: headRow.childNodes.map(function (th) { return th.textContent; }),
+        rows: modalTbody.childNodes.map(function (tr) { return tr.childNodes.map(function (td) { return td.textContent; }); })
+      };
+    }
   };
 }
 
@@ -1615,6 +1684,57 @@ function testPublishFilterResetRecomputesKpiBackToUnfilteredValue() {
   delete engine.context.activeFilters.category;
   engine.context.applyFilters();
   assert.strictEqual(engine.kpiValueNodes[0].textContent, '$35.00', 'expected the KPI to recompute back to the full unfiltered sum after resetting the filter to All, got: ' + engine.kpiValueNodes[0].textContent);
+}
+
+// Whole-branch review findings #1+#2: every other "detail" test in this
+// file either regexes the emitted <script>'s source text or (Task 2's
+// payload tests) inspects buildReportPayload's output directly - none of
+// them actually click anything, and none combine "detail" with
+// filters[]/reactsTo, so the feature's own headline requirement (the modal
+// reflects the currently-active filter, not a stale snapshot - design
+// spec §3) had zero automated proof. This drives the real emitted <script>
+// end to end: click the aggregated table's detail toggle for group "A"
+// (2 matching rows, no filter active yet), change the active "channel"
+// filter to "store" through the real FILTER_CLIENT_JS machinery (the same
+// way testPublishFilterResetRecomputesKpiBackToUnfilteredValue does),
+// click the same toggle again, and confirm the modal now shows only the
+// one row whose channel actually is "store" - proving withDetail's rows
+// come from the block's *current* (filtered) row set, not a snapshot
+// taken at generation time.
+function testPublishDetailToggleReflectsActiveFilterNotStaleSnapshot() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'order_id'], [
+    ['A', 'online', '10', 'o1'],
+    ['A', 'store', '20', 'o2'],
+    ['B', 'online', '5', 'o3']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select filtersWithDetailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var engine = runTableClientEngine(extractInlineScript(html), 2, 'by_category_table');
+
+  assert.strictEqual(engine.modalContents(), null, 'expected no modal open before any click');
+
+  engine.clickDetailToggle('A');
+  var beforeFilter = engine.modalContents();
+  assert.ok(beforeFilter, 'expected the toggle click to open a modal');
+  assert.strictEqual(beforeFilter.title, 'By category: A', 'expected the modal title to name the clicked group, got: ' + JSON.stringify(beforeFilter));
+  assert.deepStrictEqual(beforeFilter.headers, ['Order', 'Revenue'], 'expected the detail.columns labels as headers, got: ' + JSON.stringify(beforeFilter));
+  assert.deepStrictEqual(beforeFilter.rows, [['o1', '$10.00'], ['o2', '$20.00']], 'expected both category-A rows (channel filter not yet active), got: ' + JSON.stringify(beforeFilter));
+
+  // Same mechanism testPublishFilterResetRecomputesKpiBackToUnfilteredValue
+  // drives a filter change through: mutate activeFilters directly (what a
+  // real <select>'s change handler does) and call the real applyFilters(),
+  // which recomputes the table via buildAggregatedTablePayload/withDetail
+  // and swaps it into TABLE_CLIENT_JS's closure via
+  // __PUBLISH_TABLE_REPLACERS__ - the exact "hasFilters && hasDetail"
+  // code path the whole-branch review flagged as untested.
+  engine.context.activeFilters.channel = 'store';
+  engine.context.applyFilters();
+
+  engine.clickDetailToggle('A');
+  var afterFilter = engine.modalContents();
+  assert.deepStrictEqual(afterFilter.rows, [['o2', '$20.00']], 'expected only the channel=store row for group A after filtering - a stale snapshot would still show o1, got: ' + JSON.stringify(afterFilter));
 }
 
 module.exports = {
@@ -1715,6 +1835,7 @@ module.exports = {
   testPublishFilterClientJsWiresSelectChangeEvents: testPublishFilterClientJsWiresSelectChangeEvents,
   testPublishTableClientJsAlwaysExposesReplacerHook: testPublishTableClientJsAlwaysExposesReplacerHook,
   testPublishFilterResetRecomputesKpiBackToUnfilteredValue: testPublishFilterResetRecomputesKpiBackToUnfilteredValue,
+  testPublishDetailToggleReflectsActiveFilterNotStaleSnapshot: testPublishDetailToggleReflectsActiveFilterNotStaleSnapshot,
   testPublishTableHeadersSortableAndSearchInputRendered: testPublishTableHeadersSortableAndSearchInputRendered,
   testPublishTableDetailToggleRenderedOnlyWhenConfigured: testPublishTableDetailToggleRenderedOnlyWhenConfigured,
   testPublishNoTableDetailToggleWithoutDetailConfigured: testPublishNoTableDetailToggleWithoutDetailConfigured,
