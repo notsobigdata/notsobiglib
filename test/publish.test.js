@@ -312,7 +312,14 @@ function testPublishBuildsRawAndAggregatedTablePayloads() {
 
   var rawTable = payload.tables.filter(function (t) { return t.id === 'recent_orders'; })[0];
   assert.ok(rawTable, 'expected a recent_orders table in payload.tables');
-  assert.deepStrictEqual(rawTable.columns, [{ key: 'order_id', label: 'Order' }, { key: 'revenue', label: 'Revenue' }]);
+  // columns carry their format now (not just key/label) - the client-side
+  // sort engine needs it to compare currency/integer/decimal columns
+  // numerically instead of as formatted strings (see
+  // testPublishTableClientJsSortsCurrencyColumnNumerically).
+  assert.deepStrictEqual(rawTable.columns, [
+    { key: 'order_id', label: 'Order', format: 'string' },
+    { key: 'revenue', label: 'Revenue', format: 'currency' }
+  ]);
   assert.strictEqual(rawTable.pageSize, 2);
   assert.deepStrictEqual(rawTable.rows, [
     ['o1', '$10.00'], ['o1', '$20.00'], ['o3', '$5.00'], ['o2', '$5.00']
@@ -321,9 +328,9 @@ function testPublishBuildsRawAndAggregatedTablePayloads() {
   var aggTable = payload.tables.filter(function (t) { return t.id === 'by_category'; })[0];
   assert.ok(aggTable, 'expected a by_category table in payload.tables');
   assert.deepStrictEqual(aggTable.columns, [
-    { key: 'category', label: 'category' },
-    { key: 'Revenue', label: 'Revenue' },
-    { key: 'Orders', label: 'Orders' }
+    { key: 'category', label: 'category', format: 'string' },
+    { key: 'Revenue', label: 'Revenue', format: 'currency' },
+    { key: 'Orders', label: 'Orders', format: 'integer' }
   ]);
   // A: sum(revenue) 10+20+5=35, count_distinct(order_id) over ['o1','o1','o3']=2
   // B: sum(revenue) 5, count_distinct(order_id) over ['o2']=1
@@ -331,6 +338,25 @@ function testPublishBuildsRawAndAggregatedTablePayloads() {
     ['A', '$35.00', '2'],
     ['B', '$5.00', '1']
   ]);
+}
+
+function testPublishTableHeadersSortableAndSearchInputRendered() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [
+    ['A', '10', 'o1']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var sectionMatch = html.match(/<section class="table-block" data-table-id="recent_orders">[\s\S]*?<\/section>/);
+  assert.ok(sectionMatch, 'expected the recent_orders table section in: ' + html);
+  var section = sectionMatch[0];
+
+  assert.ok(/class="table-search"/.test(section), 'expected a search input in: ' + section);
+  assert.ok(/<th class="table-sortable" data-col-index="0">Order<\/th>/.test(section), 'expected a sortable "Order" header in: ' + section);
+  assert.ok(/<th class="table-sortable" data-col-index="1">Revenue<\/th>/.test(section), 'expected a sortable "Revenue" header in: ' + section);
 }
 
 function testPublishRawTableRendersFirstPageAndEmbedsFullData() {
@@ -991,6 +1017,143 @@ function runClientEngine(scriptText, kpiCount) {
   return { context: sandbox, kpiValueNodes: kpiValueNodes };
 }
 
+// Minimal DOM stub for TABLE_CLIENT_JS's own DOMContentLoaded-time setup -
+// unlike runClientEngine above (which never fires DOMContentLoaded, since
+// FILTER_CLIENT_JS's applyFilters() is invoked directly), TABLE_CLIENT_JS's
+// sort/search/pager state lives entirely inside that listener's closure, so
+// this stub's addEventListener("DOMContentLoaded", ...) actually calls the
+// handler immediately. Captures just enough of one .table-block section
+// (tbody rows as plain string arrays, the sortable <th>s, the search input,
+// the CSV button) to drive it exactly the way a browser click/keystroke
+// would.
+function runTableClientEngine(scriptText, columnCount) {
+  var headerCells = [];
+  for (var i = 0; i < columnCount; i += 1) {
+    (function (index) {
+      var onClick = null;
+      headerCells[index] = {
+        getAttribute: function (name) { return name === 'data-col-index' ? String(index) : null; },
+        addEventListener: function (event, handler) { if (event === 'click') { onClick = handler; } },
+        click: function () { onClick(); },
+        textContent: ''
+      };
+    })(i);
+  }
+  var tbodyChildren = [];
+  var tbody = {
+    removeChild: function (child) { var i = tbodyChildren.indexOf(child); if (i !== -1) { tbodyChildren.splice(i, 1); } },
+    appendChild: function (child) { tbodyChildren.push(child); }
+  };
+  Object.defineProperty(tbody, 'firstChild', { get: function () { return tbodyChildren[0] || null; } });
+  function stubButton() {
+    var onClick = null;
+    return {
+      addEventListener: function (event, handler) { if (event === 'click') { onClick = handler; } },
+      click: function () { onClick(); },
+      disabled: false
+    };
+  }
+  var prevBtn = stubButton();
+  var nextBtn = stubButton();
+  var csvBtn = stubButton();
+  var pageLabel = { textContent: '' };
+  var searchOnInput = null;
+  var searchInput = {
+    value: '',
+    addEventListener: function (event, handler) { if (event === 'input') { searchOnInput = handler; } },
+    type: function (value) { this.value = value; searchOnInput(); }
+  };
+  var section = {
+    getAttribute: function (name) { return name === 'data-table-id' ? 'recent_orders' : null; },
+    querySelector: function (selector) {
+      if (selector === 'tbody') { return tbody; }
+      if (selector === '.table-prev') { return prevBtn; }
+      if (selector === '.table-next') { return nextBtn; }
+      if (selector === '.table-page-label') { return pageLabel; }
+      if (selector === '.table-csv-export') { return csvBtn; }
+      if (selector === '.table-search') { return searchInput; }
+      return null;
+    },
+    querySelectorAll: function (selector) { return selector === '.table-sortable' ? headerCells : []; }
+  };
+  var lastBlobParts = null;
+  var sandbox = {
+    console: console,
+    Blob: function (parts) { lastBlobParts = parts; return { parts: parts }; },
+    URL: { createObjectURL: function () { return 'blob://fake'; }, revokeObjectURL: function () {} },
+    document: {
+      querySelectorAll: function (selector) { return selector === '.table-block' ? [section] : []; },
+      querySelector: function () { return null; },
+      getElementById: function () { return null; },
+      addEventListener: function (event, handler) { if (event === 'DOMContentLoaded') { handler(); } },
+      createElement: function (tag) {
+        if (tag === 'tr') { var cells = []; return { appendChild: function (td) { cells.push(td); }, _cells: cells }; }
+        if (tag === 'a') { return { setAttribute: function () {}, click: function () {}, style: {} }; }
+        return { textContent: '' };
+      },
+      body: { appendChild: function () {}, removeChild: function () {} }
+    }
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(scriptText, sandbox, { filename: 'table-client.js' });
+  return {
+    clickHeader: function (index) { headerCells[index].click(); },
+    search: function (value) { searchInput.type(value); },
+    bodyRows: function () { return tbodyChildren.map(function (tr) { return tr._cells.map(function (td) { return td.textContent; }); }); },
+    exportedCsv: function () { lastBlobParts = null; csvBtn.click(); return lastBlobParts[0]; },
+    pageLabel: function () { return pageLabel.textContent; }
+  };
+}
+
+// Regression-style proof that sorting compares the underlying number, not
+// the formatted string - "$5.00" < "$10.00" < "$20.00" numerically, but
+// "$10.00" < "$20.00" < "$5.00" alphabetically, which is exactly the bug a
+// naive String-compare sort would reintroduce.
+function testPublishTableClientJsSortsCurrencyColumnNumerically() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [
+    ['A', '20', 'o1'],
+    ['A', '5', 'o3'],
+    ['A', '10', 'o2']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var engine = runTableClientEngine(extractInlineScript(html), 2);
+
+  engine.clickHeader(1); // Revenue column, first click -> ascending
+  assert.deepStrictEqual(engine.bodyRows(), [['o3', '$5.00'], ['o2', '$10.00']], 'expected the first page ascending by revenue (pageSize 2), got: ' + JSON.stringify(engine.bodyRows()));
+  assert.ok(/Page 1 of 2/.test(engine.pageLabel()), 'expected the page label to reflect all 3 rows still present, got: ' + engine.pageLabel());
+
+  engine.clickHeader(1); // second click on the same column -> descending
+  assert.deepStrictEqual(engine.bodyRows(), [['o1', '$20.00'], ['o2', '$10.00']], 'expected the first page descending by revenue, got: ' + JSON.stringify(engine.bodyRows()));
+
+  engine.clickHeader(1); // third click -> back to unsorted (original) order
+  assert.deepStrictEqual(engine.bodyRows(), [['o1', '$20.00'], ['o3', '$5.00']], 'expected the original unsorted order restored, got: ' + JSON.stringify(engine.bodyRows()));
+}
+
+function testPublishTableClientJsSearchNarrowsRowsAndCsvExport() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [
+    ['A', '20', 'o1'],
+    ['A', '5', 'o3'],
+    ['A', '10', 'o2']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var engine = runTableClientEngine(extractInlineScript(html), 2);
+
+  engine.search('o1');
+  assert.deepStrictEqual(engine.bodyRows(), [['o1', '$20.00']], 'expected only the matching row after searching "o1", got: ' + JSON.stringify(engine.bodyRows()));
+  assert.ok(/Page 1 of 1/.test(engine.pageLabel()), 'expected the page count to shrink to the filtered set, got: ' + engine.pageLabel());
+
+  var csv = engine.exportedCsv();
+  assert.ok(csv.indexOf('o1') !== -1, 'expected the exported CSV to include the matching row, got: ' + csv);
+  assert.ok(csv.indexOf('o3') === -1 && csv.indexOf('o2') === -1, 'expected the exported CSV to exclude rows the active search filters out, got: ' + csv);
+}
+
 // Regression test for whole-branch review finding #1: every other
 // filters[] test in this file only regexes the generated HTML text and
 // never actually runs the emitted client engine, which is exactly how a
@@ -1098,5 +1261,8 @@ module.exports = {
   testPublishFilterClientJsResetsHighlightSelectionOnApply: testPublishFilterClientJsResetsHighlightSelectionOnApply,
   testPublishFilterClientJsWiresSelectChangeEvents: testPublishFilterClientJsWiresSelectChangeEvents,
   testPublishTableClientJsAlwaysExposesReplacerHook: testPublishTableClientJsAlwaysExposesReplacerHook,
-  testPublishFilterResetRecomputesKpiBackToUnfilteredValue: testPublishFilterResetRecomputesKpiBackToUnfilteredValue
+  testPublishFilterResetRecomputesKpiBackToUnfilteredValue: testPublishFilterResetRecomputesKpiBackToUnfilteredValue,
+  testPublishTableHeadersSortableAndSearchInputRendered: testPublishTableHeadersSortableAndSearchInputRendered,
+  testPublishTableClientJsSortsCurrencyColumnNumerically: testPublishTableClientJsSortsCurrencyColumnNumerically,
+  testPublishTableClientJsSearchNarrowsRowsAndCsvExport: testPublishTableClientJsSearchNarrowsRowsAndCsvExport
 };

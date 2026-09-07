@@ -185,12 +185,23 @@ tables: [
   still reaches the browser (in the same embedded
   `window.__PUBLISH_PAYLOAD__` `kpis`/`charts` already use) for the
   "Next" button to page through.
-- Every table also gets an "Export CSV" button that downloads the
-  **full** row set (not just the current page) as `<table id>.csv`,
-  built client-side from the same embedded, already-formatted cells the
-  pager uses — no extra config, no server round trip.
-- No column-header sort or search yet — see "What's not here yet"
-  below.
+- Every table also gets a search box and sortable column headers, both
+  client-side, no extra config:
+  - Typing in the search box keeps only rows where **any** column's
+    formatted cell contains the text (case-insensitive substring).
+  - Clicking a header cycles that column ascending → descending →
+    unsorted (back to the source row order); clicking a different
+    column restarts the cycle at ascending. Sorting compares the
+    underlying number for `currency`/`integer`/`decimal` columns (so
+    `$5.00` sorts before `$20.00`), and the text otherwise.
+  - Both apply before pagination — "Page 1 of N" reflects the filtered/
+    sorted row count, not the table's full row count.
+- The "Export CSV" button downloads whatever the search box currently
+  matches (the **full** matching set, not just the current page) as
+  `<table id>.csv`, built client-side from the same embedded,
+  already-formatted cells the pager uses — no extra config, no server
+  round trip. With no search text, that's every row, same as before
+  this existed.
 
 The generated `.html` also embeds the full computed payload as
 `window.__PUBLISH_PAYLOAD__`, a plain JS object separate from the
@@ -276,5 +287,4 @@ tables: [
 `expandable`/`detail` drill-down, per-block `source` overrides, and a
 `board` tree layout are all planned but not implemented — see
 `docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s "Future
-direction" section. Column-header sort and search for the `tables[]`
-block are also not implemented yet.
+direction" section.

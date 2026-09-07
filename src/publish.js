@@ -292,7 +292,7 @@ function formatValue(value, format) {
 // through unchanged rather than becoming NaN/0.
 function buildRawTablePayload(table, rows) {
   var columns = table.columns.map(function (column) {
-    return { key: column.field, label: column.label || column.field };
+    return { key: column.field, label: column.label || column.field, format: column.format || 'string' };
   });
   var tableRows = rows.map(function (row) {
     return table.columns.map(function (column) {
@@ -312,8 +312,8 @@ function buildAggregatedTablePayload(table, rows) {
   var grouped = groupRowsBy(rows, table.groupBy);
   var groups = grouped.groups;
   var order = grouped.order;
-  var columns = [{ key: table.groupBy, label: table.groupBy }].concat(table.metrics.map(function (metric) {
-    return { key: metric.label, label: metric.label };
+  var columns = [{ key: table.groupBy, label: table.groupBy, format: 'string' }].concat(table.metrics.map(function (metric) {
+    return { key: metric.label, label: metric.label, format: metric.format || 'string' };
   }));
   var tableRows = order.map(function (key) {
     var groupRows = groups[key];
@@ -495,6 +495,8 @@ var REPORT_CSS = [
   '.table-block h2 { font-size: 14px; }',
   '.table-block table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }',
   '.table-block th, .table-block td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); font-variant-numeric: tabular-nums; }',
+  '.table-block th.table-sortable { cursor: pointer; user-select: none; }',
+  '.table-search { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 6px; margin-bottom: 8px; display: block; }',
   '.table-pager { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-family: var(--mono); font-size: 12px; }',
   '.table-pager button { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 8px; cursor: pointer; }',
   '.table-pager button:disabled { color: var(--ink-soft); cursor: default; }',
@@ -602,14 +604,15 @@ var FILTER_CLIENT_JS = [
 function renderTableSection(table) {
   var firstPageRows = table.rows.slice(0, table.pageSize);
   var pageCount = Math.max(1, Math.ceil(table.rows.length / table.pageSize));
-  var headerCells = table.columns.map(function (column) {
-    return '<th>' + escapeHtml(column.label) + '</th>';
+  var headerCells = table.columns.map(function (column, index) {
+    return '<th class="table-sortable" data-col-index="' + index + '">' + escapeHtml(column.label) + '</th>';
   }).join('');
   var bodyRows = firstPageRows.map(function (row) {
     return '<tr>' + row.map(function (cell) { return '<td>' + escapeHtml(cell) + '</td>'; }).join('') + '</tr>';
   }).join('');
   return '<section class="table-block" data-table-id="' + escapeHtml(table.id) + '">'
     + '<h2>' + escapeHtml(table.title) + '</h2>'
+    + '<input type="text" class="table-search" placeholder="Search...">'
     + '<table><thead><tr>' + headerCells + '</tr></thead><tbody>' + bodyRows + '</tbody></table>'
     + '<div class="table-pager">'
     + '<button type="button" class="table-prev" disabled>Previous</button>'
@@ -635,6 +638,17 @@ var TABLE_CLIENT_JS = [
   '  if (/["\\r\\n,]/.test(str)) { return "\\"" + str.replace(/"/g, "\\"\\"") + "\\""; }',
   '  return str;',
   '}',
+  // Numeric-aware only for non-"string" columns - a currency/integer/decimal
+  // cell is already the formatted display string ("$1,234.56"), so sorting
+  // it as text would put "$20.00" before "$5.00". Stripping everything but
+  // digits/dot/minus recovers the underlying number; "string" columns (and
+  // the aggregated groupBy column, which is always "string") sort
+  // case-insensitively as text instead.
+  'function sortableValue(cell, format) {',
+  '  if (format === "string") { return String(cell).toLowerCase(); }',
+  '  var num = Number(String(cell).replace(/[^0-9.-]/g, ""));',
+  '  return isNaN(num) ? String(cell).toLowerCase() : num;',
+  '}',
   'document.addEventListener("DOMContentLoaded", function () {',
   '  var payload = window.__PUBLISH_PAYLOAD__;',
   '  Array.prototype.forEach.call(document.querySelectorAll(".table-block"), function (section) {',
@@ -643,15 +657,47 @@ var TABLE_CLIENT_JS = [
   '    if (!table) { return; }',
   '    var page = 0;',
   '    var pageCount = Math.max(1, Math.ceil(table.rows.length / table.pageSize));',
+  '    var sortColumn = null;',
+  '    var sortDir = "asc";',
+  '    var searchQuery = "";',
   '    var tbody = section.querySelector("tbody");',
   '    var prevBtn = section.querySelector(".table-prev");',
   '    var nextBtn = section.querySelector(".table-next");',
   '    var pageLabel = section.querySelector(".table-page-label");',
   '    var csvBtn = section.querySelector(".table-csv-export");',
+  '    var searchInput = section.querySelector(".table-search");',
+  '    var headerCells = Array.prototype.slice.call(section.querySelectorAll(".table-sortable"));',
+  // Search first, then sort - order doesn't affect the result (search
+  // filters by value regardless of position, sort reorders what's left),
+  // but filtering first keeps the sort comparator's input smaller.
+  '    function visibleRows() {',
+  '      var rows = table.rows;',
+  '      if (searchQuery) {',
+  '        var needle = searchQuery.toLowerCase();',
+  '        rows = rows.filter(function (row) {',
+  '          return row.some(function (cell) { return String(cell).toLowerCase().indexOf(needle) !== -1; });',
+  '        });',
+  '      }',
+  '      if (sortColumn !== null) {',
+  '        var format = table.columns[sortColumn].format;',
+  '        var dir = sortDir === "desc" ? -1 : 1;',
+  '        rows = rows.slice().sort(function (a, b) {',
+  '          var av = sortableValue(a[sortColumn], format);',
+  '          var bv = sortableValue(b[sortColumn], format);',
+  '          if (av < bv) { return -1 * dir; }',
+  '          if (av > bv) { return 1 * dir; }',
+  '          return 0;',
+  '        });',
+  '      }',
+  '      return rows;',
+  '    }',
   '    function render() {',
+  '      var visible = visibleRows();',
+  '      pageCount = Math.max(1, Math.ceil(visible.length / table.pageSize));',
+  '      if (page >= pageCount) { page = pageCount - 1; }',
   '      while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }',
   '      var start = page * table.pageSize;',
-  '      table.rows.slice(start, start + table.pageSize).forEach(function (row) {',
+  '      visible.slice(start, start + table.pageSize).forEach(function (row) {',
   '        var tr = document.createElement("tr");',
   '        row.forEach(function (cell) {',
   '          var td = document.createElement("td");',
@@ -668,14 +714,37 @@ var TABLE_CLIENT_JS = [
   '    window.__PUBLISH_TABLE_REPLACERS__[tableId] = function (newTable) {',
   '      table = newTable;',
   '      page = 0;',
-  '      pageCount = Math.max(1, Math.ceil(table.rows.length / table.pageSize));',
   '      render();',
   '    };',
   '    prevBtn.addEventListener("click", function () { if (page > 0) { page -= 1; render(); } });',
   '    nextBtn.addEventListener("click", function () { if (page < pageCount - 1) { page += 1; render(); } });',
+  // Click cycles asc -> desc -> unsorted (back to the table's original
+  // order) on that column; clicking a different column always restarts
+  // the cycle at asc.
+  '    headerCells.forEach(function (th) {',
+  '      th.addEventListener("click", function () {',
+  '        var colIndex = Number(th.getAttribute("data-col-index"));',
+  '        if (sortColumn !== colIndex) {',
+  '          sortColumn = colIndex;',
+  '          sortDir = "asc";',
+  '        } else if (sortDir === "asc") {',
+  '          sortDir = "desc";',
+  '        } else {',
+  '          sortColumn = null;',
+  '        }',
+  '        page = 0;',
+  '        render();',
+  '      });',
+  '    });',
+  '    searchInput.addEventListener("input", function () {',
+  '      searchQuery = searchInput.value;',
+  '      page = 0;',
+  '      render();',
+  '    });',
   '    csvBtn.addEventListener("click", function () {',
+  '      var exportRows = visibleRows();',
   '      var headerRow = table.columns.map(function (c) { return csvField(c.label); }).join(",");',
-  '      var lines = table.rows.map(function (row) { return row.map(csvField).join(","); });',
+  '      var lines = exportRows.map(function (row) { return row.map(csvField).join(","); });',
   '      var csv = [headerRow].concat(lines).join("\\r\\n");',
   '      var blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });',
   '      var url = URL.createObjectURL(blob);',
