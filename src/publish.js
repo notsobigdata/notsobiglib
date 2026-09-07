@@ -393,6 +393,52 @@ function buildChartPayload(chart, rows) {
   return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data, linkKey: chart.linkKey };
 }
 
+// Distinct values for one filters[] field, sorted ascending as plain
+// strings - a dropdown's option list, not a plotted axis, so no need for
+// compareGroupValues' numeric-aware sort (that sort exists for chart
+// axes, this is for picking a value).
+function computeFilterOptions(rows, field) {
+  var seen = emptyMap();
+  var options = [];
+  rows.forEach(function (row) {
+    var value = row[field];
+    if (!has(seen, value)) {
+      seen[value] = true;
+      options.push(value);
+    }
+  });
+  options.sort();
+  return options;
+}
+
+// The original declared config for every kpi/chart/table that opted into
+// at least one filter via reactsTo - the client needs each block's own
+// config object (agg/field/format, groupBy/metric/type/series/stacking,
+// mode/columns/groupBy/metrics/pageSize) to re-call the same build
+// functions client-side against filtered rows. A block that never opted
+// in is omitted entirely, keeping this payload section exactly as large
+// as the feature's actual footprint. kpis carry their own index into
+// config.kpis (charts/tables don't need this - they already have a
+// unique .id the DOM is keyed by) since KPI cards render with no id/data
+// attribute of their own, and DOM order is otherwise the only way to
+// find "the third KPI card" back again from the client.
+function buildFilterableConfig(config) {
+  function reactive(block) {
+    return Array.isArray(block.reactsTo) && block.reactsTo.length > 0;
+  }
+  var kpis = [];
+  (config.kpis || []).forEach(function (kpi, index) {
+    if (reactive(kpi)) {
+      kpis.push({ index: index, config: kpi });
+    }
+  });
+  return {
+    kpis: kpis,
+    charts: (config.charts || []).filter(reactive),
+    tables: (config.tables || []).filter(reactive)
+  };
+}
+
 function buildReportPayload(config, rows) {
   var kpis = (config.kpis || []).map(function (kpi) {
     var value = computeAggregate(rows, kpi.agg, kpi.field);
@@ -404,7 +450,15 @@ function buildReportPayload(config, rows) {
   var tables = (config.tables || []).map(function (table) {
     return table.mode === 'raw' ? buildRawTablePayload(table, rows) : buildAggregatedTablePayload(table, rows);
   });
-  return { kpis: kpis, charts: charts, tables: tables };
+  var payload = { kpis: kpis, charts: charts, tables: tables };
+  if (config.filters && config.filters.length) {
+    payload.rows = rows;
+    payload.filters = config.filters.map(function (filter) {
+      return { field: filter.field, label: filter.label, options: computeFilterOptions(rows, filter.field) };
+    });
+    payload.filterableConfig = buildFilterableConfig(config);
+  }
+  return payload;
 }
 
 function escapeHtml(value) {

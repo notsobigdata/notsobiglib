@@ -683,6 +683,68 @@ function testPublishFiltersProceedPastValidation() {
   assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
+function testPublishFilterPayloadAbsentWithoutFilters() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  assert.ok(!Object.prototype.hasOwnProperty.call(payload, 'rows'), 'expected no payload.rows without filters[], got keys: ' + Object.keys(payload).join(', '));
+  assert.ok(!Object.prototype.hasOwnProperty.call(payload, 'filters'), 'expected no payload.filters without filters[], got keys: ' + Object.keys(payload).join(', '));
+  assert.ok(!Object.prototype.hasOwnProperty.call(payload, 'filterableConfig'), 'expected no payload.filterableConfig without filters[], got keys: ' + Object.keys(payload).join(', '));
+}
+
+function testPublishFilterPayloadIncludesRowsAndSortedDistinctOptions() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [
+    ['B', 'online', '10', '1'],
+    ['A', 'store', '20', '2'],
+    ['A', 'online', '5', '3']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  assert.strictEqual(payload.rows.length, 3, 'expected all 3 raw rows embedded, got: ' + JSON.stringify(payload.rows));
+
+  var categoryFilter = payload.filters.filter(function (f) { return f.field === 'category'; })[0];
+  assert.deepStrictEqual(categoryFilter.options, ['A', 'B'], 'expected sorted distinct category options, got: ' + JSON.stringify(categoryFilter));
+  var channelFilter = payload.filters.filter(function (f) { return f.field === 'channel'; })[0];
+  assert.deepStrictEqual(channelFilter.options, ['online', 'store'], 'expected sorted distinct channel options, got: ' + JSON.stringify(channelFilter));
+}
+
+function testPublishFilterableConfigOnlyIncludesReactsToBlocks() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [['A', 'online', '10', '1']]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  // filtersPublish's "Rows" kpi has no reactsTo - only "Revenue" (index 0
+  // in config.kpis) should appear.
+  assert.strictEqual(payload.filterableConfig.kpis.length, 1, 'expected only the reactsTo-bearing kpi, got: ' + JSON.stringify(payload.filterableConfig.kpis));
+  assert.strictEqual(payload.filterableConfig.kpis[0].index, 0, 'expected the Revenue kpi at its original config.kpis index 0, got: ' + JSON.stringify(payload.filterableConfig.kpis[0]));
+  assert.deepStrictEqual(payload.filterableConfig.kpis[0].config.reactsTo, ['category', 'channel']);
+
+  assert.strictEqual(payload.filterableConfig.charts.length, 1);
+  assert.strictEqual(payload.filterableConfig.charts[0].id, 'trend');
+  assert.deepStrictEqual(payload.filterableConfig.charts[0].reactsTo, ['category']);
+
+  assert.strictEqual(payload.filterableConfig.tables.length, 1);
+  assert.strictEqual(payload.filterableConfig.tables[0].id, 'orders');
+  assert.deepStrictEqual(payload.filterableConfig.tables[0].reactsTo, ['category', 'channel']);
+}
+
+function testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [['A', 'online', '10', '1']]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+  var kpiIndexes = payload.filterableConfig.kpis.map(function (entry) { return entry.index; });
+  assert.strictEqual(kpiIndexes.indexOf(1), -1, 'expected the "Rows" kpi (config.kpis index 1, no reactsTo) to be absent from filterableConfig.kpis, got indexes: ' + JSON.stringify(kpiIndexes));
+}
+
 function testPublishAggregationFixtureStillHasNoStacking() {
   // Sanity check that the plain (non-series) chart path still produces
   // {groupValue, total} data, not the series {groupValue, values} shape -
@@ -856,5 +918,9 @@ module.exports = {
   testPublishDuplicateFilterFieldRejected: testPublishDuplicateFilterFieldRejected,
   testPublishReactsToMustBeNonEmptyArray: testPublishReactsToMustBeNonEmptyArray,
   testPublishReactsToMustReferenceDeclaredFilter: testPublishReactsToMustReferenceDeclaredFilter,
-  testPublishFiltersProceedPastValidation: testPublishFiltersProceedPastValidation
+  testPublishFiltersProceedPastValidation: testPublishFiltersProceedPastValidation,
+  testPublishFilterPayloadAbsentWithoutFilters: testPublishFilterPayloadAbsentWithoutFilters,
+  testPublishFilterPayloadIncludesRowsAndSortedDistinctOptions: testPublishFilterPayloadIncludesRowsAndSortedDistinctOptions,
+  testPublishFilterableConfigOnlyIncludesReactsToBlocks: testPublishFilterableConfigOnlyIncludesReactsToBlocks,
+  testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured: testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured
 };
