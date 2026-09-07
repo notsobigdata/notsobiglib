@@ -5429,6 +5429,43 @@ var NotSoBigData = (function () {
     '});'
   ].join('\n');
 
+  // Pan (mouse/touch drag) + zoom (wheel), vanilla JS/CSS transform, no
+  // library - see the design spec's §5. Self-contained: its own
+  // DOMContentLoaded listener, independent of TABLE_CLIENT_JS/
+  // CHART_CLIENT_JS's own listeners, only emitted when layout:'board' is
+  // used (see renderReportHtml's isBoardLayout branch).
+  var BOARD_CLIENT_JS = [
+    'document.addEventListener("DOMContentLoaded", function () {',
+    '  var viewport = document.querySelector(".board-viewport");',
+    '  var canvas = document.getElementById("board-canvas");',
+    '  if (!viewport || !canvas) { return; }',
+    '  var panX = 0, panY = 0, zoom = 1;',
+    '  var dragging = false, lastX = 0, lastY = 0;',
+    '  function applyTransform() {',
+    '    canvas.style.transform = "translate(" + panX + "px," + panY + "px) scale(" + zoom + ")";',
+    '  }',
+    '  function startDrag(x, y) { dragging = true; lastX = x; lastY = y; canvas.classList.add("board-panning"); }',
+    '  function moveDrag(x, y) {',
+    '    if (!dragging) { return; }',
+    '    panX += x - lastX; panY += y - lastY; lastX = x; lastY = y;',
+    '    applyTransform();',
+    '  }',
+    '  function endDrag() { dragging = false; canvas.classList.remove("board-panning"); }',
+    '  viewport.addEventListener("mousedown", function (e) { startDrag(e.clientX, e.clientY); });',
+    '  window.addEventListener("mousemove", function (e) { moveDrag(e.clientX, e.clientY); });',
+    '  window.addEventListener("mouseup", endDrag);',
+    '  viewport.addEventListener("touchstart", function (e) { var t = e.touches[0]; startDrag(t.clientX, t.clientY); });',
+    '  viewport.addEventListener("touchmove", function (e) { var t = e.touches[0]; moveDrag(t.clientX, t.clientY); e.preventDefault(); }, { passive: false });',
+    '  viewport.addEventListener("touchend", endDrag);',
+    '  viewport.addEventListener("wheel", function (e) {',
+    '    e.preventDefault();',
+    '    var delta = e.deltaY > 0 ? -0.1 : 0.1;',
+    '    zoom = Math.min(2, Math.max(0.25, zoom + delta));',
+    '    applyTransform();',
+    '  }, { passive: false });',
+    '});'
+  ].join('\n');
+
   // Wraps the exact same per-block markup renderReportHtml's linear
   // branch already produces (chartSectionsList[i]/tableSectionsList[i],
   // unchanged) into positioned .board-node divs, plus an SVG layer
@@ -5495,6 +5532,9 @@ var NotSoBigData = (function () {
     }
     if (payload.charts.length) {
       script += CHART_CLIENT_JS;
+    }
+    if (isBoardLayout) {
+      script += BOARD_CLIENT_JS;
     }
     if (hasFilters) {
       script += FILTER_REUSED_FUNCTIONS_JS + FILTER_CLIENT_JS;

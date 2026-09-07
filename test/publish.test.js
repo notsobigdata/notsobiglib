@@ -173,6 +173,33 @@ function testPublishBoardLayoutPlacesMultipleRootsSideBySide() {
   assert.strictEqual(edgeCount, 0, 'expected 0 edges (two unrelated roots), got ' + edgeCount + ' in: ' + html);
 }
 
+function testPublishBoardClientJsEmittedOnlyForBoardLayout() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+
+  var boardResult = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(boardResult.status, 'success', 'expected the shimmed board run to succeed, got: ' + boardResult.error);
+  var boardHtml = getHtml();
+  assert.ok(/viewport\.addEventListener\("wheel"/.test(boardHtml), 'expected the board wheel-zoom listener, got: ' + boardHtml);
+  assert.ok(/viewport\.addEventListener\("mousedown"/.test(boardHtml), 'expected the board pan listener, got: ' + boardHtml);
+
+  var linearResult = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(linearResult.status, 'success', 'expected the shimmed linear run to succeed, got: ' + linearResult.error);
+  var linearHtml = getHtml();
+  assert.ok(!/board-viewport/.test(linearHtml), 'expected no board markup on a layout:"linear" report, got: ' + linearHtml);
+  assert.ok(!/viewport\.addEventListener\("wheel"/.test(linearHtml), 'expected no board client JS on a layout:"linear" report, got: ' + linearHtml);
+}
+
+function testPublishBoardClientJsClampsZoomAndAppliesTransform() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/Math\.min\(2, Math\.max\(0\.25, zoom \+ delta\)\)/.test(html), 'expected zoom clamped to [0.25, 2], got: ' + html);
+  assert.ok(/canvas\.style\.transform = "translate\("/.test(html), 'expected the pan\/zoom transform application, got: ' + html);
+}
+
 // Shims BigQuery.Tables.get/Tabledata.list and DriveApp.getFolderById
 // directly on the harness's vm sandbox (harness.loadContext returns the
 // actual global object for that vm context, so adding properties to it
@@ -1841,6 +1868,8 @@ module.exports = {
   testPublishBoardLayoutPositionsSingleRootTwoChildren: testPublishBoardLayoutPositionsSingleRootTwoChildren,
   testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine: testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine,
   testPublishBoardLayoutPlacesMultipleRootsSideBySide: testPublishBoardLayoutPlacesMultipleRootsSideBySide,
+  testPublishBoardClientJsEmittedOnlyForBoardLayout: testPublishBoardClientJsEmittedOnlyForBoardLayout,
+  testPublishBoardClientJsClampsZoomAndAppliesTransform: testPublishBoardClientJsClampsZoomAndAppliesTransform,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
   testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,
