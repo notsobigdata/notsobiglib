@@ -241,3 +241,56 @@ own separate `page`/`table` state, silently desyncing from the first the
 moment a filter changes (clicking "Next" would then page through stale,
 pre-filter data). One shared closure, one small always-on hook, is the
 only version of this that can't drift out of sync with itself.
+
+## `linkTo` resolves at generation time, and it's pure - no Drive call at all
+
+An earlier version of this feature resolved `linkTo` to a live Drive
+web-view URL (`https://drive.google.com/file/d/<id>/view`, looked up via
+`move.js`'s `resolveDriveTargetFileId`) - reasonable-looking, but wrong
+for how these reports actually get viewed: downloaded or synced (Drive
+for Desktop) into one local folder and opened straight in a browser, not
+opened through Drive's own web preview, which doesn't execute an
+arbitrary `.html` file's inline script at all (it renders a static
+preview, or offers a download) - so the generated link simply didn't
+render anything. The fix is also a simplification: `linkTo`'s destination
+is just the other node's own declared `target.fileName`, a plain relative
+link a browser resolves against wherever the *current* file happens to be
+sitting - exactly like two spreadsheet tabs cross-referencing each other
+by name, and exactly what the "put both files in the same folder" mental
+model actually needs.
+
+This means `validateLinkToTarget(chart, allNodes)` (node exists, is
+`kind: 'publish'`, has a matching `filters[]` field) is the *entire*
+resolution - no split needed between a pure half and a live-I/O half,
+unlike `resolvePublishSource`/`fetchTableRows`. There's also no more
+"the destination must have been published at least once already"
+ordering requirement the live-lookup version had - a relative filename is
+valid the moment both configs exist, regardless of which one has
+actually run. `resolveConfigLinkTargets` is called early in `publish()`,
+right after `resolvePublishSource`, with nothing forcing it to wait for
+`fetchTableRows` the way the old Drive-lookup version did.
+
+The resolved shape (`{url, field, newTab}`) replaces the declared shape
+(`{node, field, newTab}`) on a *copy* of `config.charts`, never the
+original — `buildChartPayload` (reused verbatim client-side via
+`FILTER_REUSED_FUNCTIONS_JS`, see above) must never gain a reference to
+`DriveApp`, so all node-name resolution happens once, server-side, before
+that function ever sees the chart config. A report with no `linkTo`
+anywhere pays for none of this: `resolveConfigLinkTargets` returns the
+original `config` object unchanged.
+
+`linkTo` and `linkKey`/`seriesLinkKey` are mutually exclusive on one
+chart by validation, not by runtime precedence — a click either
+highlights same-page elements or navigates away, and letting a chart
+declare both would mean picking a silent winner between two config keys
+that both fired. `handleChartClick`'s `linkTo` branch returns early,
+before `chartSelectionFor`/`applyHighlight` ever run, so this couldn't
+silently do both even if validation were ever removed.
+
+On the destination side, `applyFiltersFromQueryString()` deliberately
+reuses `activeFilters`/`applyFilters()` — the exact state a `<select>`
+change already mutates — rather than a separate "initial filter" code
+path. A query-string value that doesn't match one of that filter's own
+computed `options` is silently skipped (not forced into `activeFilters`),
+so a stale or unrelated link never leaves a report stuck filtered to a
+value that matches zero rows.

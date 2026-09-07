@@ -433,3 +433,131 @@ var filtersPublish = {
     { id: 'orders', title: 'Orders', mode: 'raw', columns: [{ field: 'revenue' }], reactsTo: ['category', 'channel'] }
   ]
 };
+
+// linkTo's destination side: a filters[] entry matching what
+// linkToSourcePublish below sends on click - the one requirement
+// validateLinkToTarget checks. No upsertByName here on purpose: linkTo
+// resolves to this node's plain target.fileName, not a live Drive lookup,
+// so nothing about the destination's Drive-write behavior matters to it.
+var linkToTargetPublish = {
+  kind: 'publish',
+  name: 'linkToTargetPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'category-detail.html' },
+  filters: [{ field: 'category', label: 'Category' }],
+  kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }]
+};
+
+var linkToSourcePublish = {
+  kind: 'publish',
+  name: 'linkToSourcePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'category-overview.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    linkTo: { node: 'linkToTargetPublish', field: 'category' } }]
+};
+
+var linkToSourceNewTabFalsePublish = {
+  kind: 'publish',
+  name: 'linkToSourceNewTabFalsePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'category-overview-same-tab.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    linkTo: { node: 'linkToTargetPublish', field: 'category', newTab: false } }]
+};
+
+var linkToMissingNodePublish = {
+  kind: 'publish',
+  name: 'linkToMissingNodePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'link-to-missing-node.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    linkTo: { field: 'category' } }]
+};
+
+var linkToMissingFieldPublish = {
+  kind: 'publish',
+  name: 'linkToMissingFieldPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'link-to-missing-field.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    linkTo: { node: 'linkToTargetPublish' } }]
+};
+
+var linkToBadNewTabPublish = {
+  kind: 'publish',
+  name: 'linkToBadNewTabPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'link-to-bad-new-tab.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    linkTo: { node: 'linkToTargetPublish', field: 'category', newTab: 'yes' } }]
+};
+
+var linkToWithLinkKeyPublish = {
+  kind: 'publish',
+  name: 'linkToWithLinkKeyPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'link-to-with-link-key.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    linkKey: 'category', linkTo: { node: 'linkToTargetPublish', field: 'category' } }]
+};
+
+var linkToWithSeriesLinkKeyPublish = {
+  kind: 'publish',
+  name: 'linkToWithSeriesLinkKeyPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'link-to-with-series-link-key.html' },
+  charts: [{ id: 'by_category_channel', type: 'bar', title: 'By category/channel', groupBy: 'category', series: 'channel', stacking: 'stacked', metric: { agg: 'sum', field: 'revenue' },
+    seriesLinkKey: 'channel', linkTo: { node: 'linkToTargetPublish', field: 'category' } }]
+};
+
+var linkToUnknownNodePublish = {
+  kind: 'publish',
+  name: 'linkToUnknownNodePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'link-to-unknown-node.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    linkTo: { node: 'nonExistentNodeXYZ', field: 'category' } }]
+};
+
+// References moveWithBigQueryTarget, a real declared node but kind
+// "move", not "publish" - proves validateLinkToTarget checks the kind,
+// not just presence.
+var linkToNonPublishNodePublish = {
+  kind: 'publish',
+  name: 'linkToNonPublishNodePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'link-to-non-publish-node.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    linkTo: { node: 'moveWithBigQueryTarget', field: 'category' } }]
+};
+
+var linkToTargetNoMatchingFilterPublish = {
+  kind: 'publish',
+  name: 'linkToTargetNoMatchingFilterPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'link-to-target-no-matching-filter.html', upsertByName: true },
+  filters: [{ field: 'channel', label: 'Channel' }],
+  kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }]
+};
+
+var linkToSourceNoMatchingFilterPublish = {
+  kind: 'publish',
+  name: 'linkToSourceNoMatchingFilterPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'link-to-source-no-matching-filter.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    linkTo: { node: 'linkToTargetNoMatchingFilterPublish', field: 'category' } }]
+};

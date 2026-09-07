@@ -141,6 +141,50 @@ charts: [
   highlight each other on any coincidentally-matching value — the library
   has no way to detect that this wasn't intended.
 
+#### Navigating to another report (`linkTo`)
+
+```javascript
+// categoryOverviewPublish
+charts: [
+  { id: 'by_category', type: 'bar', title: 'Revenue by category',
+    groupBy: 'category_name', metric: { agg: 'sum', field: 'revenue' },
+    linkTo: { node: 'categoryDetailPublish', field: 'category_name', newTab: true } }
+]
+
+// categoryDetailPublish
+target: { type: 'drive', folderId: props.REPORTS_FOLDER, fileName: 'category-detail.html' },
+filters: [{ field: 'category_name', label: 'Category' }]
+```
+
+- `linkTo` (any chart type, in place of `linkKey`/`seriesLinkKey` — a
+  chart can't declare both) turns a click into cross-file navigation
+  instead of same-page highlighting: `node` names another declared
+  `publish` node, `field` is the row field to send (same as `groupBy`),
+  and `newTab` (default `true`) picks a new browser tab vs. navigating
+  the current one.
+- The link is the destination node's own `target.fileName`, as a plain
+  relative link — not a Drive URL. This library's reports are meant to
+  be downloaded (or synced via Drive for Desktop) into one local folder
+  and opened straight in a browser, not viewed through Drive's own web
+  preview, which doesn't render an arbitrary `.html` file's live script.
+  Both files need to end up **in the same folder** for the link to
+  resolve — there's nothing in the config that enforces this, the same
+  posture `charts[]`' `groupBy` already has for a field that doesn't
+  exist.
+- The destination must also declare a `filters[]` entry for the same
+  `field`; `publish()` rejects a `linkTo` that doesn't match one, the
+  same typo guard `reactsTo` already applies within one report. Nothing
+  about `linkTo` reads or writes Drive at generation time, and there's no
+  "the destination must already exist" ordering requirement — either
+  report can be generated first.
+- On the destination side, nothing extra is configured: opening the link
+  reads the `field=value` query string on load, and if it matches one of
+  that report's own filter options, pre-selects the dropdown and
+  recomputes exactly as if a human had chosen it — the same
+  `reactsTo`-opted-in blocks react, the same way a `<select>` change
+  already triggers. An unmatched or unrelated query string is ignored,
+  not forced onto a filter that doesn't have that value.
+
 ### `tables[]`
 
 Either a **raw** table (a chosen subset of the source's own columns, one
@@ -283,7 +327,6 @@ tables: [
 
 ## What's not here yet
 
-`linkTo` cross-file navigation (with query-string filter propagation),
 `expandable`/`detail` drill-down, per-block `source` overrides, and a
 `board` tree layout are all planned but not implemented — see
 `docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s "Future
