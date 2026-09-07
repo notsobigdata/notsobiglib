@@ -332,30 +332,49 @@ a shared closure variable.
 
 ## Detail drill-down
 
-`withDetail` — the helper that computes which raw rows belong to a clicked
-group (a chart value, or a table aggregation row) — lives as a plain JS
-function in both the server-side `buildReportPayload` step and the
-client-side recompute path, mirroring `buildChartPayload`'s own twin lives
-in `FILTER_REUSED_FUNCTIONS_JS`. A filtered report's modal always shows the
-raw rows *behind the currently-active filter state*, not a snapshot from
-generation time — if a human clicks a group while a filter is active, the
-modal's "show 5 matching orders" count reflects that filter, and if they
-change the filter afterward, the modal updates too. This requires
-`withDetail` to be reserialized into the client script just like
-`buildChartPayload` is, so both functions stay pure (zero GAS-only APIs)
-and a future change to the filtering logic automatically propagates to
-both paths with nothing to remember to keep in sync.
+`withDetail` does **not** compute which raw rows belong to a clicked group —
+that filtering happens client-side, at click time, in
+`TABLE_DETAIL_TOGGLE_HANDLER_JS` and `handleChartClick`'s `chart.detail`
+branch (`rows.filter(function (row) { return row[groupBy] === groupValue;
+})`). What `withDetail` actually does is attach a block's own already-
+resolved row set (`rowsForBlock`'s result — respecting a block-level
+`source` override, the same rows the aggregate/chart was computed from) to
+`built.detail.rows`, **projected down** to only the fields the modal can
+ever need: each `detail.columns[i].field`, plus `groupBy` and `series`
+(used to re-filter by group/segment at click time) — never the row's full
+source-table shape. This projection is the fix landed in commit `29b5a69`:
+before it, `withDetail` attached the entire row (every column the source
+table had), so a column never configured for display anywhere in the
+report — e.g. a `customer_email` field sitting unused on the source table —
+would still be serialized into `__PUBLISH_PAYLOAD__` and shipped in the
+generated `.html` the moment any block on the same rows declared `detail`.
+`withDetail` lives as a plain JS function in both the server-side
+`buildReportPayload` step and the client-side recompute path, mirroring
+`buildChartPayload`'s own twin lives in `FILTER_REUSED_FUNCTIONS_JS`. A
+filtered report's modal always shows the raw rows *behind the
+currently-active filter state*, not a snapshot from generation time — if a
+human clicks a group while a filter is active, the modal's "show 5 matching
+orders" count reflects that filter, and if they change the filter
+afterward, the modal updates too. This requires `withDetail` to be
+reserialized into the client script just like `buildChartPayload` is, so
+both functions stay pure (zero GAS-only APIs) and a future change to the
+filtering logic automatically propagates to both paths with nothing to
+remember to keep in sync.
 
-`DETAIL_REUSED_FUNCTIONS_JS` is a separate, tiny module from
-`FILTER_REUSED_FUNCTIONS_JS` (containing `buildChartPayload` and friends)
-because the two sets of functions are independent: a report with detail
-drill-down and no filters never needs `FILTER_REUSED_FUNCTIONS_JS` at all,
-just `DETAIL_REUSED_FUNCTIONS_JS`. If we had merged them into one bundle,
-every report with detail would pay for `buildChartPayload`'s serialization
-even if filters weren't declared — and vice versa, every filtered report
-with no detail would carry `withDetail` it never uses. Keeping them separate
-means `buildReportHtml` conditionally includes each module only when needed,
-the same way it gates `TABLE_CLIENT_JS` on `tables[]` existing.
+`DETAIL_REUSED_FUNCTIONS_JS` (`formatValue` and `buildRawTablePayload`) is
+not independent from `FILTER_REUSED_FUNCTIONS_JS` — both of its functions
+already live inside `FILTER_REUSED_FUNCTIONS_JS`'s own list (which also
+unconditionally includes `withDetail`, whether or not the report has
+`detail` at all), making `DETAIL_REUSED_FUNCTIONS_JS` a strict subset, not
+a sibling set. `DETAIL_REUSED_FUNCTIONS_JS` exists only to cover the one
+case `FILTER_REUSED_FUNCTIONS_JS` doesn't: a report with `detail` but no
+`filters[]` still needs `formatValue`/`buildRawTablePayload` declared
+somewhere, since `openDetailModal`'s callers (`TABLE_DETAIL_TOGGLE_HANDLER_JS`,
+`handleChartClick`) call `buildRawTablePayload` directly. `renderReportHtml`
+picks exactly one of the two with `if (hasFilters) { ... } else if
+(hasDetail) { ... }` rather than two independent `if`s, precisely because
+one is a subset of the other — declaring both in the same `<script>` would
+redeclare `formatValue`/`buildRawTablePayload` a second time for nothing.
 
 The table-detail click listener (the expand-row toggle) lives inside
 `TABLE_CLIENT_JS`'s existing per-section `forEach` closure, not in a

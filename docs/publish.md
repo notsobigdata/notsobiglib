@@ -316,6 +316,13 @@ charts: [{
 - Compatible with a block's own `reactsTo`: the modal always reflects
   whichever filter is currently active, not a snapshot from when the
   report was generated.
+- Only `detail.columns`' fields (plus `groupBy`/the chart's `series`, when
+  set) are embedded for a block's raw rows — not the rest of each row.
+  There's no cap or pagination on how many rows that is, though: declaring
+  `detail` on a block reading a very large source table embeds one
+  (trimmed) row per source row into the generated `.html` file, the same
+  "no row-count cap" caveat this file's own "Limits worth knowing" section
+  already states for the report in general.
 
 ## Filters
 
