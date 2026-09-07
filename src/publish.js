@@ -402,6 +402,7 @@ function computeFilterOptions(rows, field) {
   var options = [];
   rows.forEach(function (row) {
     var value = row[field];
+    if (value === null || value === undefined) { return; }
     if (!has(seen, value)) {
       seen[value] = true;
       options.push(value);
@@ -542,23 +543,21 @@ var FILTER_REUSED_FUNCTIONS_JS = [
 // CHART_CLIENT_JS/TABLE_CLIENT_JS's existing draw/pagination machinery -
 // this module never re-implements drawing or pagination itself.
 var FILTER_CLIENT_JS = [
-  'var activeFilters = {};',
+  'var activeFilters = emptyMap();',
   'function filteredRowsFor(reactsTo) {',
   '  var relevant = reactsTo.filter(function (f) { return has(activeFilters, f); });',
-  '  if (!relevant.length) { return null; }',
   '  var rows = window.__PUBLISH_PAYLOAD__.rows;',
+  '  if (!relevant.length) { return rows; }',
   '  return rows.filter(function (row) { return relevant.every(function (f) { return row[f] === activeFilters[f]; }); });',
   '}',
   'function applyFilterToKpi(entry) {',
   '  var filteredRows = filteredRowsFor(entry.config.reactsTo);',
-  '  if (!filteredRows) { return; }',
   '  var value = computeAggregate(filteredRows, entry.config.agg, entry.config.field);',
   '  var card = document.querySelectorAll(".kpi")[entry.index];',
   '  if (card) { card.querySelector(".kpi-value").textContent = formatValue(value, entry.config.format); }',
   '}',
   'function applyFilterToChart(chartConfig) {',
   '  var filteredRows = filteredRowsFor(chartConfig.reactsTo);',
-  '  if (!filteredRows) { return; }',
   '  var newChart = buildChartPayload(chartConfig, filteredRows);',
   '  var container = document.getElementById("chart-" + chartConfig.id);',
   '  if (!container) { return; }',
@@ -570,7 +569,6 @@ var FILTER_CLIENT_JS = [
   '}',
   'function applyFilterToTable(tableConfig) {',
   '  var filteredRows = filteredRowsFor(tableConfig.reactsTo);',
-  '  if (!filteredRows) { return; }',
   '  var newTable = tableConfig.mode === "raw" ? buildRawTablePayload(tableConfig, filteredRows) : buildAggregatedTablePayload(tableConfig, filteredRows);',
   '  var replace = window.__PUBLISH_TABLE_REPLACERS__ && window.__PUBLISH_TABLE_REPLACERS__[tableConfig.id];',
   '  if (replace) { replace(newTable); }',

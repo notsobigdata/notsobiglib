@@ -284,10 +284,18 @@ convention:
 - `renderReportHtml`: regex-checked that the nine reused functions'
   source text (§4) and the new filter `<select>`/`applyFilters` client
   module appear in the emitted script exactly when `config.filters.length
-  > 0`, and are fully absent otherwise (byte-for-byte identical output to
-  today's report for any config with no `filters[]` — a regression this
-  test pins down explicitly, since this phase must not change output for
-  existing reports).
+  > 0`, and are fully absent otherwise. The actual guarantee is narrower
+  than byte-for-byte identical output: a config with no `filters[]` gets
+  no filters markup (`<div class="filters">`), no
+  `FILTER_REUSED_FUNCTIONS_JS`/`FILTER_CLIENT_JS`, and no
+  `payload.rows`/`.filters`/`.filterableConfig` keys — but `REPORT_CSS`'s
+  small `.filters`/`.filter` rule additions and `TABLE_CLIENT_JS`'s
+  always-on `__PUBLISH_TABLE_REPLACERS__` registration (present whenever
+  any `tables[]` exist, regardless of `filters[]`) are unconditional,
+  same "small always-on scaffolding" pattern `CHART_CLIENT_JS`'s
+  selection module already established. This phase must not change the
+  *filters-relevant* output for existing reports; it is not a claim that
+  every byte of the report is untouched.
 
 **Layer 2 (`notsobigtests`, human-run):** a fixture report with two
 `filters[]` entries and at least one KPI, one chart, and one table each

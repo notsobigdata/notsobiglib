@@ -178,11 +178,15 @@ catch.
 
 `FILTER_CLIENT_JS`'s `filteredRowsFor(reactsTo)` filters `reactsTo` down
 to whichever of its own entries are currently active
-(`has(activeFilters, f)`) and only touches the underlying rows on that
-intersection — a block with none of its declared fields currently active
-is left completely alone, not recomputed against the full unfiltered
-set. This is the same "only the keys the block itself declares,
-intersected with what's currently active" shape
+(`has(activeFilters, f)`) and filters the underlying rows on that
+intersection — a block always recomputes against the rows matching its
+own `reactsTo`'s intersection with the currently-active filters; when
+that intersection is empty (no `reactsTo` field is currently active,
+whether because none ever was or because the user just reset the one it
+cared about back to "All"), `filteredRowsFor` returns every row
+unfiltered, i.e. the block's original unfiltered value. This is the same
+"only the keys the block itself declares, intersected with what's
+currently active" shape
 `docs/superpowers/specs/2026-09-06-publish-chart-interactivity-design.md`'s
 `selectionMatches` already established for cross-chart highlighting — see
 `src/publish.md`'s note on that function for why getting this backwards

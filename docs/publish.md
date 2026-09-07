@@ -238,8 +238,12 @@ tables: [
 - Changing a dropdown recomputes only the opted-in blocks, entirely in
   the browser, against the report's underlying rows filtered by every
   currently-active (non-"All") filter, ANDed together — no reload, no
-  new BigQuery call. A block whose `reactsTo` doesn't intersect the
-  currently-active filters is left exactly as currently rendered.
+  new BigQuery call. A block always recomputes against the rows matching
+  its own `reactsTo`'s intersection with the currently-active filters;
+  when that intersection is empty (no `reactsTo` field is currently
+  active), that means all rows, i.e. the block's original unfiltered
+  value — so resetting the one filter a block cares about back to "All"
+  correctly brings it back to its unfiltered value too.
 - If the report also uses cross-chart click-to-highlight
   (`linkKey`/`seriesLinkKey`), changing a filter clears the current
   highlight selection, since the previously-selected value's rows may no
@@ -250,7 +254,10 @@ tables: [
   resets every filter to "All". A field with many distinct values
   produces a long dropdown — `publish()` doesn't guard against choosing
   a bad `field` for this, the same posture `charts[]`' `groupBy` already
-  has.
+  has. With `filters[]` configured, the full source table (every column,
+  every row) is embedded in the generated `.html` file to support
+  client-side recomputation — size and share the file accordingly; a
+  table with columns the report never displays still has them embedded.
 
 ## Limits worth knowing
 

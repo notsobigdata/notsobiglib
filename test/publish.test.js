@@ -1,6 +1,7 @@
 // test/publish.test.js
 var assert = require('assert');
 var path = require('path');
+var vm = require('vm');
 var harness = require('./harness');
 
 function fixture(name) {
@@ -942,6 +943,97 @@ function testPublishSeriesChartHandlesSpacesWithoutCollision() {
     'expected New / Organic zero-filled to 0, got: ' + JSON.stringify(groupNew));
 }
 
+// Pulls the report's one inline <script>...</script> (the bare-tag one -
+// the D3 CDN tag always carries a "src" attribute, so this regex can't
+// match that one instead) back out so it can actually be executed, not
+// just regex-matched like every other filters[] test in this file.
+function extractInlineScript(html) {
+  var match = html.match(/<script>([\s\S]*)<\/script>/);
+  assert.ok(match, 'expected a bare inline <script> in: ' + html);
+  return match[1];
+}
+
+// Minimal browser stub - just enough surface for FILTER_CLIENT_JS/
+// CHART_CLIENT_JS/TABLE_CLIENT_JS's actual DOMContentLoaded-time and
+// applyFilters()-time DOM calls to run without throwing. Not a general
+// DOM: querySelectorAll(".kpi") is the only selector that returns
+// anything real (one stub node per kpi card, each holding the mutable
+// ".kpi-value" textContent this test asserts on) - every other selector
+// returns an empty array, and getElementById returns null so
+// applyFilterToChart's "if (!container) { return; }" guard exits before
+// ever touching d3 (which this stub doesn't provide at all).
+function runClientEngine(scriptText, kpiCount) {
+  var kpiValueNodes = [];
+  var kpiCards = [];
+  for (var i = 0; i < kpiCount; i += 1) {
+    (function (index) {
+      var valueNode = { textContent: '' };
+      kpiValueNodes[index] = valueNode;
+      kpiCards[index] = {
+        querySelector: function (selector) { return selector === '.kpi-value' ? valueNode : null; }
+      };
+    })(i);
+  }
+  var noop = function () {};
+  var sandbox = {
+    console: console,
+    document: {
+      querySelectorAll: function (selector) { return selector === '.kpi' ? kpiCards : []; },
+      querySelector: function () { return null; },
+      getElementById: function () { return null; },
+      addEventListener: noop,
+      createElement: function () { return { setAttribute: noop, appendChild: noop, style: {} }; }
+    }
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(scriptText, sandbox, { filename: 'filter-client.js' });
+  return { context: sandbox, kpiValueNodes: kpiValueNodes };
+}
+
+// Regression test for whole-branch review finding #1: every other
+// filters[] test in this file only regexes the generated HTML text and
+// never actually runs the emitted client engine, which is exactly how a
+// bug in filteredRowsFor's null-vs-empty-array return shipped past a
+// full green test suite. This one loads the real emitted <script> into a
+// vm context and drives it end to end: filter to category "A" (checking
+// the KPI actually recomputes), then reset back to "All" and confirm the
+// KPI returns to its original, full/unfiltered value - the reset path
+// that was broken (a filtered block stayed stuck on stale data forever
+// once its one active filter was cleared).
+function testPublishFilterResetRecomputesKpiBackToUnfilteredValue() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [
+    ['A', 'online', '10', '1'],
+    ['A', 'store', '5', '2'],
+    ['B', 'online', '20', '3']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var engine = runClientEngine(extractInlineScript(html), 2);
+
+  // The stub DOM's kpi-value nodes start empty (real page load fills them
+  // from server-rendered markup, which this stub doesn't parse) - one
+  // no-filters applyFilters() call reproduces the same baseline, since
+  // filteredRowsFor with nothing active now returns every row (the fix
+  // under test). "Revenue" is filtersPublish's config.kpis index 0,
+  // format currency - full unfiltered sum: 10 + 5 + 20 = 35.
+  engine.context.applyFilters();
+  assert.strictEqual(engine.kpiValueNodes[0].textContent, '$35.00', 'expected the initial unfiltered KPI value, got: ' + engine.kpiValueNodes[0].textContent);
+
+  engine.context.activeFilters.category = 'A';
+  engine.context.applyFilters();
+  assert.strictEqual(engine.kpiValueNodes[0].textContent, '$15.00', 'expected the KPI to recompute against category=A rows only (10 + 5), got: ' + engine.kpiValueNodes[0].textContent);
+
+  // Reset to "All" - what the real <select> does when its value goes
+  // back to "" (see FILTER_CLIENT_JS's change handler: "delete
+  // activeFilters[field]").
+  delete engine.context.activeFilters.category;
+  engine.context.applyFilters();
+  assert.strictEqual(engine.kpiValueNodes[0].textContent, '$35.00', 'expected the KPI to recompute back to the full unfiltered sum after resetting the filter to All, got: ' + engine.kpiValueNodes[0].textContent);
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -1005,5 +1097,6 @@ module.exports = {
   testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim: testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim,
   testPublishFilterClientJsResetsHighlightSelectionOnApply: testPublishFilterClientJsResetsHighlightSelectionOnApply,
   testPublishFilterClientJsWiresSelectChangeEvents: testPublishFilterClientJsWiresSelectChangeEvents,
-  testPublishTableClientJsAlwaysExposesReplacerHook: testPublishTableClientJsAlwaysExposesReplacerHook
+  testPublishTableClientJsAlwaysExposesReplacerHook: testPublishTableClientJsAlwaysExposesReplacerHook,
+  testPublishFilterResetRecomputesKpiBackToUnfilteredValue: testPublishFilterResetRecomputesKpiBackToUnfilteredValue
 };
