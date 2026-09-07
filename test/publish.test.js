@@ -745,6 +745,83 @@ function testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigu
   assert.strictEqual(kpiIndexes.indexOf(1), -1, 'expected the "Rows" kpi (config.kpis index 1, no reactsTo) to be absent from filterableConfig.kpis, got indexes: ' + JSON.stringify(kpiIndexes));
 }
 
+function testPublishFiltersMarkupRenderedWhenConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [
+    ['B', 'online', '10', '1'],
+    ['A', 'store', '20', '2']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/<div class="filters">/.test(html), 'expected a filters bar, got: ' + html);
+  assert.ok(/data-filter-field="category"/.test(html), 'expected a category filter select, got: ' + html);
+  assert.ok(/data-filter-field="channel"/.test(html), 'expected a channel filter select, got: ' + html);
+  assert.ok(/<option value="">All<\/option>/.test(html), 'expected an "All" default option, got: ' + html);
+  assert.ok(/<option value="A">A<\/option>/.test(html), 'expected a distinct-value option, got: ' + html);
+}
+
+function testPublishNoFiltersMarkupOrClientJsWithoutFilters() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(!/class="filters"/.test(html), 'expected no filters markup, got: ' + html);
+  assert.ok(!/function applyFilters/.test(html), 'expected no FILTER_CLIENT_JS, got: ' + html);
+  assert.ok(!/function filteredRowsFor/.test(html), 'expected no filter-engine wiring, got: ' + html);
+}
+
+function testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [['A', 'online', '10', '1']]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  ['computeAggregate', 'groupRowsBy', 'compareGroupValues', 'formatValue', 'buildChartPayload', 'buildRawTablePayload', 'buildAggregatedTablePayload', 'emptyMap', 'has'].forEach(function (name) {
+    assert.ok(new RegExp('function ' + name + '\\(').test(html), 'expected the reused function "' + name + '" verbatim in the emitted script, got: ' + html);
+  });
+}
+
+function testPublishFilterClientJsResetsHighlightSelectionOnApply() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [['A', 'online', '10', '1']]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/if \(typeof currentSelection !== "undefined"\) \{ currentSelection = null; \}/.test(html), 'expected applyFilters to reset any chart-highlight selection, got: ' + html);
+  assert.ok(/if \(typeof applyHighlight === "function"\) \{ applyHighlight\(\); \}/.test(html), 'expected applyFilters to re-run applyHighlight, got: ' + html);
+}
+
+function testPublishFilterClientJsWiresSelectChangeEvents() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [['A', 'online', '10', '1']]);
+  var result = ctx.NotSoBigData.cli('run --select filtersPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/querySelectorAll\("\[data-filter-field\]"\)/.test(html), 'expected the filter-select wiring query, got: ' + html);
+  assert.ok(/select\.addEventListener\("change"/.test(html), 'expected a change listener on each filter select, got: ' + html);
+}
+
+function testPublishTableClientJsAlwaysExposesReplacerHook() {
+  // Whether or not filters[] is configured - see this plan's Task 3 note
+  // on why this is unconditional, matching CHART_CLIENT_JS's own
+  // "always-on scaffolding, opt-in behavior" precedent from the chart-
+  // interactivity phase (docs/superpowers/specs/2026-09-06-publish-chart-
+  // interactivity-design.md).
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/__PUBLISH_TABLE_REPLACERS__/.test(html), 'expected the table replacer hook regardless of filters[], got: ' + html);
+}
+
 function testPublishAggregationFixtureStillHasNoStacking() {
   // Sanity check that the plain (non-series) chart path still produces
   // {groupValue, total} data, not the series {groupValue, values} shape -
@@ -922,5 +999,11 @@ module.exports = {
   testPublishFilterPayloadAbsentWithoutFilters: testPublishFilterPayloadAbsentWithoutFilters,
   testPublishFilterPayloadIncludesRowsAndSortedDistinctOptions: testPublishFilterPayloadIncludesRowsAndSortedDistinctOptions,
   testPublishFilterableConfigOnlyIncludesReactsToBlocks: testPublishFilterableConfigOnlyIncludesReactsToBlocks,
-  testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured: testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured
+  testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured: testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured,
+  testPublishFiltersMarkupRenderedWhenConfigured: testPublishFiltersMarkupRenderedWhenConfigured,
+  testPublishNoFiltersMarkupOrClientJsWithoutFilters: testPublishNoFiltersMarkupOrClientJsWithoutFilters,
+  testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim: testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim,
+  testPublishFilterClientJsResetsHighlightSelectionOnApply: testPublishFilterClientJsResetsHighlightSelectionOnApply,
+  testPublishFilterClientJsWiresSelectChangeEvents: testPublishFilterClientJsWiresSelectChangeEvents,
+  testPublishTableClientJsAlwaysExposesReplacerHook: testPublishTableClientJsAlwaysExposesReplacerHook
 };

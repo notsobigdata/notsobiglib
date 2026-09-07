@@ -4501,7 +4501,103 @@ var NotSoBigData = (function () {
     '.table-block th, .table-block td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); font-variant-numeric: tabular-nums; }',
     '.table-pager { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-family: var(--mono); font-size: 12px; }',
     '.table-pager button { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 8px; cursor: pointer; }',
-    '.table-pager button:disabled { color: var(--ink-soft); cursor: default; }'
+    '.table-pager button:disabled { color: var(--ink-soft); cursor: default; }',
+    '.filters { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }',
+    '.filter { font-family: var(--mono); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }',
+    '.filter select { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 6px; }'
+  ].join('\n');
+
+  // One <select> per filters[] entry: an "All" option plus every distinct
+  // value already computed server-side in payload.filters[].options (see
+  // computeFilterOptions). data-filter-field is what FILTER_CLIENT_JS reads
+  // back to know which row field a given <select>'s change event affects.
+  function renderFiltersSection(filters) {
+    var controls = filters.map(function (filter) {
+      var optionTags = filter.options.map(function (value) {
+        return '<option value="' + escapeHtml(value) + '">' + escapeHtml(value) + '</option>';
+      }).join('');
+      return '<label class="filter">' + escapeHtml(filter.label)
+        + '<select data-filter-field="' + escapeHtml(filter.field) + '"><option value="">All</option>' + optionTags + '</select></label>';
+    }).join('');
+    return '<div class="filters">' + controls + '</div>';
+  }
+
+  // The exact functions filters[] needs to re-run client-side, serialized
+  // once at module load (these are static function references, so this
+  // only runs once no matter how many reports get generated in one run) -
+  // reused verbatim rather than hand-ported, so any future change to any
+  // of them is automatically correct in the browser too. See the design
+  // spec's §4 for the "why toString()" rationale and its one constraint:
+  // none of these nine functions may ever reference a GAS-only global
+  // (BigQuery, DriveApp, Utilities, etc.) - doing so would silently break
+  // filters[] only in the browser, not caught by any Node test. A named
+  // function declaration's .toString() output is itself valid top-level
+  // source, so no wrapping is needed - it drops straight into the
+  // generated <script> as ordinary, hoisted function declarations.
+  var FILTER_REUSED_FUNCTIONS_JS = [
+    emptyMap, has, computeAggregate, groupRowsBy, compareGroupValues,
+    formatValue, buildChartPayload, buildRawTablePayload, buildAggregatedTablePayload
+  ].map(function (fn) { return fn.toString(); }).join('\n');
+
+  // The filter dropdowns' own wiring: composes every currently-active
+  // (non-"All") filter with AND semantics, recomputes only the
+  // kpis/charts/tables that opted in via reactsTo (payload.filterableConfig,
+  // see buildFilterableConfig), and leaves everything else exactly as
+  // currently rendered. Reuses FILTER_REUSED_FUNCTIONS_JS's functions and
+  // CHART_CLIENT_JS/TABLE_CLIENT_JS's existing draw/pagination machinery -
+  // this module never re-implements drawing or pagination itself.
+  var FILTER_CLIENT_JS = [
+    'var activeFilters = {};',
+    'function filteredRowsFor(reactsTo) {',
+    '  var relevant = reactsTo.filter(function (f) { return has(activeFilters, f); });',
+    '  if (!relevant.length) { return null; }',
+    '  var rows = window.__PUBLISH_PAYLOAD__.rows;',
+    '  return rows.filter(function (row) { return relevant.every(function (f) { return row[f] === activeFilters[f]; }); });',
+    '}',
+    'function applyFilterToKpi(entry) {',
+    '  var filteredRows = filteredRowsFor(entry.config.reactsTo);',
+    '  if (!filteredRows) { return; }',
+    '  var value = computeAggregate(filteredRows, entry.config.agg, entry.config.field);',
+    '  var card = document.querySelectorAll(".kpi")[entry.index];',
+    '  if (card) { card.querySelector(".kpi-value").textContent = formatValue(value, entry.config.format); }',
+    '}',
+    'function applyFilterToChart(chartConfig) {',
+    '  var filteredRows = filteredRowsFor(chartConfig.reactsTo);',
+    '  if (!filteredRows) { return; }',
+    '  var newChart = buildChartPayload(chartConfig, filteredRows);',
+    '  var container = document.getElementById("chart-" + chartConfig.id);',
+    '  if (!container) { return; }',
+    '  while (container.firstChild) { container.removeChild(container.firstChild); }',
+    '  if (typeof d3 === "undefined") { renderChartFallback(container.id, newChart); return; }',
+    '  if (newChart.type === "line") { drawLineChart(container.id, newChart); }',
+    '  else if (newChart.type === "pie") { drawPieChart(container.id, newChart); }',
+    '  else { drawBarChart(container.id, newChart); }',
+    '}',
+    'function applyFilterToTable(tableConfig) {',
+    '  var filteredRows = filteredRowsFor(tableConfig.reactsTo);',
+    '  if (!filteredRows) { return; }',
+    '  var newTable = tableConfig.mode === "raw" ? buildRawTablePayload(tableConfig, filteredRows) : buildAggregatedTablePayload(tableConfig, filteredRows);',
+    '  var replace = window.__PUBLISH_TABLE_REPLACERS__ && window.__PUBLISH_TABLE_REPLACERS__[tableConfig.id];',
+    '  if (replace) { replace(newTable); }',
+    '}',
+    'function applyFilters() {',
+    '  var payload = window.__PUBLISH_PAYLOAD__;',
+    '  payload.filterableConfig.kpis.forEach(applyFilterToKpi);',
+    '  payload.filterableConfig.charts.forEach(applyFilterToChart);',
+    '  payload.filterableConfig.tables.forEach(applyFilterToTable);',
+    '  if (typeof currentSelection !== "undefined") { currentSelection = null; }',
+    '  if (typeof applyHighlight === "function") { applyHighlight(); }',
+    '}',
+    'document.addEventListener("DOMContentLoaded", function () {',
+    '  Array.prototype.forEach.call(document.querySelectorAll("[data-filter-field]"), function (select) {',
+    '    select.addEventListener("change", function () {',
+    '      var field = select.getAttribute("data-filter-field");',
+    '      if (select.value === "") { delete activeFilters[field]; }',
+    '      else { activeFilters[field] = select.value; }',
+    '      applyFilters();',
+    '    });',
+    '  });',
+    '});'
   ].join('\n');
 
   // Static first page (readable with zero JS, same as the KPI cards/SVG
@@ -4575,6 +4671,13 @@ var NotSoBigData = (function () {
     '      prevBtn.disabled = page === 0;',
     '      nextBtn.disabled = page >= pageCount - 1;',
     '    }',
+    '    window.__PUBLISH_TABLE_REPLACERS__ = window.__PUBLISH_TABLE_REPLACERS__ || {};',
+    '    window.__PUBLISH_TABLE_REPLACERS__[tableId] = function (newTable) {',
+    '      table = newTable;',
+    '      page = 0;',
+    '      pageCount = Math.max(1, Math.ceil(table.rows.length / table.pageSize));',
+    '      render();',
+    '    };',
     '    prevBtn.addEventListener("click", function () { if (page > 0) { page -= 1; render(); } });',
     '    nextBtn.addEventListener("click", function () { if (page < pageCount - 1) { page += 1; render(); } });',
     '    csvBtn.addEventListener("click", function () {',
@@ -4783,6 +4886,7 @@ var NotSoBigData = (function () {
   ].join('\n');
 
   function renderReportHtml(payload, config) {
+    var filtersSection = (payload.filters && payload.filters.length) ? renderFiltersSection(payload.filters) : '';
     var kpiCards = payload.kpis.map(function (kpi) {
       return '<div class="kpi"><div class="kpi-label">' + escapeHtml(kpi.label) + '</div>'
         + '<div class="kpi-value">' + escapeHtml(kpi.formatted) + '</div></div>';
@@ -4799,11 +4903,14 @@ var NotSoBigData = (function () {
     if (payload.charts.length) {
       script += CHART_CLIENT_JS;
     }
+    if (payload.filters && payload.filters.length) {
+      script += FILTER_REUSED_FUNCTIONS_JS + FILTER_CLIENT_JS;
+    }
     var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
     return '<!doctype html><html><head><meta charset="utf-8">'
       + '<title>' + escapeHtml(config.target.fileName) + '</title>'
       + '<style>' + REPORT_CSS + '</style>' + d3Script + '</head><body>'
-      + '<main><div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections + '</main>'
+      + '<main>' + filtersSection + '<div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections + '</main>'
       + '<script>' + script + '</script>'
       + '</body></html>';
   }
