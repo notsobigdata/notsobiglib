@@ -150,3 +150,63 @@ different shapes — see `selectionMatches` for the actual implementation.
 
 No new `.attr("fill", ...)`-vs-`.style("fill", ...)` traps were introduced
 here — none of this task's new code sets `fill`.
+
+## `filters[]` reuses its own server-side functions client-side, via `Function.prototype.toString()`
+
+`computeAggregate`, `groupRowsBy`, `compareGroupValues`, `formatValue`,
+`buildChartPayload`, `buildRawTablePayload`, `buildAggregatedTablePayload`,
+`emptyMap`, and `has` were already plain JS with zero GAS-only API calls
+before this feature existed — nothing about them was ever
+Apps-Script-specific. `FILTER_REUSED_FUNCTIONS_JS` takes advantage of
+that by serializing these nine functions' own source text
+(`fn.toString()`) straight into the generated report's client script,
+rather than hand-porting a second copy into `FILTER_CLIENT_JS` the way
+`CHART_CLIENT_JS`/`TABLE_CLIENT_JS` reimplement their own draw/pagination
+logic from scratch. This means a future change to any of these nine
+functions — a new `agg`, a formatting fix, a new table mode — is
+automatically correct in the browser too, with nothing to remember to
+keep in sync. The one obligation this creates going forward: none of
+these nine functions may ever grow a reference to a GAS-only global
+(`BigQuery`, `DriveApp`, `Utilities`, etc.) — doing so would compile fine
+and pass every Node test, then throw a `ReferenceError` only in the
+browser, only on a report that uses `filters[]`, the first time a human
+opens one. There is no automated check for this; it's a rule to remember
+when touching any of these nine, not something `node test/run.js` can
+catch.
+
+## `reactsTo` intersects with the active filters, mirroring `applyHighlight`'s own matching rule
+
+`FILTER_CLIENT_JS`'s `filteredRowsFor(reactsTo)` filters `reactsTo` down
+to whichever of its own entries are currently active
+(`has(activeFilters, f)`) and only touches the underlying rows on that
+intersection — a block with none of its declared fields currently active
+is left completely alone, not recomputed against the full unfiltered
+set. This is the same "only the keys the block itself declares,
+intersected with what's currently active" shape
+`docs/superpowers/specs/2026-09-06-publish-chart-interactivity-design.md`'s
+`selectionMatches` already established for cross-chart highlighting — see
+`src/publish.md`'s note on that function for why getting this backwards
+(recomputing whenever *any* filter changes, regardless of whether the
+block declared that field) is the most likely way a future change here
+quietly breaks a report where different blocks opt into different filter
+subsets.
+
+## The table replacer hook is small, always-on scaffolding — same shape as `CHART_CLIENT_JS`'s selection module
+
+`TABLE_CLIENT_JS`'s per-section closure now always exposes
+`window.__PUBLISH_TABLE_REPLACERS__[tableId]`, whether or not the report
+declares `filters[]` at all — mirroring `CHART_CLIENT_JS`'s own selection
+module (`currentSelection`/`applyHighlight`), which is likewise emitted
+whenever any chart exists, regardless of whether any individual chart
+opts into `linkKey`. The alternative (gating this hook's presence on
+`config.filters.length`, so a filter-less report's `TABLE_CLIENT_JS`
+stays byte-identical to before this feature) was rejected: pagination
+state (`table`/`page`/`pageCount`) lives inside this one closure per
+table section, and there is no way for `FILTER_CLIENT_JS` to hand it
+freshly-filtered rows and have "Next"/"Previous" keep working correctly
+afterward without either this hook or a second, independent closure
+walking the same DOM a second time — and a second closure would hold its
+own separate `page`/`table` state, silently desyncing from the first the
+moment a filter changes (clicking "Next" would then page through stale,
+pre-filter data). One shared closure, one small always-on hook, is the
+only version of this that can't drift out of sync with itself.

@@ -202,6 +202,56 @@ rows are different — each cell is embedded already formatted (the exact
 string the table renders), since that's also what the client-side
 pager needs to page through without re-formatting anything.
 
+## Filters
+
+```javascript
+filters: [
+  { field: 'category_name', label: 'Category' },
+  { field: 'channel', label: 'Channel' }
+],
+kpis: [
+  { label: 'Total revenue', agg: 'sum', field: 'revenue', format: 'currency',
+    reactsTo: ['category_name', 'channel'] },
+  { label: 'Orders', agg: 'count_distinct', field: 'order_id', format: 'integer' }
+  // no reactsTo - this KPI never moves, whatever the filters are set to
+],
+charts: [
+  { id: 'trend', type: 'line', title: 'Revenue by day',
+    groupBy: 'order_date', metric: { agg: 'sum', field: 'revenue' },
+    reactsTo: ['category_name'] }   // ignores the "channel" filter
+],
+tables: [
+  { id: 'orders', title: 'Orders', mode: 'raw', columns: [ /* ... */ ],
+    reactsTo: ['category_name', 'channel'] }
+]
+```
+
+- `filters[]` — each entry is one dropdown: `field` (a column in the
+  source table) and `label` (what the dropdown says). Its options are
+  **not** configured — they're the field's own distinct values, sorted
+  alphabetically, computed at generation time.
+- `reactsTo` — opt-in on any `kpi`/`chart`/`table` entry, naming which
+  `filters[].field`s that block honors. A block with no `reactsTo` never
+  recomputes, no matter what any filter is set to. A `reactsTo` entry
+  that doesn't match a declared `filters[].field` is rejected at config
+  time (a typo guard).
+- Changing a dropdown recomputes only the opted-in blocks, entirely in
+  the browser, against the report's underlying rows filtered by every
+  currently-active (non-"All") filter, ANDed together — no reload, no
+  new BigQuery call. A block whose `reactsTo` doesn't intersect the
+  currently-active filters is left exactly as currently rendered.
+- If the report also uses cross-chart click-to-highlight
+  (`linkKey`/`seriesLinkKey`), changing a filter clears the current
+  highlight selection, since the previously-selected value's rows may no
+  longer exist post-filter.
+- Known limits: every filter is a single-select, exact-match dropdown —
+  no numeric/date range, no multi-select. A filter selection lives only
+  in the open page's JS state; reloading the file, or a fresh download,
+  resets every filter to "All". A field with many distinct values
+  produces a long dropdown — `publish()` doesn't guard against choosing
+  a bad `field` for this, the same posture `charts[]`' `groupBy` already
+  has.
+
 ## Limits worth knowing
 
 - `fetchTableRows` assumes flat scalar BigQuery columns — a `RECORD`/
@@ -215,19 +265,9 @@ pager needs to page through without re-formatting anything.
 
 ## What's not here yet
 
-Filters, drill-down, per-block `source` overrides, cross-file
-navigation, and a `board` tree layout are all planned but not
-implemented — see
+`linkTo` cross-file navigation (with query-string filter propagation),
+`expandable`/`detail` drill-down, per-block `source` overrides, and a
+`board` tree layout are all planned but not implemented — see
 `docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s "Future
-direction" section (CSV export from that list now ships, see
-`tables[]` above). Cross-chart click-to-highlight is also implemented
-(`linkKey`/`seriesLinkKey`, see `charts[]` above) — see
-`docs/superpowers/specs/2026-09-06-publish-chart-interactivity-design.md`
-for the full design. A `filters[]` dropdown that recomputes KPIs/charts/
-tables against the underlying rows, and `linkTo` cross-file navigation,
-remain future work, each still needing its own brainstorming pass — see
-that spec's "Future direction" section. Column-header sort and search
-for the `tables[]` block specifically are also not implemented yet —
-deliberately deferred until `filters` is designed, since both would
-likely share the same client-side row-filtering JS — see
-`docs/superpowers/specs/2026-09-06-publish-table-block-design.md`'s §1.
+direction" section. Column-header sort and search for the `tables[]`
+block are also not implemented yet.
