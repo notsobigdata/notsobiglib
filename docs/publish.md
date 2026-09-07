@@ -185,8 +185,12 @@ tables: [
   still reaches the browser (in the same embedded
   `window.__PUBLISH_PAYLOAD__` `kpis`/`charts` already use) for the
   "Next" button to page through.
-- No column-header sort, search, or CSV export yet — see "What's not
-  here yet" below.
+- Every table also gets an "Export CSV" button that downloads the
+  **full** row set (not just the current page) as `<table id>.csv`,
+  built client-side from the same embedded, already-formatted cells the
+  pager uses — no extra config, no server round trip.
+- No column-header sort or search yet — see "What's not here yet"
+  below.
 
 The generated `.html` also embeds the full computed payload as
 `window.__PUBLISH_PAYLOAD__`, a plain JS object separate from the
@@ -213,12 +217,17 @@ pager needs to page through without re-formatting anything.
 
 Filters, drill-down, per-block `source` overrides, cross-file
 navigation, and a `board` tree layout are all planned but not
-implemented — see `docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s
-"Future direction" section. Cross-chart click-to-highlight is implemented (`linkKey`/`seriesLinkKey`,
-see `charts[]` above) — see
+implemented — see
+`docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s "Future
+direction" section (CSV export from that list now ships, see
+`tables[]` above). Cross-chart click-to-highlight is also implemented
+(`linkKey`/`seriesLinkKey`, see `charts[]` above) — see
 `docs/superpowers/specs/2026-09-06-publish-chart-interactivity-design.md`
 for the full design. A `filters[]` dropdown that recomputes KPIs/charts/
 tables against the underlying rows, and `linkTo` cross-file navigation,
 remain future work, each still needing its own brainstorming pass — see
-that spec's "Future direction" section. Column-header sort and search for
-the `tables[]` block are also still deferred.
+that spec's "Future direction" section. Column-header sort and search
+for the `tables[]` block specifically are also not implemented yet —
+deliberately deferred until `filters` is designed, since both would
+likely share the same client-side row-filtering JS — see
+`docs/superpowers/specs/2026-09-06-publish-table-block-design.md`'s §1.

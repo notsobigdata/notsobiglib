@@ -365,6 +365,42 @@ function testPublishRawTableRendersFirstPageAndEmbedsFullData() {
   assert.ok(/DOMContentLoaded/.test(html), 'expected the pagination script to be emitted when tables[] is non-empty');
 }
 
+function testPublishCsvExportButtonAndScriptEmitted() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [
+    ['A', '10', 'o1'],
+    ['A', '20', 'o1']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var sectionMatch = html.match(/<section class="table-block" data-table-id="recent_orders">[\s\S]*?<\/section>/);
+  assert.ok(sectionMatch, 'expected the recent_orders table section in: ' + html);
+  assert.ok(/class="table-csv-export"/.test(sectionMatch[0]), 'expected an Export CSV button in: ' + sectionMatch[0]);
+
+  assert.ok(/table-csv-export/.test(html) && /Blob/.test(html) && /text\/csv/.test(html), 'expected CSV export wiring in the emitted script, got: ' + html);
+}
+
+// CSV formula injection (CWE-1236): a cell sourced from live, unvalidated
+// BigQuery data starting with =/+/-/@ would otherwise be parsed as a
+// formula by Excel/Sheets on export - assert csvField()'s neutralizing
+// prefix is actually present in the emitted script, not just that CSV
+// export exists at all.
+function testPublishCsvExportNeutralizesFormulaInjection() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [
+    ['A', '10', 'o1']
+  ]);
+
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/\/\^\[=\+@-\]\//.test(html), 'expected csvField to guard against a leading =/+/-/@ formula-trigger character, got: ' + html);
+}
+
 function testPublishChartRendersMountPointAndD3Script() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
@@ -759,6 +795,8 @@ module.exports = {
   testPublishValidTablesProceedPastValidation: testPublishValidTablesProceedPastValidation,
   testPublishBuildsRawAndAggregatedTablePayloads: testPublishBuildsRawAndAggregatedTablePayloads,
   testPublishRawTableRendersFirstPageAndEmbedsFullData: testPublishRawTableRendersFirstPageAndEmbedsFullData,
+  testPublishCsvExportButtonAndScriptEmitted: testPublishCsvExportButtonAndScriptEmitted,
+  testPublishCsvExportNeutralizesFormulaInjection: testPublishCsvExportNeutralizesFormulaInjection,
   testPublishNoPaginationScriptWithoutTables: testPublishNoPaginationScriptWithoutTables,
   testPublishLineChartSortsGroupsByNumericValue: testPublishLineChartSortsGroupsByNumericValue,
   testPublishLineChartSortsGroupsByDateString: testPublishLineChartSortsGroupsByDateString,
