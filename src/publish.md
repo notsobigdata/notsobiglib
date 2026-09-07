@@ -101,11 +101,11 @@ chart types and had shakier native pie/donut support than D3's own
 `renderBarChartSvg` used to hand-write, and `REPORT_CSS` needed no
 changes.
 
-`buildChartPayload` stays pure and server-side in this phase — no
-aggregation happens in the browser. Cross-chart interactivity (Phase 2,
-shipped — see below) deliberately doesn't re-aggregate either, only
-dims already-rendered elements; a future `filters[]` dropdown is where
-client-side re-aggregation would actually need to happen.
+`buildChartPayload` stays pure — a plain function of `(chartConfig, rows)`,
+called both server-side at generation time and client-side when `filters[]`
+recomputes. This purity is what enables the reuse-via-`Function.prototype.toString()`
+pattern that filters[] relies on. Cross-chart interactivity (Phase 2, shipped — see
+below) deliberately doesn't re-aggregate either, only dims already-rendered elements.
 
 **Set a per-item chart color with `.style('fill', ...)`, never
 `.attr('fill', ...)`.** `REPORT_CSS`'s `.chart-bar { fill: var(--teal); }`
