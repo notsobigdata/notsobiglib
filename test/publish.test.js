@@ -87,7 +87,47 @@ function testPublishV2ChartTypesProceedPastValidation() {
 function testPublishLayoutTypeOtherThanLinearRejected() {
   var result = runOne('badLayoutPublish');
   assert.strictEqual(result.status, 'failed');
-  assert.ok(/only "linear" is supported/.test(result.error), 'expected a layout-type error, got: ' + result.error);
+  assert.ok(/expected one of linear, board/.test(result.error), 'expected a layout-type error, got: ' + result.error);
+}
+
+function testPublishBoardRelatesToWithoutBoardLayoutRejected() {
+  var result = runOne('boardRelatesToWithoutBoardLayoutPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/requires layout\.type "board"/.test(result.error), 'expected a relatesTo-requires-board error, got: ' + result.error);
+}
+
+function testPublishBoardRelatesToUnknownIdRejected() {
+  var result = runOne('boardRelatesToUnknownIdPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/doesn't match any declared chart\/table id/.test(result.error), 'expected an unknown-relatesTo-id error, got: ' + result.error);
+}
+
+function testPublishBoardRelatesToSelfRejected() {
+  var result = runOne('boardRelatesToSelfPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/pointing at itself/.test(result.error), 'expected a self-relatesTo error, got: ' + result.error);
+}
+
+function testPublishBoardRelatesToCycleRejected() {
+  var result = runOne('boardRelatesToCyclePublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/forms a cycle/.test(result.error), 'expected a relatesTo-cycle error, got: ' + result.error);
+}
+
+function testPublishBoardDuplicateCrossTypeIdRejected() {
+  var result = runOne('boardDuplicateCrossTypeIdPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/used as both a chart id and a table id/.test(result.error), 'expected a cross-type duplicate-id error, got: ' + result.error);
+}
+
+function testPublishBoardValidRelationsProceedPastValidation() {
+  var result = runOne('boardValidPublish');
+  // Same proof pattern as testPublishValidRefProceedsPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
 // Shims BigQuery.Tables.get/Tabledata.list and DriveApp.getFolderById
@@ -1749,6 +1789,12 @@ module.exports = {
   testPublishChartBadStackingRejected: testPublishChartBadStackingRejected,
   testPublishV2ChartTypesProceedPastValidation: testPublishV2ChartTypesProceedPastValidation,
   testPublishLayoutTypeOtherThanLinearRejected: testPublishLayoutTypeOtherThanLinearRejected,
+  testPublishBoardRelatesToWithoutBoardLayoutRejected: testPublishBoardRelatesToWithoutBoardLayoutRejected,
+  testPublishBoardRelatesToUnknownIdRejected: testPublishBoardRelatesToUnknownIdRejected,
+  testPublishBoardRelatesToSelfRejected: testPublishBoardRelatesToSelfRejected,
+  testPublishBoardRelatesToCycleRejected: testPublishBoardRelatesToCycleRejected,
+  testPublishBoardDuplicateCrossTypeIdRejected: testPublishBoardDuplicateCrossTypeIdRejected,
+  testPublishBoardValidRelationsProceedPastValidation: testPublishBoardValidRelationsProceedPastValidation,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
   testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,

@@ -4022,6 +4022,11 @@ var NotSoBigData = (function () {
   // isn't a separate type, just an optional second dimension on 'bar'.
   var CHART_TYPES = ['bar', 'line', 'pie'];
 
+  // layout.type accepted values - see the design spec's §2. 'linear'
+  // (default) stacks every block in one column; 'board' positions charts/
+  // tables as a relatesTo-driven tree on a pan/zoomable canvas.
+  var LAYOUT_TYPES = ['linear', 'board'];
+
   // Pinned exact version, never a floating tag - see CLAUDE.md's
   // "Downstream consumers pinned to a release" for the same reasoning
   // applied to a different kind of pin: a file reopened a year from now
@@ -4102,6 +4107,62 @@ var NotSoBigData = (function () {
     });
   }
 
+  // relatesTo (charts[]/tables[] only) declares one block's parent in a
+  // layout:'board' tree - undefined/absent means "root". Runs once, after
+  // every per-block loop in validatePublishConfig has already confirmed
+  // ids are present and duplicate-free *within* charts[] and *within*
+  // tables[] separately; this function additionally requires ids to be
+  // unique *across* charts[] and tables[] combined, since relatesTo shares
+  // one namespace over both arrays - no other publish() feature needs that
+  // today (linkTo/detail/reactsTo never cross-reference a chart id against
+  // a table id), so this is a new rule, not a relaxation of an old one.
+  function validateBoardRelations(config) {
+    var charts = config.charts || [];
+    var tables = config.tables || [];
+    var relatesToUsed = charts.concat(tables).some(function (block) { return block.relatesTo; });
+    if (!relatesToUsed) {
+      return;
+    }
+    var layoutType = (config.layout && config.layout.type) || 'linear';
+    if (layoutType !== 'board') {
+      throw new Error('publish(): "relatesTo" is set on a chart or table, which requires layout.type "board".');
+    }
+
+    var parentOf = emptyMap();
+    function registerBlock(id) {
+      if (has(parentOf, id)) {
+        throw new Error('publish(): "' + id + '" is used as both a chart id and a table id - "relatesTo" ids must be unique across charts[] and tables[].');
+      }
+    }
+    charts.forEach(function (chart) { registerBlock(chart.id); parentOf[chart.id] = chart.relatesTo || null; });
+    tables.forEach(function (table) { registerBlock(table.id); parentOf[table.id] = table.relatesTo || null; });
+
+    Object.keys(parentOf).forEach(function (id) {
+      var relatesTo = parentOf[id];
+      if (relatesTo === null) {
+        return;
+      }
+      if (relatesTo === id) {
+        throw new Error('publish(): "' + id + '" has "relatesTo" pointing at itself.');
+      }
+      if (!has(parentOf, relatesTo)) {
+        throw new Error('publish(): "' + id + '" has "relatesTo: ' + relatesTo + '", which doesn\'t match any declared chart/table id.');
+      }
+    });
+
+    Object.keys(parentOf).forEach(function (id) {
+      var seen = emptyMap();
+      var current = id;
+      while (parentOf[current]) {
+        if (has(seen, current)) {
+          throw new Error('publish(): "relatesTo" forms a cycle at "' + current + '".');
+        }
+        seen[current] = true;
+        current = parentOf[current];
+      }
+    });
+  }
+
   // Every check a publish node's config must pass before anything is
   // fetched or written - same "throw new Error('publish(): ...')"
   // convention move()/model() already use. Field-by-field, not a schema
@@ -4117,8 +4178,9 @@ var NotSoBigData = (function () {
     if (!config.target || config.target.type !== 'drive' || !config.target.folderId || !config.target.fileName) {
       throw new Error('publish(): config.target must be { type: "drive", folderId: "...", fileName: "..." }.');
     }
-    if (config.layout && config.layout.type !== 'linear') {
-      throw new Error('publish(): layout.type "' + config.layout.type + '" - only "linear" is supported.');
+    var layoutType = (config.layout && config.layout.type) || 'linear';
+    if (LAYOUT_TYPES.indexOf(layoutType) === -1) {
+      throw new Error('publish(): layout.type "' + layoutType + '" - expected one of ' + LAYOUT_TYPES.join(', ') + '.');
     }
     var seenFilterFields = emptyMap();
     (config.filters || []).forEach(function (filter) {
@@ -4245,6 +4307,7 @@ var NotSoBigData = (function () {
         });
       }
     });
+    validateBoardRelations(config);
   }
 
   // Resolves config.source.ref against every other declared node -

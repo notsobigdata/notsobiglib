@@ -180,8 +180,92 @@ var badLayoutPublish = {
   dependsOn: ['moveWithBigQueryTarget'],
   source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
   target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-layout.html' },
-  layout: { type: 'board' },
+  layout: { type: 'grid' },
   kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }]
+};
+
+var boardRelatesToWithoutBoardLayoutPublish = {
+  kind: 'publish',
+  name: 'boardRelatesToWithoutBoardLayoutPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-no-layout.html' },
+  charts: [
+    { id: 'a', type: 'bar', title: 'A', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'b', type: 'bar', title: 'B', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'a' }
+  ]
+};
+
+var boardRelatesToUnknownIdPublish = {
+  kind: 'publish',
+  name: 'boardRelatesToUnknownIdPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-unknown-id.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'a', type: 'bar', title: 'A', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'does_not_exist' }
+  ]
+};
+
+var boardRelatesToSelfPublish = {
+  kind: 'publish',
+  name: 'boardRelatesToSelfPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-self.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'a', type: 'bar', title: 'A', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'a' }
+  ]
+};
+
+var boardRelatesToCyclePublish = {
+  kind: 'publish',
+  name: 'boardRelatesToCyclePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-cycle.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'a', type: 'bar', title: 'A', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'b' },
+    { id: 'b', type: 'bar', title: 'B', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'a' }
+  ]
+};
+
+var boardDuplicateCrossTypeIdPublish = {
+  kind: 'publish',
+  name: 'boardDuplicateCrossTypeIdPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-dup-cross-type.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'shared', type: 'bar', title: 'Chart', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }
+  ],
+  tables: [
+    { id: 'shared', title: 'Table', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'shared' }
+  ]
+};
+
+// A root chart with two children (one a chart, one a table) - proceeds
+// past validation; used by Task 2/3's rendering tests too (reused rather
+// than duplicated, same "one fixture per concern" precedent tablesPublish's
+// own comment already sets).
+var boardValidPublish = {
+  kind: 'publish',
+  name: 'boardValidPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-valid.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'r', type: 'bar', title: 'Root', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'c1', type: 'bar', title: 'Child 1', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'r' }
+  ],
+  tables: [
+    { id: 'c2', title: 'Child 2', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'r' }
+  ]
 };
 
 // One raw table (columns: order_id, revenue) and one aggregated table
