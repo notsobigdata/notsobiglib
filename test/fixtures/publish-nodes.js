@@ -363,3 +363,73 @@ var linkKeyChartsPublish = {
     { id: 'trend', type: 'line', title: 'Trend', groupBy: 'day', metric: { agg: 'sum', field: 'revenue' } }
   ]
 };
+
+var badFilterMissingLabelPublish = {
+  kind: 'publish',
+  name: 'badFilterMissingLabelPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-filter-missing-label.html' },
+  filters: [{ field: 'category' }]
+};
+
+var duplicateFilterFieldPublish = {
+  kind: 'publish',
+  name: 'duplicateFilterFieldPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'dup-filter-field.html' },
+  filters: [
+    { field: 'category', label: 'Category' },
+    { field: 'category', label: 'Category again' }
+  ]
+};
+
+var reactsToUndeclaredFilterPublish = {
+  kind: 'publish',
+  name: 'reactsToUndeclaredFilterPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'reacts-to-undeclared.html' },
+  filters: [{ field: 'category', label: 'Category' }],
+  kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency', reactsTo: ['channel'] }]
+};
+
+var emptyReactsToPublish = {
+  kind: 'publish',
+  name: 'emptyReactsToPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'empty-reacts-to.html' },
+  filters: [{ field: 'category', label: 'Category' }],
+  kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency', reactsTo: [] }]
+};
+
+// filters[] with two fields; a kpi, a chart, and a table each opting into
+// a different subset via reactsTo. "Rows" (a plain count kpi) deliberately
+// has no reactsTo at all, to prove an opted-out block is simply absent
+// from payload.filterableConfig (Task 2) and never touched by a filter
+// change (Task 3). Reused across Task 1 (validation), Task 2 (payload
+// shape), and Task 3 (markup/client-JS) - one fixture per concern this
+// feature actually needs, matching tablesPublish's own precedent.
+var filtersPublish = {
+  kind: 'publish',
+  name: 'filtersPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'filters.html' },
+  filters: [
+    { field: 'category', label: 'Category' },
+    { field: 'channel', label: 'Channel' }
+  ],
+  kpis: [
+    { label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency', reactsTo: ['category', 'channel'] },
+    { label: 'Rows', agg: 'count', format: 'integer' }
+  ],
+  charts: [
+    { id: 'trend', type: 'line', title: 'Trend', groupBy: 'day', metric: { agg: 'sum', field: 'revenue' }, reactsTo: ['category'] }
+  ],
+  tables: [
+    { id: 'orders', title: 'Orders', mode: 'raw', columns: [{ field: 'revenue' }], reactsTo: ['category', 'channel'] }
+  ]
+};

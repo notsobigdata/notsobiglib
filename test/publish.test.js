@@ -649,6 +649,40 @@ function testPublishChartClientJsWiresLineAndPieClickOnLinkKey() {
   assert.strictEqual(lineOrPieGateCount, 2, 'expected exactly 2 standalone "if (chart.linkKey) {" gate blocks (drawLineChart + drawPieChart), got ' + lineOrPieGateCount + ' in: ' + html);
 }
 
+function testPublishFilterRequiresFieldAndLabel() {
+  var result = runOne('badFilterMissingLabelPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/every filter needs "field" and "label"/.test(result.error), 'expected a filter field/label error, got: ' + result.error);
+}
+
+function testPublishDuplicateFilterFieldRejected() {
+  var result = runOne('duplicateFilterFieldPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/duplicate filter field "category"/.test(result.error), 'expected a duplicate-filter-field error, got: ' + result.error);
+}
+
+function testPublishReactsToMustBeNonEmptyArray() {
+  var result = runOne('emptyReactsToPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"reactsTo", which must be a non-empty array/.test(result.error), 'expected a reactsTo-empty-array error, got: ' + result.error);
+}
+
+function testPublishReactsToMustReferenceDeclaredFilter() {
+  var result = runOne('reactsToUndeclaredFilterPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"channel" is not a declared filter field/.test(result.error), 'expected a reactsTo-undeclared-field error, got: ' + result.error);
+}
+
+function testPublishFiltersProceedPastValidation() {
+  var result = runOne('filtersPublish');
+  // Same proof pattern as testPublishV2ChartTypesProceedPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
+}
+
 function testPublishAggregationFixtureStillHasNoStacking() {
   // Sanity check that the plain (non-series) chart path still produces
   // {groupValue, total} data, not the series {groupValue, values} shape -
@@ -817,5 +851,10 @@ module.exports = {
   testPublishChartClientJsCoercesGroupAndSeriesValuesToString: testPublishChartClientJsCoercesGroupAndSeriesValuesToString,
   testPublishChartClientJsCallsApplyHighlightOnceOnLoad: testPublishChartClientJsCallsApplyHighlightOnceOnLoad,
   testPublishChartClientJsWiresBarClickOnlyWhenInteractive: testPublishChartClientJsWiresBarClickOnlyWhenInteractive,
-  testPublishChartClientJsWiresLineAndPieClickOnLinkKey: testPublishChartClientJsWiresLineAndPieClickOnLinkKey
+  testPublishChartClientJsWiresLineAndPieClickOnLinkKey: testPublishChartClientJsWiresLineAndPieClickOnLinkKey,
+  testPublishFilterRequiresFieldAndLabel: testPublishFilterRequiresFieldAndLabel,
+  testPublishDuplicateFilterFieldRejected: testPublishDuplicateFilterFieldRejected,
+  testPublishReactsToMustBeNonEmptyArray: testPublishReactsToMustBeNonEmptyArray,
+  testPublishReactsToMustReferenceDeclaredFilter: testPublishReactsToMustReferenceDeclaredFilter,
+  testPublishFiltersProceedPastValidation: testPublishFiltersProceedPastValidation
 };

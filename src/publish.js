@@ -33,6 +33,26 @@ var D3_CDN_URL = 'https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js';
 // trusted.
 var D3_CDN_INTEGRITY = 'sha512-vc58qvvBdrDR4etbxMdlTt4GBQk1qjvyORR2nrsPsFPyrs+/u5c3+1Ct6upOgdZoIl7eq6k3a1UPDSNAQi/32A==';
 
+// Shared by the kpis/charts/tables validation loops below - reactsTo,
+// when present, must be a non-empty array of field names each matching a
+// declared filters[] entry. Typo protection: publish() has no other way
+// to know a report author meant to reference a filter that doesn't
+// exist, so an undeclared field throws here rather than silently never
+// reacting to anything at report-view time.
+function validateReactsTo(blockType, blockId, reactsTo, filterFields) {
+  if (reactsTo === undefined) {
+    return;
+  }
+  if (!Array.isArray(reactsTo) || !reactsTo.length) {
+    throw new Error('publish(): ' + blockType + ' "' + blockId + '" has "reactsTo", which must be a non-empty array.');
+  }
+  reactsTo.forEach(function (field) {
+    if (!has(filterFields, field)) {
+      throw new Error('publish(): ' + blockType + ' "' + blockId + '" has "reactsTo: [' + field + ']", but "' + field + '" is not a declared filter field.');
+    }
+  });
+}
+
 // Every check a publish node's config must pass before anything is
 // fetched or written - same "throw new Error('publish(): ...')"
 // convention move()/model() already use. Field-by-field, not a schema
@@ -51,6 +71,16 @@ function validatePublishConfig(config) {
   if (config.layout && config.layout.type !== 'linear') {
     throw new Error('publish(): layout.type "' + config.layout.type + '" - only "linear" is supported.');
   }
+  var seenFilterFields = emptyMap();
+  (config.filters || []).forEach(function (filter) {
+    if (!filter.field || !filter.label) {
+      throw new Error('publish(): every filter needs "field" and "label".');
+    }
+    if (has(seenFilterFields, filter.field)) {
+      throw new Error('publish(): duplicate filter field "' + filter.field + '".');
+    }
+    seenFilterFields[filter.field] = true;
+  });
   (config.kpis || []).forEach(function (kpi) {
     if (!kpi.label || !kpi.agg) {
       throw new Error('publish(): every kpi needs "label" and "agg".');
@@ -61,6 +91,7 @@ function validatePublishConfig(config) {
     if (PUBLISH_VALUE_FORMATS.indexOf(kpi.format) === -1) {
       throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
     }
+    validateReactsTo('kpi', kpi.label, kpi.reactsTo, seenFilterFields);
   });
   var seenChartIds = emptyMap();
   (config.charts || []).forEach(function (chart) {
@@ -89,6 +120,7 @@ function validatePublishConfig(config) {
     if (chart.seriesLinkKey && !(chartType === 'bar' && chart.series)) {
       throw new Error('publish(): chart "' + chart.id + '" has "seriesLinkKey", which only "bar" charts with "series" support.');
     }
+    validateReactsTo('chart', chart.id, chart.reactsTo, seenFilterFields);
   });
   var seenTableIds = emptyMap();
   (config.tables || []).forEach(function (table) {
@@ -101,6 +133,7 @@ function validatePublishConfig(config) {
     if (!table.id || !table.title || ['raw', 'aggregated'].indexOf(table.mode) === -1) {
       throw new Error('publish(): every table needs "id", "title", and mode "raw" or "aggregated".');
     }
+    validateReactsTo('table', table.id, table.reactsTo, seenFilterFields);
     if (table.mode === 'raw') {
       if (!Array.isArray(table.columns) || !table.columns.length) {
         throw new Error('publish(): table "' + table.id + '" has mode "raw", which requires a non-empty "columns" array.');
