@@ -891,22 +891,6 @@ var DETAIL_CLIENT_JS = [
   'document.addEventListener("keydown", function (event) { if (event.key === "Escape") { closeDetailModal(); } });'
 ].join('\n');
 
-// Table detail toggle button creation and handler, wired inside TABLE_CLIENT_JS's
-// render() forEach and per-section closure when hasDetail is true, so they read the
-// closure's fresh `table` variable after a reactsTo filter recompute.
-var TABLE_DETAIL_RENDER_JS = [
-  '        if (table.detail) {',
-  '          var detailTd = document.createElement("td");',
-  '          var toggle = document.createElement("button");',
-  '          toggle.type = "button";',
-  '          toggle.className = "table-detail-toggle";',
-  '          toggle.textContent = "\\u25B8";',
-  '          toggle.setAttribute("data-group-value", row[0]);',
-  '          detailTd.appendChild(toggle);',
-  '          tr.appendChild(detailTd);',
-  '        }'
-].join('\n');
-
 var TABLE_DETAIL_TOGGLE_HANDLER_JS = [
   '    section.addEventListener("click", function (event) {',
   '      var toggle = event.target.closest && event.target.closest(".table-detail-toggle");',
