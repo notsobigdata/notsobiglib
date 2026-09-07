@@ -4613,6 +4613,25 @@ var NotSoBigData = (function () {
     return block.source ? blockRowsByRef[block.source.ref] : defaultRows;
   }
 
+  // Attaches a block's own "detail" drill-down data to its already-built
+  // payload object - {groupBy, series, columns, rows}, where `rows` is
+  // exactly the same resolved row set (rowsForBlock's result) the block's
+  // own aggregate/chart was computed from, so a group's detail always
+  // matches what's currently on screen. `series` is undefined for a table
+  // or a non-series chart - harmless, the client only reads it when a
+  // chart's own series field is also present. No-op (returns `built`
+  // unchanged) when the block didn't declare "detail" - kept in the same
+  // FILTER_REUSED_FUNCTIONS_JS list buildChartPayload/buildRawTablePayload/
+  // buildAggregatedTablePayload already live in, since a reactsTo block's
+  // client-side recompute (applyFilterToChart/applyFilterToTable below)
+  // needs to re-run this too, not just the server-side build.
+  function withDetail(built, block, rows) {
+    if (block.detail) {
+      built.detail = { groupBy: block.groupBy, series: block.series, columns: block.detail.columns, rows: rows };
+    }
+    return built;
+  }
+
   function buildReportPayload(config, rows, blockRowsByRef) {
     blockRowsByRef = blockRowsByRef || emptyMap();
     var kpis = (config.kpis || []).map(function (kpi) {
@@ -4621,11 +4640,13 @@ var NotSoBigData = (function () {
       return { label: kpi.label, value: value, formatted: formatValue(value, kpi.format) };
     });
     var charts = (config.charts || []).map(function (chart) {
-      return buildChartPayload(chart, rowsForBlock(chart, rows, blockRowsByRef));
+      var chartRows = rowsForBlock(chart, rows, blockRowsByRef);
+      return withDetail(buildChartPayload(chart, chartRows), chart, chartRows);
     });
     var tables = (config.tables || []).map(function (table) {
       var tableRows = rowsForBlock(table, rows, blockRowsByRef);
-      return table.mode === 'raw' ? buildRawTablePayload(table, tableRows) : buildAggregatedTablePayload(table, tableRows);
+      var built = table.mode === 'raw' ? buildRawTablePayload(table, tableRows) : buildAggregatedTablePayload(table, tableRows);
+      return withDetail(built, table, tableRows);
     });
     var payload = { kpis: kpis, charts: charts, tables: tables };
     if (config.filters && config.filters.length) {
@@ -4710,7 +4731,7 @@ var NotSoBigData = (function () {
   // generated <script> as ordinary, hoisted function declarations.
   var FILTER_REUSED_FUNCTIONS_JS = [
     emptyMap, has, computeAggregate, groupRowsBy, compareGroupValues,
-    formatValue, buildChartPayload, buildRawTablePayload, buildAggregatedTablePayload
+    formatValue, buildChartPayload, buildRawTablePayload, buildAggregatedTablePayload, withDetail
   ].map(function (fn) { return fn.toString(); }).join('\n');
 
   // The filter dropdowns' own wiring: composes every currently-active
@@ -4736,7 +4757,7 @@ var NotSoBigData = (function () {
     '}',
     'function applyFilterToChart(chartConfig) {',
     '  var filteredRows = filteredRowsFor(chartConfig.reactsTo);',
-    '  var newChart = buildChartPayload(chartConfig, filteredRows);',
+    '  var newChart = withDetail(buildChartPayload(chartConfig, filteredRows), chartConfig, filteredRows);',
     '  var container = document.getElementById("chart-" + chartConfig.id);',
     '  if (!container) { return; }',
     '  while (container.firstChild) { container.removeChild(container.firstChild); }',
@@ -4747,7 +4768,7 @@ var NotSoBigData = (function () {
     '}',
     'function applyFilterToTable(tableConfig) {',
     '  var filteredRows = filteredRowsFor(tableConfig.reactsTo);',
-    '  var newTable = tableConfig.mode === "raw" ? buildRawTablePayload(tableConfig, filteredRows) : buildAggregatedTablePayload(tableConfig, filteredRows);',
+    '  var newTable = withDetail(tableConfig.mode === "raw" ? buildRawTablePayload(tableConfig, filteredRows) : buildAggregatedTablePayload(tableConfig, filteredRows), tableConfig, filteredRows);',
     '  var replace = window.__PUBLISH_TABLE_REPLACERS__ && window.__PUBLISH_TABLE_REPLACERS__[tableConfig.id];',
     '  if (replace) { replace(newTable); }',
     '}',

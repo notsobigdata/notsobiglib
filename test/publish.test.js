@@ -604,6 +604,40 @@ function testPublishChartPayloadPassesThroughLinkKeys() {
   assert.ok(!Object.prototype.hasOwnProperty.call(trend, 'linkKey'), 'expected linkKey to be genuinely absent after the JSON round-trip, got: ' + JSON.stringify(trend));
 }
 
+function testPublishDetailAttachedToChartAndTablePayloadsWhenConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [
+    ['A', 'o1', '10'],
+    ['A', 'o2', '20'],
+    ['B', 'o3', '5']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  var chart = payload.charts.filter(function (c) { return c.id === 'by_category'; })[0];
+  assert.deepStrictEqual(chart.detail.groupBy, 'category');
+  assert.strictEqual(chart.detail.series, undefined, 'expected no series field on a non-series chart');
+  assert.deepStrictEqual(chart.detail.columns, [{ field: 'order_id', label: 'Order' }, { field: 'revenue', label: 'Revenue', format: 'currency' }]);
+  assert.strictEqual(chart.detail.rows.length, 3, 'expected the chart\'s own resolved rows (all 3), got: ' + JSON.stringify(chart.detail.rows));
+
+  var table = payload.tables.filter(function (t) { return t.id === 'by_category_table'; })[0];
+  assert.deepStrictEqual(table.detail.groupBy, 'category');
+  assert.strictEqual(table.detail.rows.length, 3, 'expected the table\'s own resolved rows (all 3), got: ' + JSON.stringify(table.detail.rows));
+}
+
+function testPublishNoDetailFieldOnPayloadWithoutDetailConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  payload.tables.forEach(function (table) {
+    assert.strictEqual(table.detail, undefined, 'expected no .detail on a table without "detail" configured, got: ' + JSON.stringify(table));
+  });
+}
+
 function testPublishChartClientJsIncludesSelectionModule() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
@@ -1515,6 +1549,8 @@ module.exports = {
   testPublishChartSeriesLinkKeyWithoutSeriesRejected: testPublishChartSeriesLinkKeyWithoutSeriesRejected,
   testPublishLinkKeyChartsProceedPastValidation: testPublishLinkKeyChartsProceedPastValidation,
   testPublishChartPayloadPassesThroughLinkKeys: testPublishChartPayloadPassesThroughLinkKeys,
+  testPublishDetailAttachedToChartAndTablePayloadsWhenConfigured: testPublishDetailAttachedToChartAndTablePayloadsWhenConfigured,
+  testPublishNoDetailFieldOnPayloadWithoutDetailConfigured: testPublishNoDetailFieldOnPayloadWithoutDetailConfigured,
   testPublishChartClientJsIncludesSelectionModule: testPublishChartClientJsIncludesSelectionModule,
   testPublishChartClientJsCoercesGroupAndSeriesValuesToString: testPublishChartClientJsCoercesGroupAndSeriesValuesToString,
   testPublishChartClientJsCallsApplyHighlightOnceOnLoad: testPublishChartClientJsCallsApplyHighlightOnceOnLoad,
