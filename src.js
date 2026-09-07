@@ -4744,6 +4744,64 @@ var NotSoBigData = (function () {
       .replace(/'/g, '&#39;');
   }
 
+  // Fixed box/gap sizing for layout:'board' - no per-report customization
+  // in v1, same posture the REPORT_CSS design tokens already have.
+  var BOARD_BOX_WIDTH = 260;
+  var BOARD_BOX_HEIGHT = 140;
+  var BOARD_H_GAP = 40;
+  var BOARD_V_GAP = 60;
+
+  // Simple tidy-tree layout for layout:'board' - see the design spec's §4
+  // "Known ceiling" for why this isn't a full Reingold-Tilford walk: each
+  // parent centers over its children's span, but there's no contour-based
+  // collision avoidance for a lopsided tree. blocks with no relatesTo are
+  // roots; a shared `nextSlot` leaf counter across every root's DFS walk
+  // is what makes multiple roots land side by side automatically, with no
+  // separate "offset past the previous tree's width" step needed.
+  // Trusts validateBoardRelations already ran (acyclic, every id/relatesTo
+  // resolves) - does no error-checking of its own.
+  function computeBoardLayout(charts, tables) {
+    var blocks = (charts || []).concat(tables || []);
+    var children = emptyMap();
+    var roots = [];
+    blocks.forEach(function (block) {
+      if (block.relatesTo) {
+        children[block.relatesTo] = children[block.relatesTo] || [];
+        children[block.relatesTo].push(block.id);
+      } else {
+        roots.push(block.id);
+      }
+    });
+
+    var positions = [];
+    var edges = [];
+    var positionById = emptyMap();
+    var nextSlot = 0;
+
+    function place(id, depth) {
+      var kids = children[id] || [];
+      var y = depth * (BOARD_BOX_HEIGHT + BOARD_V_GAP);
+      var x;
+      if (!kids.length) {
+        x = nextSlot * (BOARD_BOX_WIDTH + BOARD_H_GAP);
+        nextSlot += 1;
+      } else {
+        kids.forEach(function (childId) {
+          edges.push({ from: id, to: childId });
+          place(childId, depth + 1);
+        });
+        var childXs = kids.map(function (childId) { return positionById[childId]; });
+        x = (Math.min.apply(null, childXs) + Math.max.apply(null, childXs)) / 2;
+      }
+      positionById[id] = x;
+      positions.push({ id: id, x: x, y: y });
+    }
+
+    roots.forEach(function (rootId) { place(rootId, 0); });
+
+    return { positions: positions, edges: edges };
+  }
+
   // Fixed design tokens - see the design spec's "Design tokens" section.
   // No per-report customization in v1: every published dashboard looks the
   // same on purpose, the same way every model's compiled SQL follows one
@@ -4788,6 +4846,18 @@ var NotSoBigData = (function () {
   // CSS for table detail toggle button, only emitted when detail is configured
   // on at least one table or chart.
   var TABLE_DETAIL_CSS = '.table-detail-toggle { font-family: var(--mono); font-size: 12px; background: none; border: none; cursor: pointer; padding: 0 4px; }';
+
+  // CSS for layout:'board', only emitted when config.layout.type is
+  // 'board' (see renderReportHtml's isBoardLayout branch below).
+  var BOARD_CSS = [
+    '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); }',
+    '.board-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; cursor: grab; }',
+    '.board-canvas.board-panning { cursor: grabbing; }',
+    '.board-node { position: absolute; background: var(--paper); border: 1px solid var(--paper-line); padding: 12px; box-sizing: border-box; overflow: auto; }',
+    '.board-node .chart, .board-node .table-block { border-top: none; margin-top: 0; padding-top: 0; }',
+    '.board-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }',
+    '.board-edge { fill: none; stroke: var(--paper-line); stroke-width: 2; }'
+  ].join('\n');
 
   // One <select> per filters[] entry: an "All" option plus every distinct
   // value already computed server-side in payload.filters[].options (see
@@ -5359,17 +5429,60 @@ var NotSoBigData = (function () {
     '});'
   ].join('\n');
 
+  // Wraps the exact same per-block markup renderReportHtml's linear
+  // branch already produces (chartSectionsList[i]/tableSectionsList[i],
+  // unchanged) into positioned .board-node divs, plus an SVG layer
+  // drawing one <path> per computeBoardLayout edge. sectionById maps a
+  // block's id to its already-rendered markup - charts and tables are
+  // zipped by array index since chartSectionsList/tableSectionsList are
+  // built with .map() over config.charts/config.tables in the same order.
+  function renderBoardCanvas(config, chartSectionsList, tableSectionsList) {
+    var charts = config.charts || [];
+    var tables = config.tables || [];
+    var layout = computeBoardLayout(charts, tables);
+    var positionById = emptyMap();
+    layout.positions.forEach(function (p) { positionById[p.id] = p; });
+    var sectionById = emptyMap();
+    charts.forEach(function (chart, index) { sectionById[chart.id] = chartSectionsList[index]; });
+    tables.forEach(function (table, index) { sectionById[table.id] = tableSectionsList[index]; });
+
+    var nodesHtml = layout.positions.map(function (p) {
+      return '<div class="board-node" style="left:' + p.x + 'px;top:' + p.y + 'px;width:' + BOARD_BOX_WIDTH + 'px;height:' + BOARD_BOX_HEIGHT + 'px">' + sectionById[p.id] + '</div>';
+    }).join('');
+
+    var maxX = layout.positions.reduce(function (m, p) { return Math.max(m, p.x + BOARD_BOX_WIDTH); }, 0);
+    var maxY = layout.positions.reduce(function (m, p) { return Math.max(m, p.y + BOARD_BOX_HEIGHT); }, 0);
+
+    var edgesHtml = layout.edges.map(function (edge) {
+      var from = positionById[edge.from];
+      var to = positionById[edge.to];
+      var x1 = from.x + BOARD_BOX_WIDTH / 2;
+      var y1 = from.y + BOARD_BOX_HEIGHT;
+      var x2 = to.x + BOARD_BOX_WIDTH / 2;
+      var y2 = to.y;
+      return '<path class="board-edge" d="M' + x1 + ' ' + y1 + ' L' + x2 + ' ' + y2 + '"></path>';
+    }).join('');
+
+    return '<div class="board-viewport"><div class="board-canvas" id="board-canvas">'
+      + '<svg class="board-edges" width="' + maxX + '" height="' + maxY + '">' + edgesHtml + '</svg>'
+      + nodesHtml
+      + '</div></div>';
+  }
+
   function renderReportHtml(payload, config) {
+    var isBoardLayout = !!(config.layout && config.layout.type === 'board');
     var filtersSection = (payload.filters && payload.filters.length) ? renderFiltersSection(payload.filters) : '';
     var kpiCards = payload.kpis.map(function (kpi) {
       return '<div class="kpi"><div class="kpi-label">' + escapeHtml(kpi.label) + '</div>'
         + '<div class="kpi-value">' + escapeHtml(kpi.formatted) + '</div></div>';
     }).join('');
-    var chartSections = payload.charts.map(function (chart) {
+    var chartSectionsList = payload.charts.map(function (chart) {
       return '<section class="chart" data-chart-id="' + escapeHtml(chart.id) + '"><h2>' + escapeHtml(chart.title) + '</h2>'
         + '<div class="chart-canvas" id="chart-' + escapeHtml(chart.id) + '"></div></section>';
-    }).join('');
-    var tableSections = payload.tables.map(renderTableSection).join('');
+    });
+    var tableSectionsList = payload.tables.map(renderTableSection);
+    var chartSections = chartSectionsList.join('');
+    var tableSections = tableSectionsList.join('');
     var hasDetail = payload.tables.some(function (t) { return t.detail; }) || payload.charts.some(function (c) { return c.detail; });
     var hasFilters = !!(payload.filters && payload.filters.length);
     var script = 'window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';';
@@ -5392,11 +5505,14 @@ var NotSoBigData = (function () {
       script += DETAIL_CLIENT_JS;
     }
     var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
-    var css = REPORT_CSS + (hasDetail ? TABLE_DETAIL_CSS : '');
+    var css = REPORT_CSS + (hasDetail ? TABLE_DETAIL_CSS : '') + (isBoardLayout ? BOARD_CSS : '');
+    var body = isBoardLayout
+      ? filtersSection + '<div class="kpis">' + kpiCards + '</div>' + renderBoardCanvas(config, chartSectionsList, tableSectionsList)
+      : filtersSection + '<div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections;
     return '<!doctype html><html><head><meta charset="utf-8">'
       + '<title>' + escapeHtml(config.target.fileName) + '</title>'
       + '<style>' + css + '</style>' + d3Script + '</head><body>'
-      + '<main>' + filtersSection + '<div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections + '</main>'
+      + '<main>' + body + '</main>'
       + '<script>' + script + '</script>'
       + '</body></html>';
   }

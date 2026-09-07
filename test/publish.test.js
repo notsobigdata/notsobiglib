@@ -130,6 +130,49 @@ function testPublishBoardValidRelationsProceedPastValidation() {
   assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
+// boardValidPublish: root "r" with two children "c1" (chart) and "c2"
+// (table). Hand-computed with BOARD_BOX_WIDTH=260, BOARD_BOX_HEIGHT=140,
+// BOARD_H_GAP=40, BOARD_V_GAP=60: leaves land at x=0 and x=300 (0 and 1
+// slots * 300px-with-gap), y=200 (depth 1 * 200px-with-gap); the root
+// centers over its children at x=(0+300)/2=150, y=0.
+function testPublishBoardLayoutPositionsSingleRootTwoChildren() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(html.indexOf('left:150px;top:0px') !== -1, 'expected the root positioned at (150,0), got: ' + html);
+  assert.ok(html.indexOf('left:0px;top:200px') !== -1, 'expected the first child positioned at (0,200), got: ' + html);
+  assert.ok(html.indexOf('left:300px;top:200px') !== -1, 'expected the second child positioned at (300,200), got: ' + html);
+  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
+  assert.strictEqual(edgeCount, 2, 'expected 2 edges (r->c1, r->c2), got ' + edgeCount + ' in: ' + html);
+}
+
+function testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardChainPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(html.indexOf('left:0px;top:0px') !== -1, 'expected "g" at (0,0), got: ' + html);
+  assert.ok(html.indexOf('left:0px;top:200px') !== -1, 'expected "p" at (0,200), got: ' + html);
+  assert.ok(html.indexOf('left:0px;top:400px') !== -1, 'expected "c" at (0,400), got: ' + html);
+  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
+  assert.strictEqual(edgeCount, 2, 'expected 2 edges (g->p, p->c), got ' + edgeCount + ' in: ' + html);
+}
+
+function testPublishBoardLayoutPlacesMultipleRootsSideBySide() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardMultiRootPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(html.indexOf('left:0px;top:0px') !== -1, 'expected root "a" at (0,0), got: ' + html);
+  assert.ok(html.indexOf('left:300px;top:0px') !== -1, 'expected root "b" at (300,0), got: ' + html);
+  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
+  assert.strictEqual(edgeCount, 0, 'expected 0 edges (two unrelated roots), got ' + edgeCount + ' in: ' + html);
+}
+
 // Shims BigQuery.Tables.get/Tabledata.list and DriveApp.getFolderById
 // directly on the harness's vm sandbox (harness.loadContext returns the
 // actual global object for that vm context, so adding properties to it
@@ -1795,6 +1838,9 @@ module.exports = {
   testPublishBoardRelatesToCycleRejected: testPublishBoardRelatesToCycleRejected,
   testPublishBoardDuplicateCrossTypeIdRejected: testPublishBoardDuplicateCrossTypeIdRejected,
   testPublishBoardValidRelationsProceedPastValidation: testPublishBoardValidRelationsProceedPastValidation,
+  testPublishBoardLayoutPositionsSingleRootTwoChildren: testPublishBoardLayoutPositionsSingleRootTwoChildren,
+  testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine: testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine,
+  testPublishBoardLayoutPlacesMultipleRootsSideBySide: testPublishBoardLayoutPlacesMultipleRootsSideBySide,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
   testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,

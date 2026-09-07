@@ -268,6 +268,42 @@ var boardValidPublish = {
   ]
 };
 
+// Straight 3-level chain: g -> p -> c. Every box is BOARD_BOX_WIDTH=260 +
+// BOARD_H_GAP=40 = 300px wide-with-gap, BOARD_BOX_HEIGHT=140 +
+// BOARD_V_GAP=60 = 200px tall-with-gap - a single-child chain has no
+// siblings to center over, so every node lands at x=0, y=depth*200.
+var boardChainPublish = {
+  kind: 'publish',
+  name: 'boardChainPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-chain.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'g', type: 'bar', title: 'G', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'p', type: 'bar', title: 'P', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'g' }
+  ],
+  tables: [
+    { id: 'c', title: 'C', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'p' }
+  ]
+};
+
+// Two independent roots, each a single leaf with no relatesTo - proves
+// multiple trees land side by side (x=0 and x=300) rather than
+// overlapping at x=0.
+var boardMultiRootPublish = {
+  kind: 'publish',
+  name: 'boardMultiRootPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-multi-root.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'a', type: 'bar', title: 'A', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'b', type: 'bar', title: 'B', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }
+  ]
+};
+
 // One raw table (columns: order_id, revenue) and one aggregated table
 // (groupBy: category, metrics: revenue sum + distinct orders), pageSize 2
 // on the raw table so Task 3's pagination tests have >1 page to work
