@@ -242,22 +242,33 @@ moment a filter changes (clicking "Next" would then page through stale,
 pre-filter data). One shared closure, one small always-on hook, is the
 only version of this that can't drift out of sync with itself.
 
-## `linkTo` resolves at generation time, splitting pure validation from the one live Drive call
+## `linkTo` resolves at generation time, and it's pure - no Drive call at all
 
-Mirroring `resolvePublishSource`/`fetchTableRows`'s own split:
-`validateLinkToTarget(chart, allNodes)` is pure (node exists, is `kind:
-'publish'`, has `target.upsertByName`, has a matching `filters[]` field)
-and is fully Node-testable with a fixture `allNodes` list; the one live
-call, `resolveLinkToUrl`, just reuses `move.js`'s own
-`resolveDriveTargetFileId` (a live `getFolderById(...).getFilesByName(...)`
-lookup, the exact primitive `upsertByName` targets already use) rather
-than writing a second "does this file already exist" check. `publish()`
-calls `resolveConfigLinkTargets` *after* `fetchTableRows`, not before —
-purely so a config with a valid `linkTo` still fails an un-shimmed Node
-test at the same "BigQuery is not defined" point every other "proceeds
-past validation" test already does, rather than failing one call earlier
-at an equally-un-shimmed `DriveApp`. Nothing about correctness depends on
-this ordering; only test-suite consistency does.
+An earlier version of this feature resolved `linkTo` to a live Drive
+web-view URL (`https://drive.google.com/file/d/<id>/view`, looked up via
+`move.js`'s `resolveDriveTargetFileId`) - reasonable-looking, but wrong
+for how these reports actually get viewed: downloaded or synced (Drive
+for Desktop) into one local folder and opened straight in a browser, not
+opened through Drive's own web preview, which doesn't execute an
+arbitrary `.html` file's inline script at all (it renders a static
+preview, or offers a download) - so the generated link simply didn't
+render anything. The fix is also a simplification: `linkTo`'s destination
+is just the other node's own declared `target.fileName`, a plain relative
+link a browser resolves against wherever the *current* file happens to be
+sitting - exactly like two spreadsheet tabs cross-referencing each other
+by name, and exactly what the "put both files in the same folder" mental
+model actually needs.
+
+This means `validateLinkToTarget(chart, allNodes)` (node exists, is
+`kind: 'publish'`, has a matching `filters[]` field) is the *entire*
+resolution - no split needed between a pure half and a live-I/O half,
+unlike `resolvePublishSource`/`fetchTableRows`. There's also no more
+"the destination must have been published at least once already"
+ordering requirement the live-lookup version had - a relative filename is
+valid the moment both configs exist, regardless of which one has
+actually run. `resolveConfigLinkTargets` is called early in `publish()`,
+right after `resolvePublishSource`, with nothing forcing it to wait for
+`fetchTableRows` the way the old Drive-lookup version did.
 
 The resolved shape (`{url, field, newTab}`) replaces the declared shape
 (`{node, field, newTab}`) on a *copy* of `config.charts`, never the

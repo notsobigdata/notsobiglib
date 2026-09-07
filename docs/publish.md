@@ -152,7 +152,7 @@ charts: [
 ]
 
 // categoryDetailPublish
-target: { type: 'drive', folderId: props.REPORTS_FOLDER, fileName: 'category-detail.html', upsertByName: true },
+target: { type: 'drive', folderId: props.REPORTS_FOLDER, fileName: 'category-detail.html' },
 filters: [{ field: 'category_name', label: 'Category' }]
 ```
 
@@ -162,18 +162,21 @@ filters: [{ field: 'category_name', label: 'Category' }]
   `publish` node, `field` is the row field to send (same as `groupBy`),
   and `newTab` (default `true`) picks a new browser tab vs. navigating
   the current one.
-- The destination node's `target` **must** set `upsertByName: true` — its
-  Drive file id, and therefore this link, would otherwise change on the
-  destination's very next run. It must also declare a `filters[]` entry
-  for the same `field`; `publish()` rejects a `linkTo` that doesn't match
-  one, the same typo guard `reactsTo` already applies within one report.
-- Resolving `linkTo` reads the destination node's Drive file the same way
-  `target.upsertByName` already does (a live lookup by folder + file
-  name, not a query) — this means **the destination must have been
-  published at least once already**. The very first time two newly
-  linked reports run together, generate the destination first; after
-  that, ordinary re-runs in either order work, since the file already
-  exists.
+- The link is the destination node's own `target.fileName`, as a plain
+  relative link — not a Drive URL. This library's reports are meant to
+  be downloaded (or synced via Drive for Desktop) into one local folder
+  and opened straight in a browser, not viewed through Drive's own web
+  preview, which doesn't render an arbitrary `.html` file's live script.
+  Both files need to end up **in the same folder** for the link to
+  resolve — there's nothing in the config that enforces this, the same
+  posture `charts[]`' `groupBy` already has for a field that doesn't
+  exist.
+- The destination must also declare a `filters[]` entry for the same
+  `field`; `publish()` rejects a `linkTo` that doesn't match one, the
+  same typo guard `reactsTo` already applies within one report. Nothing
+  about `linkTo` reads or writes Drive at generation time, and there's no
+  "the destination must already exist" ordering requirement — either
+  report can be generated first.
 - On the destination side, nothing extra is configured: opening the link
   reads the `field=value` query string on load, and if it matches one of
   that report's own filter options, pre-selects the dropdown and

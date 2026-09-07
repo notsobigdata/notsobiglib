@@ -4201,16 +4201,23 @@ var NotSoBigData = (function () {
     return location;
   }
 
-  // Pure half of linkTo's cross-node resolution: confirms chart.linkTo.node
-  // names a declared publish node whose target is stable (upsertByName -
-  // without it the destination's file id, and therefore this URL, would
-  // change on its very next run) and whose filters[] can actually receive
-  // the field this chart will send on click (the same typo-guard reasoning
-  // validateReactsTo already applies to reactsTo, just across two nodes
-  // instead of one). Never touches Drive - see resolveLinkToUrl below for
-  // the one live call this splits off from, mirroring resolvePublishSource/
-  // fetchTableRows' own pure-resolution-vs-live-I/O split. Returns the
-  // target node's own config for resolveLinkToUrl to read .target off of.
+  // linkTo's whole cross-node resolution, and it's pure - no Drive/BigQuery
+  // call anywhere in it. The reports this library generates are meant to be
+  // downloaded (or synced via Drive for Desktop) into one local folder and
+  // opened straight in a browser, not viewed through Drive's own web
+  // preview - so "the destination's URL" is just its own declared
+  // target.fileName, a plain relative link the browser resolves against
+  // wherever the *current* file happens to be sitting, exactly like two
+  // spreadsheet tabs cross-referencing each other by name. This also means
+  // there's no "the destination must have been published first" ordering
+  // requirement the way an earlier version of this feature (resolving a
+  // live Drive file id) had - a relative filename is valid the moment both
+  // configs exist, regardless of which one has actually run.
+  //
+  // Confirms chart.linkTo.node names a declared publish node whose
+  // filters[] can actually receive the field this chart will send on click
+  // (the same typo-guard reasoning validateReactsTo already applies to
+  // reactsTo, just across two nodes instead of one).
   function validateLinkToTarget(chart, allNodes) {
     var targetNode = (allNodes || []).filter(function (node) { return node.name === chart.linkTo.node; })[0];
     if (!targetNode) {
@@ -4220,9 +4227,6 @@ var NotSoBigData = (function () {
       throw new Error('publish(): chart "' + chart.id + '" has linkTo.node "' + chart.linkTo.node + '", which is a "' + targetNode.kind + '" node, not "publish".');
     }
     var targetConfig = targetNode.config;
-    if (!targetConfig.target || !targetConfig.target.upsertByName) {
-      throw new Error('publish(): chart "' + chart.id + '" links to "' + chart.linkTo.node + '", which needs target.upsertByName: true for a stable link.');
-    }
     var hasMatchingFilter = (targetConfig.filters || []).some(function (filter) { return filter.field === chart.linkTo.field; });
     if (!hasMatchingFilter) {
       throw new Error('publish(): chart "' + chart.id + '" links to "' + chart.linkTo.node + '" on field "' + chart.linkTo.field + '", but that node has no filters[] entry for that field.');
@@ -4230,27 +4234,14 @@ var NotSoBigData = (function () {
     return targetConfig;
   }
 
-  // The one live call validateLinkToTarget's result feeds - reuses move.js's
-  // own upsertByName lookup (resolveDriveTargetFileId) rather than
-  // duplicating "find an existing file by folder+name" a second time. Comes
-  // back null when the destination has never actually been published yet
-  // (nothing to link to), which is a real, expected first-run gap rather
-  // than a bug - see docs/publish.md's linkTo section.
-  function resolveLinkToUrl(targetConfig) {
-    var fileId = resolveDriveTargetFileId(targetConfig.target);
-    if (!fileId) {
-      throw new Error('publish(): linkTo target "' + targetConfig.target.fileName + '" hasn\'t been published yet - run it at least once before linking to it.');
-    }
-    return 'https://drive.google.com/file/d/' + fileId + '/view';
-  }
-
   // Produces a copy of config with every chart's linkTo swapped from
-  // {node, field, newTab} (declared) to {url, field, newTab} (resolved) -
+  // {node, field, newTab} (declared) to {url, field, newTab} (resolved,
+  // url being the destination's own target.fileName) -
   // buildChartPayload/buildFilterableConfig downstream (including the
   // client-side re-invocation of buildChartPayload via
-  // FILTER_REUSED_FUNCTIONS_JS, which must never call DriveApp) never need
-  // to know about node names, only the already-resolved url. A no-op copy
-  // when no chart declares linkTo, so a report with none pays no cost.
+  // FILTER_REUSED_FUNCTIONS_JS) never need to know about node names, only
+  // the already-resolved relative url. A no-op copy when no chart declares
+  // linkTo, so a report with none pays no cost.
   function resolveConfigLinkTargets(config, allNodes) {
     if (!(config.charts || []).some(function (chart) { return chart.linkTo; })) {
       return config;
@@ -4258,10 +4249,9 @@ var NotSoBigData = (function () {
     var charts = (config.charts || []).map(function (chart) {
       if (!chart.linkTo) { return chart; }
       var targetConfig = validateLinkToTarget(chart, allNodes);
-      var url = resolveLinkToUrl(targetConfig);
       var resolvedChart = {};
       Object.keys(chart).forEach(function (key) { resolvedChart[key] = chart[key]; });
-      resolvedChart.linkTo = { url: url, field: chart.linkTo.field, newTab: chart.linkTo.newTab !== false };
+      resolvedChart.linkTo = { url: encodeURIComponent(targetConfig.target.fileName), field: chart.linkTo.field, newTab: chart.linkTo.newTab !== false };
       return resolvedChart;
     });
     var resolvedConfig = {};
@@ -4273,15 +4263,12 @@ var NotSoBigData = (function () {
   // The EXECUTORS.publish entry. allNodes is optional and only used to
   // resolve source.ref and any chart's linkTo.node - move()/model() ignore
   // the same argument today (see cli.js's widened runNodes()), so this is
-  // the only kind that reads it so far. resolveConfigLinkTargets runs after
-  // fetchTableRows (not before) purely so an un-shimmed Node test's "proceeds
-  // past validation" proof keeps failing at the same BigQuery call every
-  // other such test already fails at, linkTo or not.
+  // the only kind that reads it so far.
   function publish(config, allNodes) {
     validatePublishConfig(config);
     var location = resolvePublishSource(config.source.ref, allNodes);
-    var rows = fetchTableRows(location.projectId, location.dataset, location.table);
     var resolvedConfig = resolveConfigLinkTargets(config, allNodes);
+    var rows = fetchTableRows(location.projectId, location.dataset, location.table);
     var payload = buildReportPayload(resolvedConfig, rows);
     var html = renderReportHtml(payload, resolvedConfig);
     var fileId = resolveDriveWriteTarget(config.target);

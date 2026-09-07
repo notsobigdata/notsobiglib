@@ -101,15 +101,8 @@ function testPublishLayoutTypeOtherThanLinearRejected() {
 // Tabledata.list should appear to return (one array of cell values per
 // row, in fieldNames order); the returned function reads back whatever
 // HTML DriveApp.createFile most recently received.
-// existingFilesByName (optional) - a { fileName: fileId } map of files
-// linkTo's resolveDriveTargetFileId should find already sitting in the
-// fake folder, for testing linkTo's upsertByName lookup against a
-// destination that has (or hasn't) been published before. Every existing
-// call site omits this and gets the harmless default (getFilesByName
-// finds nothing), same as a real folder these tests never populated.
-function shimBigQueryAndDrive(ctx, fieldNames, rowValues, existingFilesByName) {
+function shimBigQueryAndDrive(ctx, fieldNames, rowValues) {
   var capturedHtml = null;
-  existingFilesByName = existingFilesByName || {};
   ctx.MimeType = { HTML: 'text/html' };
   ctx.BigQuery = {
     Tables: {
@@ -133,14 +126,6 @@ function shimBigQueryAndDrive(ctx, fieldNames, rowValues, existingFilesByName) {
         createFile: function (name, content) {
           capturedHtml = content;
           return { getId: function () { return 'fake-file-id'; } };
-        },
-        getFilesByName: function (name) {
-          var fileId = existingFilesByName[name];
-          var consumed = false;
-          return {
-            hasNext: function () { return !consumed && fileId !== undefined; },
-            next: function () { consumed = true; return { getId: function () { return fileId; } }; }
-          };
         }
       };
     }
@@ -739,40 +724,27 @@ function testPublishLinkToCannotCombineWithSeriesLinkKey() {
   assert.ok(/both "linkTo" and "linkKey"\/"seriesLinkKey"/.test(result.error), 'expected a linkTo/seriesLinkKey mutual-exclusion error, got: ' + result.error);
 }
 
-// The remaining linkTo checks (unknown node, wrong kind, missing
-// upsertByName, missing matching filter) all live in
-// resolveConfigLinkTargets/validateLinkToTarget, which run after
-// fetchTableRows - so these need BigQuery shimmed to get past that call,
-// but never reach the one live Drive lookup (resolveLinkToUrl), since
-// each fails at an earlier, pure check first.
+// The remaining linkTo checks (unknown node, wrong kind, missing matching
+// filter) all live in resolveConfigLinkTargets/validateLinkToTarget,
+// which is pure (no Drive/BigQuery call anywhere in linkTo's resolution -
+// see that function's own comment) and runs before fetchTableRows, so
+// these need no shim at all - same "runOne() alone is enough" pattern as
+// every other pure-validation test in this file (e.g.
+// testPublishRefMustResolveToBigQueryLocation).
 function testPublishLinkToUnknownNodeRejected() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select linkToUnknownNodePublish').nodes[0];
+  var result = runOne('linkToUnknownNodePublish');
   assert.strictEqual(result.status, 'failed');
   assert.ok(/linkTo\.node "nonExistentNodeXYZ", which doesn't match any declared node/.test(result.error), 'expected an unknown-linkTo-node error, got: ' + result.error);
 }
 
 function testPublishLinkToNonPublishNodeRejected() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select linkToNonPublishNodePublish').nodes[0];
+  var result = runOne('linkToNonPublishNodePublish');
   assert.strictEqual(result.status, 'failed');
   assert.ok(/which is a "move" node, not "publish"/.test(result.error), 'expected a wrong-kind linkTo error, got: ' + result.error);
 }
 
-function testPublishLinkToRequiresUpsertByNameOnTarget() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select linkToSourceNoUpsertPublish').nodes[0];
-  assert.strictEqual(result.status, 'failed');
-  assert.ok(/needs target\.upsertByName: true for a stable link/.test(result.error), 'expected an upsertByName error, got: ' + result.error);
-}
-
 function testPublishLinkToRequiresMatchingFilterFieldOnTarget() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select linkToSourceNoMatchingFilterPublish').nodes[0];
+  var result = runOne('linkToSourceNoMatchingFilterPublish');
   assert.strictEqual(result.status, 'failed');
   assert.ok(/has no filters\[\] entry for that field/.test(result.error), 'expected a missing-matching-filter error, got: ' + result.error);
 }
@@ -781,38 +753,29 @@ function testPublishLinkToValidConfigProceedsPastValidation() {
   var result = runOne('linkToSourcePublish');
   // Same proof pattern as testPublishLinkKeyChartsProceedPastValidation:
   // no shim in this test at all, so a config that gets all the way past
-  // both config validation and linkTo's own cross-node checks fails next
-  // at the un-shimmed BigQuery call (fetchTableRows runs before
-  // resolveConfigLinkTargets - see publish()'s ordering), not before it.
+  // both config validation and linkTo's own (pure) cross-node checks
+  // fails next at the un-shimmed BigQuery call (fetchTableRows), not
+  // before it.
   assert.strictEqual(result.status, 'failed');
   assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
-function testPublishLinkToNotYetPublishedRejected() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  // No existingFilesByName entry for linkToTargetPublish's fileName - the
-  // destination has never been published, so resolveDriveTargetFileId's
-  // getFilesByName lookup comes back empty.
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select linkToSourcePublish').nodes[0];
-  assert.strictEqual(result.status, 'failed');
-  assert.ok(/hasn't been published yet/.test(result.error), 'expected a not-yet-published linkTo error, got: ' + result.error);
-  assert.strictEqual(getHtml(), null, 'expected no file to have been written when linkTo resolution fails');
-}
-
 function testPublishLinkToResolvesUrlAndEmbedsInChartPayload() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']], { 'category-detail.html': 'existing-file-id' });
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
   var result = ctx.NotSoBigData.cli('run --select linkToSourcePublish').nodes[0];
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var chart = extractPayload(getHtml()).charts[0];
-  assert.deepStrictEqual(chart.linkTo, { url: 'https://drive.google.com/file/d/existing-file-id/view', field: 'category', newTab: true },
-    'expected linkTo resolved to the destination\'s Drive URL with newTab defaulting to true, got: ' + JSON.stringify(chart.linkTo));
+  // linkToTargetPublish's own target.fileName is 'category-detail.html' -
+  // no Drive call anywhere in this resolution, just the destination's own
+  // declared filename, ready to sit as a relative link next to this file.
+  assert.deepStrictEqual(chart.linkTo, { url: 'category-detail.html', field: 'category', newTab: true },
+    'expected linkTo resolved to the destination\'s own target.fileName with newTab defaulting to true, got: ' + JSON.stringify(chart.linkTo));
 }
 
 function testPublishLinkToNewTabFalseRespected() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']], { 'category-detail.html': 'existing-file-id' });
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
   var result = ctx.NotSoBigData.cli('run --select linkToSourceNewTabFalsePublish').nodes[0];
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var chart = extractPayload(getHtml()).charts[0];
@@ -1456,10 +1419,8 @@ module.exports = {
   testPublishLinkToCannotCombineWithSeriesLinkKey: testPublishLinkToCannotCombineWithSeriesLinkKey,
   testPublishLinkToUnknownNodeRejected: testPublishLinkToUnknownNodeRejected,
   testPublishLinkToNonPublishNodeRejected: testPublishLinkToNonPublishNodeRejected,
-  testPublishLinkToRequiresUpsertByNameOnTarget: testPublishLinkToRequiresUpsertByNameOnTarget,
   testPublishLinkToRequiresMatchingFilterFieldOnTarget: testPublishLinkToRequiresMatchingFilterFieldOnTarget,
   testPublishLinkToValidConfigProceedsPastValidation: testPublishLinkToValidConfigProceedsPastValidation,
-  testPublishLinkToNotYetPublishedRejected: testPublishLinkToNotYetPublishedRejected,
   testPublishLinkToResolvesUrlAndEmbedsInChartPayload: testPublishLinkToResolvesUrlAndEmbedsInChartPayload,
   testPublishLinkToNewTabFalseRespected: testPublishLinkToNewTabFalseRespected,
   testPublishFilterClientJsAppliesMatchingQueryStringFilterOnLoad: testPublishFilterClientJsAppliesMatchingQueryStringFilterOnLoad,
