@@ -4699,7 +4699,15 @@ var NotSoBigData = (function () {
     '.table-pager button:disabled { color: var(--ink-soft); cursor: default; }',
     '.filters { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }',
     '.filter { font-family: var(--mono); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }',
-    '.filter select { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 6px; }'
+    '.filter select { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 6px; }',
+    '.table-detail-toggle { font-family: var(--mono); font-size: 12px; background: none; border: none; cursor: pointer; padding: 0 4px; }',
+    '.detail-modal-backdrop { position: fixed; inset: 0; background: rgba(31, 36, 33, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }',
+    '.detail-modal { background: var(--paper); border: 1px solid var(--paper-line); padding: 16px; max-width: 90vw; max-height: 80vh; overflow: auto; }',
+    '.detail-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }',
+    '.detail-modal-header h3 { margin: 0; font-size: 14px; }',
+    '.detail-modal-close { font-family: var(--mono); font-size: 16px; background: none; border: none; cursor: pointer; }',
+    '.detail-modal table { border-collapse: collapse; font-family: var(--mono); font-size: 12px; }',
+    '.detail-modal th, .detail-modal td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); }'
   ].join('\n');
 
   // One <select> per filters[] entry: an "All" option plus every distinct
@@ -4816,6 +4824,73 @@ var NotSoBigData = (function () {
     '  });',
     '  applyFiltersFromQueryString();',
     '});'
+  ].join('\n');
+
+  // The subset of FILTER_REUSED_FUNCTIONS_JS's functions the detail modal
+  // itself needs (buildRawTablePayload, and formatValue it calls) - shipped
+  // only when a report has "detail" but no filters[] at all, since
+  // FILTER_REUSED_FUNCTIONS_JS already ships a superset otherwise and
+  // declaring the same function twice in one <script> would be redundant
+  // (see renderReportHtml's hasFilters/hasDetail branch below).
+  var DETAIL_REUSED_FUNCTIONS_JS = [formatValue, buildRawTablePayload].map(function (fn) { return fn.toString(); }).join('\n');
+
+  // One generic modal, shared by the table-detail toggle (TABLE_CLIENT_JS)
+  // and the chart-detail click branch (CHART_CLIENT_JS's handleChartClick) -
+  // both already have their own {columns, rows} (buildRawTablePayload's
+  // output shape) by the time they call this, so this only ever renders,
+  // never computes. Built via createElement/textContent only, same rule as
+  // TABLE_CLIENT_JS's own row rendering.
+  var DETAIL_CLIENT_JS = [
+    'function closeDetailModal() {',
+    '  var modal = document.getElementById("publish-detail-modal");',
+    '  if (modal) { modal.parentNode.removeChild(modal); }',
+    '}',
+    'function openDetailModal(title, columns, rows) {',
+    '  closeDetailModal();',
+    '  var backdrop = document.createElement("div");',
+    '  backdrop.id = "publish-detail-modal";',
+    '  backdrop.className = "detail-modal-backdrop";',
+    '  backdrop.addEventListener("click", function (event) { if (event.target === backdrop) { closeDetailModal(); } });',
+    '  var box = document.createElement("div");',
+    '  box.className = "detail-modal";',
+    '  var header = document.createElement("div");',
+    '  header.className = "detail-modal-header";',
+    '  var heading = document.createElement("h3");',
+    '  heading.textContent = title;',
+    '  var closeBtn = document.createElement("button");',
+    '  closeBtn.type = "button";',
+    '  closeBtn.className = "detail-modal-close";',
+    '  closeBtn.textContent = "\\u00d7";',
+    '  closeBtn.addEventListener("click", closeDetailModal);',
+    '  header.appendChild(heading);',
+    '  header.appendChild(closeBtn);',
+    '  var table = document.createElement("table");',
+    '  var thead = document.createElement("thead");',
+    '  var headRow = document.createElement("tr");',
+    '  columns.forEach(function (column) {',
+    '    var th = document.createElement("th");',
+    '    th.textContent = column.label;',
+    '    headRow.appendChild(th);',
+    '  });',
+    '  thead.appendChild(headRow);',
+    '  var tbody = document.createElement("tbody");',
+    '  rows.forEach(function (row) {',
+    '    var tr = document.createElement("tr");',
+    '    row.forEach(function (cell) {',
+    '      var td = document.createElement("td");',
+    '      td.textContent = cell;',
+    '      tr.appendChild(td);',
+    '    });',
+    '    tbody.appendChild(tr);',
+    '  });',
+    '  table.appendChild(thead);',
+    '  table.appendChild(tbody);',
+    '  box.appendChild(header);',
+    '  box.appendChild(table);',
+    '  backdrop.appendChild(box);',
+    '  document.body.appendChild(backdrop);',
+    '}',
+    'document.addEventListener("keydown", function (event) { if (event.key === "Escape") { closeDetailModal(); } });'
   ].join('\n');
 
   // Static first page (readable with zero JS, same as the KPI cards/SVG
@@ -5186,6 +5261,8 @@ var NotSoBigData = (function () {
         + '<div class="chart-canvas" id="chart-' + escapeHtml(chart.id) + '"></div></section>';
     }).join('');
     var tableSections = payload.tables.map(renderTableSection).join('');
+    var hasDetail = payload.tables.some(function (t) { return t.detail; }) || payload.charts.some(function (c) { return c.detail; });
+    var hasFilters = !!(payload.filters && payload.filters.length);
     var script = 'window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';';
     if (payload.tables.length) {
       script += TABLE_CLIENT_JS;
@@ -5193,8 +5270,13 @@ var NotSoBigData = (function () {
     if (payload.charts.length) {
       script += CHART_CLIENT_JS;
     }
-    if (payload.filters && payload.filters.length) {
+    if (hasFilters) {
       script += FILTER_REUSED_FUNCTIONS_JS + FILTER_CLIENT_JS;
+    } else if (hasDetail) {
+      script += DETAIL_REUSED_FUNCTIONS_JS;
+    }
+    if (hasDetail) {
+      script += DETAIL_CLIENT_JS;
     }
     var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
     return '<!doctype html><html><head><meta charset="utf-8">'

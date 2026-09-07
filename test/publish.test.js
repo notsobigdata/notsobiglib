@@ -1089,6 +1089,28 @@ function testPublishNoFiltersMarkupOrClientJsWithoutFilters() {
   assert.ok(!/function filteredRowsFor/.test(html), 'expected no filter-engine wiring, got: ' + html);
 }
 
+function testPublishNoDetailScriptWithoutAnyDetailConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(!/function openDetailModal/.test(html), 'expected no detail modal script without any detail configured, got: ' + html);
+}
+
+function testPublishDetailScriptEmittedWithoutFilters() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [['A', 'o1', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  // detailPublish has no filters[] - proves DETAIL_REUSED_FUNCTIONS_JS
+  // (not FILTER_REUSED_FUNCTIONS_JS) supplies buildRawTablePayload here.
+  assert.ok(/function openDetailModal/.test(html), 'expected the detail modal script, got: ' + html);
+  assert.ok(/function buildRawTablePayload/.test(html), 'expected buildRawTablePayload reused for the modal, got: ' + html);
+  assert.ok(!/function applyFilters\(/.test(html), 'expected no filters[] client JS on a report with no filters[], got: ' + html);
+}
+
 function testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue', 'day'], [['A', 'online', '10', '1']]);
@@ -1593,6 +1615,8 @@ module.exports = {
   testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured: testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured,
   testPublishFiltersMarkupRenderedWhenConfigured: testPublishFiltersMarkupRenderedWhenConfigured,
   testPublishNoFiltersMarkupOrClientJsWithoutFilters: testPublishNoFiltersMarkupOrClientJsWithoutFilters,
+  testPublishNoDetailScriptWithoutAnyDetailConfigured: testPublishNoDetailScriptWithoutAnyDetailConfigured,
+  testPublishDetailScriptEmittedWithoutFilters: testPublishDetailScriptEmittedWithoutFilters,
   testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim: testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim,
   testPublishFilterClientJsResetsHighlightSelectionOnApply: testPublishFilterClientJsResetsHighlightSelectionOnApply,
   testPublishFilterClientJsWiresSelectChangeEvents: testPublishFilterClientJsWiresSelectChangeEvents,
