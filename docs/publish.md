@@ -281,6 +281,42 @@ rows are different — each cell is embedded already formatted (the exact
 string the table renders), since that's also what the client-side
 pager needs to page through without re-formatting anything.
 
+### Detail drill-down
+
+Any `chart` (bar/line/pie) or `mode: 'aggregated'` table can declare
+`detail`, letting a click (chart) or an expand toggle (table row) open a
+modal with the raw rows behind that group:
+
+```javascript
+tables: [{
+  id: 'by_category', title: 'Revenue by category', mode: 'aggregated',
+  groupBy: 'category_name',
+  metrics: [{ label: 'Revenue', agg: 'sum', field: 'revenue' }],
+  detail: { columns: [
+    { field: 'order_id', label: 'Order' },
+    { field: 'revenue', label: 'Revenue', format: 'currency' }
+  ] }
+}],
+charts: [{
+  id: 'by_category', type: 'bar', title: 'Revenue by category',
+  groupBy: 'category_name', metric: { agg: 'sum', field: 'revenue' },
+  detail: { columns: [
+    { field: 'order_id', label: 'Order' },
+    { field: 'revenue', label: 'Revenue', format: 'currency' }
+  ] }
+}]
+```
+
+- `detail.columns` uses the same shape as a raw-mode table's own
+  `columns` (`field`/`label`/`format`).
+- Not valid on `kpis[]` or on a `mode: 'raw'` table (there's no group to
+  drill into).
+- On a chart, mutually exclusive with `linkKey`/`seriesLinkKey`/`linkTo` -
+  a chart has at most one click behavior.
+- Compatible with a block's own `reactsTo`: the modal always reflects
+  whichever filter is currently active, not a snapshot from when the
+  report was generated.
+
 ## Filters
 
 ```javascript
@@ -351,7 +387,6 @@ tables: [
 
 ## What's not here yet
 
-`expandable`/`detail` drill-down and a `board` tree layout are planned
-but not implemented — see
-`docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s "Future
-direction" section.
+A `board` tree layout (`layout: 'board'`) is planned but not
+implemented — see `docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s
+"Future direction" section.

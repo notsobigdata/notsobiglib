@@ -75,6 +75,28 @@ function validateBlockSource(blockType, blockId, block, dependsOn) {
   }
 }
 
+// A kpi/chart/table's own "detail" drill-down config - { columns: [...] },
+// same column shape as a raw table's own columns (field/label/format).
+// Shape-only check; the "which block types may have detail at all" rule
+// (charts always, aggregated tables only, never kpis) is enforced at
+// each call site below since the restriction differs per block type.
+function validateDetail(blockType, blockId, detail) {
+  if (detail === undefined) {
+    return;
+  }
+  if (!Array.isArray(detail.columns) || !detail.columns.length) {
+    throw new Error('publish(): ' + blockType + ' "' + blockId + '" has "detail", which must be { columns: [...] } with a non-empty "columns" array.');
+  }
+  detail.columns.forEach(function (column) {
+    if (!column.field) {
+      throw new Error('publish(): ' + blockType + ' "' + blockId + '" has a detail column missing "field".');
+    }
+    if (column.format && PUBLISH_VALUE_FORMATS.indexOf(column.format) === -1) {
+      throw new Error('publish(): ' + blockType + ' "' + blockId + '" detail column "' + column.field + '" has format "' + column.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
+    }
+  });
+}
+
 // Every check a publish node's config must pass before anything is
 // fetched or written - same "throw new Error('publish(): ...')"
 // convention move()/model() already use. Field-by-field, not a schema
@@ -115,6 +137,9 @@ function validatePublishConfig(config) {
     }
     validateReactsTo('kpi', kpi.label, kpi.reactsTo, seenFilterFields);
     validateBlockSource('kpi', kpi.label, kpi, config.dependsOn);
+    if (kpi.detail) {
+      throw new Error('publish(): kpi "' + kpi.label + '" has "detail", which only "chart" and "table" support.');
+    }
   });
   var seenChartIds = emptyMap();
   (config.charts || []).forEach(function (chart) {
@@ -154,6 +179,15 @@ function validatePublishConfig(config) {
         throw new Error('publish(): chart "' + chart.id + '" has both "linkTo" and "linkKey"/"seriesLinkKey" - these are mutually exclusive.');
       }
     }
+    if (chart.detail) {
+      if (chart.linkKey || chart.seriesLinkKey) {
+        throw new Error('publish(): chart "' + chart.id + '" has both "detail" and "linkKey"/"seriesLinkKey" - these are mutually exclusive.');
+      }
+      if (chart.linkTo) {
+        throw new Error('publish(): chart "' + chart.id + '" has both "detail" and "linkTo" - these are mutually exclusive.');
+      }
+    }
+    validateDetail('chart', chart.id, chart.detail);
     validateReactsTo('chart', chart.id, chart.reactsTo, seenFilterFields);
     validateBlockSource('chart', chart.id, chart, config.dependsOn);
   });
@@ -170,6 +204,10 @@ function validatePublishConfig(config) {
     }
     validateReactsTo('table', table.id, table.reactsTo, seenFilterFields);
     validateBlockSource('table', table.id, table, config.dependsOn);
+    if (table.detail && table.mode !== 'aggregated') {
+      throw new Error('publish(): table "' + table.id + '" has "detail", which only "aggregated" tables support.');
+    }
+    validateDetail('table', table.id, table.detail);
     if (table.mode === 'raw') {
       if (!Array.isArray(table.columns) || !table.columns.length) {
         throw new Error('publish(): table "' + table.id + '" has mode "raw", which requires a non-empty "columns" array.');
@@ -570,6 +608,38 @@ function rowsForBlock(block, defaultRows, blockRowsByRef) {
   return block.source ? blockRowsByRef[block.source.ref] : defaultRows;
 }
 
+// Attaches a block's own "detail" drill-down data to its already-built
+// payload object - {groupBy, series, columns, rows}, where `rows` is
+// rowsForBlock's result (the block's own resolved row set) trimmed down
+// to only the fields the client ever reads off a detail row: each
+// declared detail.columns[i].field (rendered in the modal), plus
+// groupBy/series (used to filter rows by the clicked group/segment) -
+// never the row's full source-table shape, so a column outside those
+// three never reaches the embedded __PUBLISH_PAYLOAD__ even though the
+// aggregate/chart itself was computed from every column. `series` is
+// undefined for a table or a non-series chart - harmless, the client
+// only reads it when a chart's own series field is also present. No-op
+// (returns `built` unchanged) when the block didn't declare "detail" -
+// kept in the same FILTER_REUSED_FUNCTIONS_JS list buildChartPayload/
+// buildRawTablePayload/buildAggregatedTablePayload already live in,
+// since a reactsTo block's client-side recompute (applyFilterToChart/
+// applyFilterToTable below) needs to re-run this too, not just the
+// server-side build.
+function withDetail(built, block, rows) {
+  if (block.detail) {
+    var fields = block.detail.columns.map(function (column) { return column.field; });
+    if (block.groupBy) { fields.push(block.groupBy); }
+    if (block.series) { fields.push(block.series); }
+    var trimmedRows = rows.map(function (row) {
+      var trimmed = emptyMap();
+      fields.forEach(function (field) { trimmed[field] = row[field]; });
+      return trimmed;
+    });
+    built.detail = { groupBy: block.groupBy, series: block.series, columns: block.detail.columns, rows: trimmedRows };
+  }
+  return built;
+}
+
 function buildReportPayload(config, rows, blockRowsByRef) {
   blockRowsByRef = blockRowsByRef || emptyMap();
   var kpis = (config.kpis || []).map(function (kpi) {
@@ -578,11 +648,13 @@ function buildReportPayload(config, rows, blockRowsByRef) {
     return { label: kpi.label, value: value, formatted: formatValue(value, kpi.format) };
   });
   var charts = (config.charts || []).map(function (chart) {
-    return buildChartPayload(chart, rowsForBlock(chart, rows, blockRowsByRef));
+    var chartRows = rowsForBlock(chart, rows, blockRowsByRef);
+    return withDetail(buildChartPayload(chart, chartRows), chart, chartRows);
   });
   var tables = (config.tables || []).map(function (table) {
     var tableRows = rowsForBlock(table, rows, blockRowsByRef);
-    return table.mode === 'raw' ? buildRawTablePayload(table, tableRows) : buildAggregatedTablePayload(table, tableRows);
+    var built = table.mode === 'raw' ? buildRawTablePayload(table, tableRows) : buildAggregatedTablePayload(table, tableRows);
+    return withDetail(built, table, tableRows);
   });
   var payload = { kpis: kpis, charts: charts, tables: tables };
   if (config.filters && config.filters.length) {
@@ -635,8 +707,19 @@ var REPORT_CSS = [
   '.table-pager button:disabled { color: var(--ink-soft); cursor: default; }',
   '.filters { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }',
   '.filter { font-family: var(--mono); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }',
-  '.filter select { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 6px; }'
+  '.filter select { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 6px; }',
+  '.detail-modal-backdrop { position: fixed; inset: 0; background: rgba(31, 36, 33, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }',
+  '.detail-modal { background: var(--paper); border: 1px solid var(--paper-line); padding: 16px; max-width: 90vw; max-height: 80vh; overflow: auto; }',
+  '.detail-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }',
+  '.detail-modal-header h3 { margin: 0; font-size: 14px; }',
+  '.detail-modal-close { font-family: var(--mono); font-size: 16px; background: none; border: none; cursor: pointer; }',
+  '.detail-modal table { border-collapse: collapse; font-family: var(--mono); font-size: 12px; }',
+  '.detail-modal th, .detail-modal td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); }'
 ].join('\n');
+
+// CSS for table detail toggle button, only emitted when detail is configured
+// on at least one table or chart.
+var TABLE_DETAIL_CSS = '.table-detail-toggle { font-family: var(--mono); font-size: 12px; background: none; border: none; cursor: pointer; padding: 0 4px; }';
 
 // One <select> per filters[] entry: an "All" option plus every distinct
 // value already computed server-side in payload.filters[].options (see
@@ -667,7 +750,7 @@ function renderFiltersSection(filters) {
 // generated <script> as ordinary, hoisted function declarations.
 var FILTER_REUSED_FUNCTIONS_JS = [
   emptyMap, has, computeAggregate, groupRowsBy, compareGroupValues,
-  formatValue, buildChartPayload, buildRawTablePayload, buildAggregatedTablePayload
+  formatValue, buildChartPayload, buildRawTablePayload, buildAggregatedTablePayload, withDetail
 ].map(function (fn) { return fn.toString(); }).join('\n');
 
 // The filter dropdowns' own wiring: composes every currently-active
@@ -693,7 +776,7 @@ var FILTER_CLIENT_JS = [
   '}',
   'function applyFilterToChart(chartConfig) {',
   '  var filteredRows = filteredRowsFor(chartConfig.reactsTo);',
-  '  var newChart = buildChartPayload(chartConfig, filteredRows);',
+  '  var newChart = withDetail(buildChartPayload(chartConfig, filteredRows), chartConfig, filteredRows);',
   '  var container = document.getElementById("chart-" + chartConfig.id);',
   '  if (!container) { return; }',
   '  while (container.firstChild) { container.removeChild(container.firstChild); }',
@@ -704,7 +787,7 @@ var FILTER_CLIENT_JS = [
   '}',
   'function applyFilterToTable(tableConfig) {',
   '  var filteredRows = filteredRowsFor(tableConfig.reactsTo);',
-  '  var newTable = tableConfig.mode === "raw" ? buildRawTablePayload(tableConfig, filteredRows) : buildAggregatedTablePayload(tableConfig, filteredRows);',
+  '  var newTable = withDetail(tableConfig.mode === "raw" ? buildRawTablePayload(tableConfig, filteredRows) : buildAggregatedTablePayload(tableConfig, filteredRows), tableConfig, filteredRows);',
   '  var replace = window.__PUBLISH_TABLE_REPLACERS__ && window.__PUBLISH_TABLE_REPLACERS__[tableConfig.id];',
   '  if (replace) { replace(newTable); }',
   '}',
@@ -754,6 +837,84 @@ var FILTER_CLIENT_JS = [
   '});'
 ].join('\n');
 
+// The subset of FILTER_REUSED_FUNCTIONS_JS's functions the detail modal
+// itself needs (buildRawTablePayload, and formatValue it calls) - shipped
+// only when a report has "detail" but no filters[] at all, since
+// FILTER_REUSED_FUNCTIONS_JS already ships a superset otherwise and
+// declaring the same function twice in one <script> would be redundant
+// (see renderReportHtml's hasFilters/hasDetail branch below).
+var DETAIL_REUSED_FUNCTIONS_JS = [formatValue, buildRawTablePayload].map(function (fn) { return fn.toString(); }).join('\n');
+
+// One generic modal, shared by the table-detail toggle (TABLE_CLIENT_JS)
+// and the chart-detail click branch (CHART_CLIENT_JS's handleChartClick) -
+// both already have their own {columns, rows} (buildRawTablePayload's
+// output shape) by the time they call this, so this only ever renders,
+// never computes. Built via createElement/textContent only, same rule as
+// TABLE_CLIENT_JS's own row rendering.
+var DETAIL_CLIENT_JS = [
+  'function closeDetailModal() {',
+  '  var modal = document.getElementById("publish-detail-modal");',
+  '  if (modal) { modal.parentNode.removeChild(modal); }',
+  '}',
+  'function openDetailModal(title, columns, rows) {',
+  '  closeDetailModal();',
+  '  var backdrop = document.createElement("div");',
+  '  backdrop.id = "publish-detail-modal";',
+  '  backdrop.className = "detail-modal-backdrop";',
+  '  backdrop.addEventListener("click", function (event) { if (event.target === backdrop) { closeDetailModal(); } });',
+  '  var box = document.createElement("div");',
+  '  box.className = "detail-modal";',
+  '  var header = document.createElement("div");',
+  '  header.className = "detail-modal-header";',
+  '  var heading = document.createElement("h3");',
+  '  heading.textContent = title;',
+  '  var closeBtn = document.createElement("button");',
+  '  closeBtn.type = "button";',
+  '  closeBtn.className = "detail-modal-close";',
+  '  closeBtn.textContent = "\\u00d7";',
+  '  closeBtn.addEventListener("click", closeDetailModal);',
+  '  header.appendChild(heading);',
+  '  header.appendChild(closeBtn);',
+  '  var table = document.createElement("table");',
+  '  var thead = document.createElement("thead");',
+  '  var headRow = document.createElement("tr");',
+  '  columns.forEach(function (column) {',
+  '    var th = document.createElement("th");',
+  '    th.textContent = column.label;',
+  '    headRow.appendChild(th);',
+  '  });',
+  '  thead.appendChild(headRow);',
+  '  var tbody = document.createElement("tbody");',
+  '  rows.forEach(function (row) {',
+  '    var tr = document.createElement("tr");',
+  '    row.forEach(function (cell) {',
+  '      var td = document.createElement("td");',
+  '      td.textContent = cell;',
+  '      tr.appendChild(td);',
+  '    });',
+  '    tbody.appendChild(tr);',
+  '  });',
+  '  table.appendChild(thead);',
+  '  table.appendChild(tbody);',
+  '  box.appendChild(header);',
+  '  box.appendChild(table);',
+  '  backdrop.appendChild(box);',
+  '  document.body.appendChild(backdrop);',
+  '}',
+  'document.addEventListener("keydown", function (event) { if (event.key === "Escape") { closeDetailModal(); } });'
+].join('\n');
+
+var TABLE_DETAIL_TOGGLE_HANDLER_JS = [
+  '    section.addEventListener("click", function (event) {',
+  '      var toggle = event.target.closest && event.target.closest(".table-detail-toggle");',
+  '      if (!toggle || !table.detail) { return; }',
+  '      var groupValue = toggle.getAttribute("data-group-value");',
+  '      var matching = table.detail.rows.filter(function (row) { return row[table.detail.groupBy] === groupValue; });',
+  '      var built = buildRawTablePayload({ columns: table.detail.columns }, matching);',
+  '      openDetailModal(table.title + ": " + groupValue, built.columns, built.rows);',
+  '    });'
+].join('\n');
+
 // Static first page (readable with zero JS, same as the KPI cards/SVG
 // chart above) plus inert-without-JS pager controls. table.rows already
 // holds every row, pre-formatted (see buildRawTablePayload/
@@ -766,13 +927,15 @@ function renderTableSection(table) {
   var headerCells = table.columns.map(function (column, index) {
     return '<th class="table-sortable" data-col-index="' + index + '">' + escapeHtml(column.label) + '</th>';
   }).join('');
+  var detailHeaderCell = table.detail ? '<th></th>' : '';
   var bodyRows = firstPageRows.map(function (row) {
-    return '<tr>' + row.map(function (cell) { return '<td>' + escapeHtml(cell) + '</td>'; }).join('') + '</tr>';
+    var detailCell = table.detail ? '<td><button type="button" class="table-detail-toggle" data-group-value="' + escapeHtml(row[0]) + '">▸</button></td>' : '';
+    return '<tr>' + detailCell + row.map(function (cell) { return '<td>' + escapeHtml(cell) + '</td>'; }).join('') + '</tr>';
   }).join('');
   return '<section class="table-block" data-table-id="' + escapeHtml(table.id) + '">'
     + '<h2>' + escapeHtml(table.title) + '</h2>'
     + '<input type="text" class="table-search" placeholder="Search...">'
-    + '<table><thead><tr>' + headerCells + '</tr></thead><tbody>' + bodyRows + '</tbody></table>'
+    + '<table><thead><tr>' + detailHeaderCell + headerCells + '</tr></thead><tbody>' + bodyRows + '</tbody></table>'
     + '<div class="table-pager">'
     + '<button type="button" class="table-prev" disabled>Previous</button>'
     + '<span class="table-page-label">Page 1 of ' + pageCount + '</span>'
@@ -858,6 +1021,16 @@ var TABLE_CLIENT_JS = [
   '      var start = page * table.pageSize;',
   '      visible.slice(start, start + table.pageSize).forEach(function (row) {',
   '        var tr = document.createElement("tr");',
+  '        if (table.detail) {',
+  '          var detailTd = document.createElement("td");',
+  '          var toggle = document.createElement("button");',
+  '          toggle.type = "button";',
+  '          toggle.className = "table-detail-toggle";',
+  '          toggle.textContent = "\\u25B8";',
+  '          toggle.setAttribute("data-group-value", row[0]);',
+  '          detailTd.appendChild(toggle);',
+  '          tr.appendChild(detailTd);',
+  '        }',
   '        row.forEach(function (cell) {',
   '          var td = document.createElement("td");',
   '          td.textContent = cell;',
@@ -914,9 +1087,7 @@ var TABLE_CLIENT_JS = [
   '      a.click();',
   '      document.body.removeChild(a);',
   '      URL.revokeObjectURL(url);',
-  '    });',
-  '  });',
-  '});'
+  '    });'
 ].join('\n');
 
 // Client-side chart draw dispatch, mirroring TABLE_PAGINATION_JS's
@@ -966,6 +1137,15 @@ var CHART_CLIENT_JS = [
   '    if (chart.linkTo.newTab) { window.open(url, "_blank"); } else { window.location.href = url; }',
   '    return;',
   '  }',
+  '  if (chart.detail) {',
+  '    var matching = chart.detail.rows.filter(function (row) {',
+  '      var groupMatch = row[chart.detail.groupBy] === groupValue;',
+  '      return seriesValue === undefined ? groupMatch : groupMatch && row[chart.detail.series] === seriesValue;',
+  '    });',
+  '    var built = buildRawTablePayload({ columns: chart.detail.columns }, matching);',
+  '    openDetailModal(chart.title + ": " + groupValue, built.columns, built.rows);',
+  '    return;',
+  '  }',
   '  var clicked = chartSelectionFor(chart, groupValue, seriesValue);',
   '  currentSelection = (currentSelection && selectionsEqual(currentSelection, clicked)) ? null : clicked;',
   '  applyHighlight();',
@@ -992,7 +1172,7 @@ var CHART_CLIENT_JS = [
   '  var groupValues = chart.data.map(function (d) { return d.groupValue; });',
   '  var y = d3.scaleBand().domain(groupValues).range([margin.top, height - margin.bottom]).padding(0.2);',
   '  var color = d3.scaleOrdinal().range(["var(--teal)", "var(--coral)", "var(--ink-soft)", "var(--teal-soft)"]);',
-  '  var interactive = !!(chart.linkKey || chart.seriesLinkKey || chart.linkTo);',
+  '  var interactive = !!(chart.linkKey || chart.seriesLinkKey || chart.linkTo || chart.detail);',
   '  if (chart.seriesKeys && chart.seriesKeys.length) {',
   '    color.domain(chart.seriesKeys);',
   '    if (chart.stacking === "stacked") {',
@@ -1012,7 +1192,7 @@ var CHART_CLIENT_JS = [
   '        }',
   '        segments.on("click", function (event, d) {',
   '          var seriesKey = d3.select(this.parentNode).datum().key;',
-  '          handleChartClick(chart, d.data.groupValue, chart.seriesLinkKey ? seriesKey : undefined);',
+  '          handleChartClick(chart, d.data.groupValue, chart.seriesLinkKey || chart.detail ? seriesKey : undefined);',
   '        });',
   '      }',
   '    } else {',
@@ -1032,7 +1212,7 @@ var CHART_CLIENT_JS = [
   '        }',
   '        segments.on("click", function (event, d) {',
   '          var groupValue = d3.select(this.parentNode).datum().groupValue;',
-  '          handleChartClick(chart, groupValue, chart.seriesLinkKey ? d.key : undefined);',
+  '          handleChartClick(chart, groupValue, chart.seriesLinkKey || chart.detail ? d.key : undefined);',
   '        });',
   '      }',
   '    }',
@@ -1065,7 +1245,7 @@ var CHART_CLIENT_JS = [
   '  svg.append("path").datum(chart.data).attr("class", "chart-bar").style("fill", "none").attr("stroke", "#3F6659").attr("stroke-width", 2).attr("d", line);',
   '  var points = svg.append("g").selectAll("circle").data(chart.data).join("circle")',
   '    .attr("class", "chart-bar").attr("cx", function (d) { return x(d.groupValue); }).attr("cy", function (d) { return y(d.total); }).attr("r", 3);',
-  '  if (chart.linkKey || chart.linkTo) {',
+  '  if (chart.linkKey || chart.linkTo || chart.detail) {',
   '    points.attr("data-group-value", function (d) { return String(d.groupValue); }).style("cursor", "pointer")',
   '      .on("click", function (event, d) { handleChartClick(chart, d.groupValue, undefined); });',
   '  }',
@@ -1084,7 +1264,7 @@ var CHART_CLIENT_JS = [
   '  var pieData = pieGen(chart.data);',
   '  var slices = svg.selectAll("path").data(pieData).join("path")',
   '    .attr("class", "chart-bar").style("fill", function (d) { return color(d.data.groupValue); }).attr("d", arcGen);',
-  '  if (chart.linkKey || chart.linkTo) {',
+  '  if (chart.linkKey || chart.linkTo || chart.detail) {',
   '    slices.attr("data-group-value", function (d) { return String(d.data.groupValue); }).style("cursor", "pointer")',
   '      .on("click", function (event, d) { handleChartClick(chart, d.data.groupValue, undefined); });',
   '  }',
@@ -1122,20 +1302,32 @@ function renderReportHtml(payload, config) {
       + '<div class="chart-canvas" id="chart-' + escapeHtml(chart.id) + '"></div></section>';
   }).join('');
   var tableSections = payload.tables.map(renderTableSection).join('');
+  var hasDetail = payload.tables.some(function (t) { return t.detail; }) || payload.charts.some(function (c) { return c.detail; });
+  var hasFilters = !!(payload.filters && payload.filters.length);
   var script = 'window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';';
   if (payload.tables.length) {
     script += TABLE_CLIENT_JS;
+    if (hasDetail) {
+      script += TABLE_DETAIL_TOGGLE_HANDLER_JS;
+    }
+    script += '\n  });\n});';
   }
   if (payload.charts.length) {
     script += CHART_CLIENT_JS;
   }
-  if (payload.filters && payload.filters.length) {
+  if (hasFilters) {
     script += FILTER_REUSED_FUNCTIONS_JS + FILTER_CLIENT_JS;
+  } else if (hasDetail) {
+    script += DETAIL_REUSED_FUNCTIONS_JS;
+  }
+  if (hasDetail) {
+    script += DETAIL_CLIENT_JS;
   }
   var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
+  var css = REPORT_CSS + (hasDetail ? TABLE_DETAIL_CSS : '');
   return '<!doctype html><html><head><meta charset="utf-8">'
     + '<title>' + escapeHtml(config.target.fileName) + '</title>'
-    + '<style>' + REPORT_CSS + '</style>' + d3Script + '</head><body>'
+    + '<style>' + css + '</style>' + d3Script + '</head><body>'
     + '<main>' + filtersSection + '<div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections + '</main>'
     + '<script>' + script + '</script>'
     + '</body></html>';

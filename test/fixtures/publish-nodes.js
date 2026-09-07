@@ -621,3 +621,95 @@ var blockSourceWithReactsToPublish = {
   kpis: [{ label: 'Secondary revenue', agg: 'sum', field: 'revenue', format: 'currency', reactsTo: ['channel'],
     source: { type: 'ref', ref: 'moveWithBigQuerySecondTarget' } }]
 };
+
+var kpiWithDetailPublish = {
+  kind: 'publish',
+  name: 'kpiWithDetailPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'kpi-detail.html' },
+  kpis: [{ label: 'Total revenue', agg: 'sum', field: 'revenue', format: 'currency', detail: { columns: [{ field: 'order_id' }] } }]
+};
+
+var detailEmptyColumnsPublish = {
+  kind: 'publish',
+  name: 'detailEmptyColumnsPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'detail-empty-columns.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, detail: { columns: [] } }]
+};
+
+var detailColumnMissingFieldPublish = {
+  kind: 'publish',
+  name: 'detailColumnMissingFieldPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'detail-column-missing-field.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, detail: { columns: [{ label: 'No field' }] } }]
+};
+
+var detailColumnBadFormatPublish = {
+  kind: 'publish',
+  name: 'detailColumnBadFormatPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'detail-column-bad-format.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, detail: { columns: [{ field: 'amount', format: 'percent' }] } }]
+};
+
+var detailOnRawTablePublish = {
+  kind: 'publish',
+  name: 'detailOnRawTablePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'detail-on-raw.html' },
+  tables: [{ id: 'raw_with_detail', title: 'Raw', mode: 'raw', columns: [{ field: 'revenue' }], detail: { columns: [{ field: 'revenue' }] } }]
+};
+
+var chartDetailWithLinkKeyPublish = {
+  kind: 'publish',
+  name: 'chartDetailWithLinkKeyPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'detail-with-linkkey.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    linkKey: 'category', detail: { columns: [{ field: 'order_id' }] } }]
+};
+
+var chartDetailWithLinkToPublish = {
+  kind: 'publish',
+  name: 'chartDetailWithLinkToPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'detail-with-linkto.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    linkTo: { node: 'linkToTargetPublish', field: 'category' }, detail: { columns: [{ field: 'order_id' }] } }]
+};
+
+// Valid: one aggregated table and one chart, each with a well-formed
+// detail. Used by both testPublishValidDetailProceedsPastValidation
+// (no shim - proves validation passes) and Task 2's payload tests (with
+// a shim, to inspect the built .detail objects).
+var detailPublish = {
+  kind: 'publish',
+  name: 'detailPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'detail.html' },
+  charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+    detail: { columns: [{ field: 'order_id', label: 'Order' }, { field: 'revenue', label: 'Revenue', format: 'currency' }] } }],
+  tables: [{ id: 'by_category_table', title: 'By category', mode: 'aggregated', groupBy: 'category',
+    metrics: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }],
+    detail: { columns: [{ field: 'order_id', label: 'Order' }, { field: 'revenue', label: 'Revenue', format: 'currency' }] } }]
+};
+
+var seriesChartWithDetailPublish = {
+  kind: 'publish',
+  name: 'seriesChartWithDetailPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'series-detail.html' },
+  charts: [{ id: 'by_category_channel', type: 'bar', title: 'By category and channel', groupBy: 'category', series: 'channel',
+    metric: { agg: 'sum', field: 'revenue' }, detail: { columns: [{ field: 'revenue', format: 'currency' }] } }]
+};

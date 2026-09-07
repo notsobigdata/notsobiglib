@@ -370,6 +370,39 @@ function testPublishTableHeadersSortableAndSearchInputRendered() {
   assert.ok(/<th class="table-sortable" data-col-index="1">Revenue<\/th>/.test(section), 'expected a sortable "Revenue" header in: ' + section);
 }
 
+function testPublishTableDetailToggleRenderedOnlyWhenConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [['A', 'o1', '10'], ['B', 'o2', '5']]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var sectionMatch = html.match(/<section class="table-block" data-table-id="by_category_table">[\s\S]*?<\/section>/);
+  assert.ok(sectionMatch, 'expected the by_category_table section in: ' + html);
+  var section = sectionMatch[0];
+  assert.ok(/class="table-detail-toggle"/.test(section), 'expected a detail toggle button, got: ' + section);
+  assert.ok(/data-group-value="A"/.test(section), 'expected the toggle to carry the row\'s raw groupBy value, got: ' + section);
+}
+
+function testPublishNoTableDetailToggleWithoutDetailConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(!/<button[^>]*class="table-detail-toggle"/.test(html), 'expected no detail toggle button markup without detail configured, got: ' + html);
+}
+
+function testPublishTableClientJsOpensDetailModalOnToggleClick() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [['A', 'o1', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/table\.detail/.test(html), 'expected TABLE_CLIENT_JS to reference table.detail, got: ' + html);
+  assert.ok(/openDetailModal\(table\.title/.test(html), 'expected the toggle handler to call openDetailModal, got: ' + html);
+}
+
 function testPublishRawTableRendersFirstPageAndEmbedsFullData() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [
@@ -604,6 +637,69 @@ function testPublishChartPayloadPassesThroughLinkKeys() {
   assert.ok(!Object.prototype.hasOwnProperty.call(trend, 'linkKey'), 'expected linkKey to be genuinely absent after the JSON round-trip, got: ' + JSON.stringify(trend));
 }
 
+function testPublishDetailAttachedToChartAndTablePayloadsWhenConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [
+    ['A', 'o1', '10'],
+    ['A', 'o2', '20'],
+    ['B', 'o3', '5']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  var chart = payload.charts.filter(function (c) { return c.id === 'by_category'; })[0];
+  assert.deepStrictEqual(chart.detail.groupBy, 'category');
+  assert.strictEqual(chart.detail.series, undefined, 'expected no series field on a non-series chart');
+  assert.deepStrictEqual(chart.detail.columns, [{ field: 'order_id', label: 'Order' }, { field: 'revenue', label: 'Revenue', format: 'currency' }]);
+  assert.strictEqual(chart.detail.rows.length, 3, 'expected the chart\'s own resolved rows (all 3), got: ' + JSON.stringify(chart.detail.rows));
+
+  var table = payload.tables.filter(function (t) { return t.id === 'by_category_table'; })[0];
+  assert.deepStrictEqual(table.detail.groupBy, 'category');
+  assert.strictEqual(table.detail.rows.length, 3, 'expected the table\'s own resolved rows (all 3), got: ' + JSON.stringify(table.detail.rows));
+}
+
+// Security regression: the source table can carry columns the block never
+// declared in detail.columns/groupBy/series (e.g. an internal-only field
+// like margin) - withDetail must trim each embedded row down to exactly
+// the fields the client-side modal/filter code reads, never ship the rest
+// of the source row into __PUBLISH_PAYLOAD__.
+function testPublishDetailRowsExcludeFieldsOutsideColumnsGroupByAndSeries() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue', 'internal_margin'], [
+    ['A', 'o1', '10', '4'],
+    ['A', 'o2', '20', '8'],
+    ['B', 'o3', '5', '1']
+  ]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  var chart = payload.charts.filter(function (c) { return c.id === 'by_category'; })[0];
+  chart.detail.rows.forEach(function (row) {
+    assert.deepStrictEqual(Object.keys(row).sort(), ['category', 'order_id', 'revenue'], 'expected only groupBy + detail.columns fields, got: ' + JSON.stringify(row));
+    assert.strictEqual(row.internal_margin, undefined, 'expected internal_margin to never reach the embedded payload, got: ' + JSON.stringify(row));
+  });
+
+  var table = payload.tables.filter(function (t) { return t.id === 'by_category_table'; })[0];
+  table.detail.rows.forEach(function (row) {
+    assert.deepStrictEqual(Object.keys(row).sort(), ['category', 'order_id', 'revenue'], 'expected only groupBy + detail.columns fields, got: ' + JSON.stringify(row));
+    assert.strictEqual(row.internal_margin, undefined, 'expected internal_margin to never reach the embedded payload, got: ' + JSON.stringify(row));
+  });
+}
+
+function testPublishNoDetailFieldOnPayloadWithoutDetailConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  payload.tables.forEach(function (table) {
+    assert.strictEqual(table.detail, undefined, 'expected no .detail on a table without "detail" configured, got: ' + JSON.stringify(table));
+  });
+}
+
 function testPublishChartClientJsIncludesSelectionModule() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'day', 'revenue'], [['A', 'online', '1', '10']]);
@@ -664,7 +760,7 @@ function testPublishChartClientJsWiresBarClickOnlyWhenInteractive() {
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
 
-  assert.ok(/var interactive = !!\(chart\.linkKey \|\| chart\.seriesLinkKey \|\| chart\.linkTo\);/.test(html), 'expected drawBarChart\'s interactive flag (widened for linkTo), got: ' + html);
+  assert.ok(/var interactive = !!\(chart\.linkKey \|\| chart\.seriesLinkKey \|\| chart\.linkTo \|\| chart\.detail\);/.test(html), 'expected drawBarChart\'s interactive flag (widened for detail), got: ' + html);
   assert.ok(/data-group-value/.test(html), 'expected data-group-value attribute wiring in the emitted script, got: ' + html);
   assert.ok(/data-series-value/.test(html), 'expected data-series-value attribute wiring for stacked/grouped bars, got: ' + html);
 }
@@ -683,8 +779,8 @@ function testPublishChartClientJsWiresLineAndPieClickOnLinkKey() {
   // doesn't also match chartSelectionFor's/selectionMatches' one-line "if
   // (chart.linkKey) { ... }" conditionals, which have trailing code after
   // "{" on the same line and are a different thing entirely.
-  var lineOrPieGateCount = (html.match(/^\s*if \(chart\.linkKey \|\| chart\.linkTo\) \{$/gm) || []).length;
-  assert.strictEqual(lineOrPieGateCount, 2, 'expected exactly 2 standalone "if (chart.linkKey || chart.linkTo) {" gate blocks (drawLineChart + drawPieChart), got ' + lineOrPieGateCount + ' in: ' + html);
+  var lineOrPieGateCount = (html.match(/^\s*if \(chart\.linkKey \|\| chart\.linkTo \|\| chart\.detail\) \{$/gm) || []).length;
+  assert.strictEqual(lineOrPieGateCount, 2, 'expected exactly 2 standalone "if (chart.linkKey || chart.linkTo || chart.detail) {" gate blocks (drawLineChart + drawPieChart), got ' + lineOrPieGateCount + ' in: ' + html);
 }
 
 function testPublishChartClientJsHandlesLinkToClickNavigation() {
@@ -703,6 +799,32 @@ function testPublishChartClientJsHandlesLinkToClickNavigation() {
   assert.ok(/window\.open\(url, "_blank"\);/.test(html), 'expected the new-tab navigation call, got: ' + html);
   assert.ok(/window\.location\.href = url;/.test(html), 'expected the same-tab navigation fallback, got: ' + html);
   assert.ok(/encodeURIComponent\(chart\.linkTo\.field\)/.test(html), 'expected the query param to be built from linkTo.field, got: ' + html);
+}
+
+function testPublishChartClientJsHandlesDetailClick() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [['A', 'o1', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/if \(chart\.detail\) \{/.test(html), 'expected handleChartClick\'s detail branch in the emitted script, got: ' + html);
+  assert.ok(/openDetailModal\(chart\.title \+ ": " \+ groupValue/.test(html), 'expected the detail branch to open the modal, got: ' + html);
+}
+
+function testPublishSeriesChartPassesSeriesValueThroughToDetailClick() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'channel', 'revenue'], [['A', 'online', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select seriesChartWithDetailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  // Both the stacked and grouped series-bar click handlers must pass the
+  // clicked series' value through when the chart has "detail" (not just
+  // when it has seriesLinkKey, which detail is mutually exclusive with).
+  var passthroughCount = (html.match(/chart\.seriesLinkKey \|\| chart\.detail \? seriesKey : undefined/g) || []).length
+    + (html.match(/chart\.seriesLinkKey \|\| chart\.detail \? d\.key : undefined/g) || []).length;
+  assert.strictEqual(passthroughCount, 2, 'expected both series-bar click handlers to widen their seriesValue passthrough for chart.detail, got ' + passthroughCount + ' in: ' + html);
 }
 
 function testPublishLinkToRequiresNode() {
@@ -878,6 +1000,58 @@ function testPublishBlockSourceOverrideFetchesFromItsOwnRef() {
   assert.strictEqual(table.rows.length, 2, 'expected the overridden table to hold the secondary table\'s 2 rows, got: ' + JSON.stringify(table.rows));
 }
 
+function testPublishKpiDetailRejected() {
+  var result = runOne('kpiWithDetailPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/kpi "Total revenue" has "detail", which only "chart" and "table" support/.test(result.error), 'expected a kpi-detail-unsupported error, got: ' + result.error);
+}
+
+function testPublishDetailRequiresNonEmptyColumns() {
+  var result = runOne('detailEmptyColumnsPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"detail", which must be \{ columns: \[\.\.\.\] \} with a non-empty "columns" array/.test(result.error), 'expected a detail-columns error, got: ' + result.error);
+}
+
+function testPublishDetailColumnRequiresField() {
+  var result = runOne('detailColumnMissingFieldPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/has a detail column missing "field"/.test(result.error), 'expected a detail-column-field error, got: ' + result.error);
+}
+
+function testPublishDetailColumnFormatMustBeKnownEnum() {
+  var result = runOne('detailColumnBadFormatPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/detail column "amount" has format "percent" - expected one of string, currency, integer, decimal/.test(result.error), 'expected a detail-column-format error, got: ' + result.error);
+}
+
+function testPublishDetailOnRawTableRejected() {
+  var result = runOne('detailOnRawTablePublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/table "raw_with_detail" has "detail", which only "aggregated" tables support/.test(result.error), 'expected a detail-on-raw-table error, got: ' + result.error);
+}
+
+function testPublishChartDetailCannotCombineWithLinkKey() {
+  var result = runOne('chartDetailWithLinkKeyPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/both "detail" and "linkKey"\/"seriesLinkKey" - these are mutually exclusive/.test(result.error), 'expected a detail/linkKey mutual-exclusion error, got: ' + result.error);
+}
+
+function testPublishChartDetailCannotCombineWithLinkTo() {
+  var result = runOne('chartDetailWithLinkToPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/both "detail" and "linkTo" - these are mutually exclusive/.test(result.error), 'expected a detail/linkTo mutual-exclusion error, got: ' + result.error);
+}
+
+function testPublishValidDetailProceedsPastValidation() {
+  var result = runOne('detailPublish');
+  // Same proof pattern as testPublishValidRefProceedsPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
+}
+
 function testPublishFilterRequiresFieldAndLabel() {
   var result = runOne('badFilterMissingLabelPublish');
   assert.strictEqual(result.status, 'failed');
@@ -1001,6 +1175,28 @@ function testPublishNoFiltersMarkupOrClientJsWithoutFilters() {
   assert.ok(!/class="filters"/.test(html), 'expected no filters markup, got: ' + html);
   assert.ok(!/function applyFilters/.test(html), 'expected no FILTER_CLIENT_JS, got: ' + html);
   assert.ok(!/function filteredRowsFor/.test(html), 'expected no filter-engine wiring, got: ' + html);
+}
+
+function testPublishNoDetailScriptWithoutAnyDetailConfigured() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue', 'order_id'], [['A', '10', 'o1']]);
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(!/function openDetailModal/.test(html), 'expected no detail modal script without any detail configured, got: ' + html);
+}
+
+function testPublishDetailScriptEmittedWithoutFilters() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [['A', 'o1', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select detailPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  // detailPublish has no filters[] - proves DETAIL_REUSED_FUNCTIONS_JS
+  // (not FILTER_REUSED_FUNCTIONS_JS) supplies buildRawTablePayload here.
+  assert.ok(/function openDetailModal/.test(html), 'expected the detail modal script, got: ' + html);
+  assert.ok(/function buildRawTablePayload/.test(html), 'expected buildRawTablePayload reused for the modal, got: ' + html);
+  assert.ok(!/function applyFilters\(/.test(html), 'expected no filters[] client JS on a report with no filters[], got: ' + html);
 }
 
 function testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim() {
@@ -1285,6 +1481,7 @@ function runTableClientEngine(scriptText, columnCount) {
     addEventListener: function (event, handler) { if (event === 'input') { searchOnInput = handler; } },
     type: function (value) { this.value = value; searchOnInput(); }
   };
+  var sectionClickHandler = null;
   var section = {
     getAttribute: function (name) { return name === 'data-table-id' ? 'recent_orders' : null; },
     querySelector: function (selector) {
@@ -1296,7 +1493,8 @@ function runTableClientEngine(scriptText, columnCount) {
       if (selector === '.table-search') { return searchInput; }
       return null;
     },
-    querySelectorAll: function (selector) { return selector === '.table-sortable' ? headerCells : []; }
+    querySelectorAll: function (selector) { return selector === '.table-sortable' ? headerCells : []; },
+    addEventListener: function (event, handler) { if (event === 'click') { sectionClickHandler = handler; } }
   };
   var lastBlobParts = null;
   var sandbox = {
@@ -1463,12 +1661,17 @@ module.exports = {
   testPublishChartSeriesLinkKeyWithoutSeriesRejected: testPublishChartSeriesLinkKeyWithoutSeriesRejected,
   testPublishLinkKeyChartsProceedPastValidation: testPublishLinkKeyChartsProceedPastValidation,
   testPublishChartPayloadPassesThroughLinkKeys: testPublishChartPayloadPassesThroughLinkKeys,
+  testPublishDetailAttachedToChartAndTablePayloadsWhenConfigured: testPublishDetailAttachedToChartAndTablePayloadsWhenConfigured,
+  testPublishDetailRowsExcludeFieldsOutsideColumnsGroupByAndSeries: testPublishDetailRowsExcludeFieldsOutsideColumnsGroupByAndSeries,
+  testPublishNoDetailFieldOnPayloadWithoutDetailConfigured: testPublishNoDetailFieldOnPayloadWithoutDetailConfigured,
   testPublishChartClientJsIncludesSelectionModule: testPublishChartClientJsIncludesSelectionModule,
   testPublishChartClientJsCoercesGroupAndSeriesValuesToString: testPublishChartClientJsCoercesGroupAndSeriesValuesToString,
   testPublishChartClientJsCallsApplyHighlightOnceOnLoad: testPublishChartClientJsCallsApplyHighlightOnceOnLoad,
   testPublishChartClientJsWiresBarClickOnlyWhenInteractive: testPublishChartClientJsWiresBarClickOnlyWhenInteractive,
   testPublishChartClientJsWiresLineAndPieClickOnLinkKey: testPublishChartClientJsWiresLineAndPieClickOnLinkKey,
   testPublishChartClientJsHandlesLinkToClickNavigation: testPublishChartClientJsHandlesLinkToClickNavigation,
+  testPublishChartClientJsHandlesDetailClick: testPublishChartClientJsHandlesDetailClick,
+  testPublishSeriesChartPassesSeriesValueThroughToDetailClick: testPublishSeriesChartPassesSeriesValueThroughToDetailClick,
   testPublishLinkToRequiresNode: testPublishLinkToRequiresNode,
   testPublishLinkToRequiresField: testPublishLinkToRequiresField,
   testPublishLinkToNewTabMustBeBoolean: testPublishLinkToNewTabMustBeBoolean,
@@ -1486,6 +1689,14 @@ module.exports = {
   testPublishBlockSourceUnknownRefRejected: testPublishBlockSourceUnknownRefRejected,
   testPublishBlockSourceCannotCombineWithReactsTo: testPublishBlockSourceCannotCombineWithReactsTo,
   testPublishBlockSourceOverrideFetchesFromItsOwnRef: testPublishBlockSourceOverrideFetchesFromItsOwnRef,
+  testPublishKpiDetailRejected: testPublishKpiDetailRejected,
+  testPublishDetailRequiresNonEmptyColumns: testPublishDetailRequiresNonEmptyColumns,
+  testPublishDetailColumnRequiresField: testPublishDetailColumnRequiresField,
+  testPublishDetailColumnFormatMustBeKnownEnum: testPublishDetailColumnFormatMustBeKnownEnum,
+  testPublishDetailOnRawTableRejected: testPublishDetailOnRawTableRejected,
+  testPublishChartDetailCannotCombineWithLinkKey: testPublishChartDetailCannotCombineWithLinkKey,
+  testPublishChartDetailCannotCombineWithLinkTo: testPublishChartDetailCannotCombineWithLinkTo,
+  testPublishValidDetailProceedsPastValidation: testPublishValidDetailProceedsPastValidation,
   testPublishFilterRequiresFieldAndLabel: testPublishFilterRequiresFieldAndLabel,
   testPublishDuplicateFilterFieldRejected: testPublishDuplicateFilterFieldRejected,
   testPublishReactsToMustBeNonEmptyArray: testPublishReactsToMustBeNonEmptyArray,
@@ -1497,12 +1708,17 @@ module.exports = {
   testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured: testPublishFilterableConfigExcludesNonReactiveKpiEvenWithFiltersConfigured,
   testPublishFiltersMarkupRenderedWhenConfigured: testPublishFiltersMarkupRenderedWhenConfigured,
   testPublishNoFiltersMarkupOrClientJsWithoutFilters: testPublishNoFiltersMarkupOrClientJsWithoutFilters,
+  testPublishNoDetailScriptWithoutAnyDetailConfigured: testPublishNoDetailScriptWithoutAnyDetailConfigured,
+  testPublishDetailScriptEmittedWithoutFilters: testPublishDetailScriptEmittedWithoutFilters,
   testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim: testPublishFilterClientJsIncludesReusedAggregationFunctionsVerbatim,
   testPublishFilterClientJsResetsHighlightSelectionOnApply: testPublishFilterClientJsResetsHighlightSelectionOnApply,
   testPublishFilterClientJsWiresSelectChangeEvents: testPublishFilterClientJsWiresSelectChangeEvents,
   testPublishTableClientJsAlwaysExposesReplacerHook: testPublishTableClientJsAlwaysExposesReplacerHook,
   testPublishFilterResetRecomputesKpiBackToUnfilteredValue: testPublishFilterResetRecomputesKpiBackToUnfilteredValue,
   testPublishTableHeadersSortableAndSearchInputRendered: testPublishTableHeadersSortableAndSearchInputRendered,
+  testPublishTableDetailToggleRenderedOnlyWhenConfigured: testPublishTableDetailToggleRenderedOnlyWhenConfigured,
+  testPublishNoTableDetailToggleWithoutDetailConfigured: testPublishNoTableDetailToggleWithoutDetailConfigured,
+  testPublishTableClientJsOpensDetailModalOnToggleClick: testPublishTableClientJsOpensDetailModalOnToggleClick,
   testPublishTableClientJsSortsCurrencyColumnNumerically: testPublishTableClientJsSortsCurrencyColumnNumerically,
   testPublishTableClientJsSearchNarrowsRowsAndCsvExport: testPublishTableClientJsSearchNarrowsRowsAndCsvExport
 };
