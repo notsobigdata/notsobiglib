@@ -561,3 +561,63 @@ var linkToSourceNoMatchingFilterPublish = {
   charts: [{ id: 'by_category', type: 'bar', title: 'By category', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
     linkTo: { node: 'linkToTargetNoMatchingFilterPublish', field: 'category' } }]
 };
+
+// Second bigquery-target move node, distinct table name from
+// moveWithBigQueryTarget - lets a block-source-override test's shim
+// return different rows per table and prove the override actually
+// reached that block, not just that validation let it through.
+var moveWithBigQuerySecondTarget = {
+  kind: 'move',
+  name: 'moveWithBigQuerySecondTarget',
+  source: { type: 'sheets', spreadsheetId: 'ignored', sheetName: 'Sheet1' },
+  target: { type: 'bigquery', projectId: 'test-project', dataset: 'test_dataset', table: 'orders_secondary' }
+};
+
+var blockSourceOverridePublish = {
+  kind: 'publish',
+  name: 'blockSourceOverridePublish',
+  dependsOn: ['moveWithBigQueryTarget', 'moveWithBigQuerySecondTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'block-source-override.html' },
+  kpis: [
+    { label: 'Default revenue', agg: 'sum', field: 'revenue', format: 'currency' },
+    { label: 'Secondary revenue', agg: 'sum', field: 'revenue', format: 'currency', source: { type: 'ref', ref: 'moveWithBigQuerySecondTarget' } }
+  ],
+  charts: [
+    { id: 'by_category_secondary', type: 'bar', title: 'By category (secondary)', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' },
+      source: { type: 'ref', ref: 'moveWithBigQuerySecondTarget' } }
+  ],
+  tables: [
+    { id: 'secondary_raw', title: 'Secondary rows', mode: 'raw', columns: [{ field: 'category' }, { field: 'revenue', format: 'currency' }],
+      source: { type: 'ref', ref: 'moveWithBigQuerySecondTarget' } }
+  ]
+};
+
+var blockSourceMissingDependsOnPublish = {
+  kind: 'publish',
+  name: 'blockSourceMissingDependsOnPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'block-source-missing-dependson.html' },
+  kpis: [{ label: 'Secondary revenue', agg: 'sum', field: 'revenue', format: 'currency', source: { type: 'ref', ref: 'moveWithBigQuerySecondTarget' } }]
+};
+
+var blockSourceUnknownRefPublish = {
+  kind: 'publish',
+  name: 'blockSourceUnknownRefPublish',
+  dependsOn: ['moveWithBigQueryTarget', 'moveWithSheetsTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'block-source-unknown-ref.html' },
+  kpis: [{ label: 'Secondary revenue', agg: 'sum', field: 'revenue', format: 'currency', source: { type: 'ref', ref: 'moveWithSheetsTarget' } }]
+};
+
+var blockSourceWithReactsToPublish = {
+  kind: 'publish',
+  name: 'blockSourceWithReactsToPublish',
+  dependsOn: ['moveWithBigQueryTarget', 'moveWithBigQuerySecondTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'block-source-with-reacts-to.html' },
+  filters: [{ field: 'channel', label: 'Channel' }],
+  kpis: [{ label: 'Secondary revenue', agg: 'sum', field: 'revenue', format: 'currency', reactsTo: ['channel'],
+    source: { type: 'ref', ref: 'moveWithBigQuerySecondTarget' } }]
+};

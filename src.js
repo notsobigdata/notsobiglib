@@ -4058,6 +4058,28 @@ var NotSoBigData = (function () {
     });
   }
 
+  // A kpi/chart/table's own "source" override - same shape and same
+  // dependsOn requirement as config.source at the top of the file, just
+  // scoped to one block instead of the whole report. Mutually exclusive
+  // with that block's own reactsTo: reactsTo's client-side recompute
+  // (FILTER_CLIENT_JS's filteredRowsFor) only ever slices the report's one
+  // default row set, so a block fetching its own rows from elsewhere has
+  // nothing for a filter change to recompute against.
+  function validateBlockSource(blockType, blockId, block, dependsOn) {
+    if (block.source === undefined) {
+      return;
+    }
+    if (block.source.type !== 'ref' || !block.source.ref) {
+      throw new Error('publish(): ' + blockType + ' "' + blockId + '" has "source", which must be { type: "ref", ref: "<nodeName>" }.');
+    }
+    if (dependsOn.indexOf(block.source.ref) === -1) {
+      throw new Error('publish(): "' + block.source.ref + '" is used as ' + blockType + ' "' + blockId + '"\'s source.ref but is missing from dependsOn.');
+    }
+    if (block.reactsTo) {
+      throw new Error('publish(): ' + blockType + ' "' + blockId + '" has both "source" and "reactsTo" - these are mutually exclusive.');
+    }
+  }
+
   // Every check a publish node's config must pass before anything is
   // fetched or written - same "throw new Error('publish(): ...')"
   // convention move()/model() already use. Field-by-field, not a schema
@@ -4097,6 +4119,7 @@ var NotSoBigData = (function () {
         throw new Error('publish(): kpi "' + kpi.label + '" has format "' + kpi.format + '" - expected one of ' + PUBLISH_VALUE_FORMATS.join(', ') + '.');
       }
       validateReactsTo('kpi', kpi.label, kpi.reactsTo, seenFilterFields);
+      validateBlockSource('kpi', kpi.label, kpi, config.dependsOn);
     });
     var seenChartIds = emptyMap();
     (config.charts || []).forEach(function (chart) {
@@ -4137,6 +4160,7 @@ var NotSoBigData = (function () {
         }
       }
       validateReactsTo('chart', chart.id, chart.reactsTo, seenFilterFields);
+      validateBlockSource('chart', chart.id, chart, config.dependsOn);
     });
     var seenTableIds = emptyMap();
     (config.tables || []).forEach(function (table) {
@@ -4150,6 +4174,7 @@ var NotSoBigData = (function () {
         throw new Error('publish(): every table needs "id", "title", and mode "raw" or "aggregated".');
       }
       validateReactsTo('table', table.id, table.reactsTo, seenFilterFields);
+      validateBlockSource('table', table.id, table, config.dependsOn);
       if (table.mode === 'raw') {
         if (!Array.isArray(table.columns) || !table.columns.length) {
           throw new Error('publish(): table "' + table.id + '" has mode "raw", which requires a non-empty "columns" array.');
@@ -4260,6 +4285,30 @@ var NotSoBigData = (function () {
     return resolvedConfig;
   }
 
+  // Fetches one row set per distinct source.ref used by any kpi/chart/table
+  // (validateBlockSource already confirmed each one resolves and is listed
+  // in dependsOn) - once per ref, not once per block, so three blocks
+  // overriding to the same node don't triple-fetch the same table. Blocks
+  // with no override aren't in the returned map at all; buildReportPayload
+  // falls back to the report's own default rows for those.
+  function fetchBlockSourceRows(config, allNodes) {
+    var refs = emptyMap();
+    function collectRef(block) {
+      if (block.source) {
+        refs[block.source.ref] = true;
+      }
+    }
+    (config.kpis || []).forEach(collectRef);
+    (config.charts || []).forEach(collectRef);
+    (config.tables || []).forEach(collectRef);
+    var rowsByRef = emptyMap();
+    Object.keys(refs).forEach(function (ref) {
+      var location = resolvePublishSource(ref, allNodes);
+      rowsByRef[ref] = fetchTableRows(location.projectId, location.dataset, location.table);
+    });
+    return rowsByRef;
+  }
+
   // The EXECUTORS.publish entry. allNodes is optional and only used to
   // resolve source.ref and any chart's linkTo.node - move()/model() ignore
   // the same argument today (see cli.js's widened runNodes()), so this is
@@ -4268,8 +4317,9 @@ var NotSoBigData = (function () {
     validatePublishConfig(config);
     var location = resolvePublishSource(config.source.ref, allNodes);
     var resolvedConfig = resolveConfigLinkTargets(config, allNodes);
+    var blockRowsByRef = fetchBlockSourceRows(resolvedConfig, allNodes);
     var rows = fetchTableRows(location.projectId, location.dataset, location.table);
-    var payload = buildReportPayload(resolvedConfig, rows);
+    var payload = buildReportPayload(resolvedConfig, rows, blockRowsByRef);
     var html = renderReportHtml(payload, resolvedConfig);
     var fileId = resolveDriveWriteTarget(config.target);
     var writtenFileId = writeDriveText(fileId, config.target, html, MimeType.HTML);
@@ -4516,16 +4566,28 @@ var NotSoBigData = (function () {
     };
   }
 
-  function buildReportPayload(config, rows) {
+  // Picks a block's own source-override rows (fetchBlockSourceRows's
+  // result, keyed by ref) over the report's default rows when it declared
+  // one - validateBlockSource already guarantees the two aren't both
+  // present alongside reactsTo, so this is the only branch point
+  // buildReportPayload's three block loops need.
+  function rowsForBlock(block, defaultRows, blockRowsByRef) {
+    return block.source ? blockRowsByRef[block.source.ref] : defaultRows;
+  }
+
+  function buildReportPayload(config, rows, blockRowsByRef) {
+    blockRowsByRef = blockRowsByRef || emptyMap();
     var kpis = (config.kpis || []).map(function (kpi) {
-      var value = computeAggregate(rows, kpi.agg, kpi.field);
+      var kpiRows = rowsForBlock(kpi, rows, blockRowsByRef);
+      var value = computeAggregate(kpiRows, kpi.agg, kpi.field);
       return { label: kpi.label, value: value, formatted: formatValue(value, kpi.format) };
     });
     var charts = (config.charts || []).map(function (chart) {
-      return buildChartPayload(chart, rows);
+      return buildChartPayload(chart, rowsForBlock(chart, rows, blockRowsByRef));
     });
     var tables = (config.tables || []).map(function (table) {
-      return table.mode === 'raw' ? buildRawTablePayload(table, rows) : buildAggregatedTablePayload(table, rows);
+      var tableRows = rowsForBlock(table, rows, blockRowsByRef);
+      return table.mode === 'raw' ? buildRawTablePayload(table, tableRows) : buildAggregatedTablePayload(table, tableRows);
     });
     var payload = { kpis: kpis, charts: charts, tables: tables };
     if (config.filters && config.filters.length) {

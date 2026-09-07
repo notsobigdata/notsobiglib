@@ -101,19 +101,30 @@ function testPublishLayoutTypeOtherThanLinearRejected() {
 // Tabledata.list should appear to return (one array of cell values per
 // row, in fieldNames order); the returned function reads back whatever
 // HTML DriveApp.createFile most recently received.
-function shimBigQueryAndDrive(ctx, fieldNames, rowValues) {
+// tableOverrides is optional: { [table]: { fieldNames, rowValues } },
+// keyed by the bigquery table name a fetchTableRows call resolves to -
+// lets a block-source-override test give a second table its own distinct
+// rows while every other table keeps using the fieldNames/rowValues
+// passed positionally, unchanged from every pre-existing call site.
+function shimBigQueryAndDrive(ctx, fieldNames, rowValues, tableOverrides) {
   var capturedHtml = null;
   ctx.MimeType = { HTML: 'text/html' };
+  function dataFor(table) {
+    if (tableOverrides && tableOverrides[table]) {
+      return tableOverrides[table];
+    }
+    return { fieldNames: fieldNames, rowValues: rowValues };
+  }
   ctx.BigQuery = {
     Tables: {
-      get: function () {
-        return { schema: { fields: fieldNames.map(function (name) { return { name: name }; }) } };
+      get: function (projectId, dataset, table) {
+        return { schema: { fields: dataFor(table).fieldNames.map(function (name) { return { name: name }; }) } };
       }
     },
     Tabledata: {
-      list: function () {
+      list: function (projectId, dataset, table) {
         return {
-          rows: rowValues.map(function (values) {
+          rows: dataFor(table).rowValues.map(function (values) {
             return { f: values.map(function (value) { return { v: value }; }) };
           })
         };
@@ -821,6 +832,52 @@ function testPublishFilterClientJsIgnoresQueryStringValueNotInFilterOptions() {
   assert.strictEqual(engine.kpiValueNodes[0].textContent, '', 'expected no recompute to have run at all (stub KPI values start empty), got: ' + engine.kpiValueNodes[0].textContent);
 }
 
+function testPublishBlockSourceMustBeInDependsOn() {
+  var result = runOne('blockSourceMissingDependsOnPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/missing from dependsOn/.test(result.error), 'expected a dependsOn error, got: ' + result.error);
+}
+
+function testPublishBlockSourceUnknownRefRejected() {
+  var result = runOne('blockSourceUnknownRefPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/does not match a declared model or a move node with a bigquery target/.test(result.error), 'expected a ref-resolution error, got: ' + result.error);
+}
+
+function testPublishBlockSourceCannotCombineWithReactsTo() {
+  var result = runOne('blockSourceWithReactsToPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/"source" and "reactsTo" - these are mutually exclusive/.test(result.error), 'expected a mutual-exclusivity error, got: ' + result.error);
+}
+
+// Proves a kpi/chart/table declaring its own source.ref actually gets rows
+// fetched from that other table, not the report's default source - two
+// distinct bigquery tables, two distinct row sets, and the block-source
+// blocks land only the second table's numbers while the default-source
+// kpi keeps the first table's.
+function testPublishBlockSourceOverrideFetchesFromItsOwnRef() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']], {
+    orders_secondary: { fieldNames: ['category', 'revenue'], rowValues: [['B', '99'], ['C', '1']] }
+  });
+
+  var result = ctx.NotSoBigData.cli('run --select blockSourceOverridePublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var payload = extractPayload(getHtml());
+
+  var defaultKpi = payload.kpis.filter(function (k) { return k.label === 'Default revenue'; })[0];
+  var secondaryKpi = payload.kpis.filter(function (k) { return k.label === 'Secondary revenue'; })[0];
+  assert.strictEqual(defaultKpi.value, 10, 'expected the default-source kpi to use the default table, got: ' + JSON.stringify(defaultKpi));
+  assert.strictEqual(secondaryKpi.value, 100, 'expected the overridden kpi to use the secondary table (99 + 1), got: ' + JSON.stringify(secondaryKpi));
+
+  var chart = payload.charts.filter(function (c) { return c.id === 'by_category_secondary'; })[0];
+  var groups = chart.data.map(function (d) { return d.groupValue; }).sort();
+  assert.deepStrictEqual(groups, ['B', 'C'], 'expected the overridden chart to group the secondary table\'s rows, got: ' + JSON.stringify(chart.data));
+
+  var table = payload.tables.filter(function (t) { return t.id === 'secondary_raw'; })[0];
+  assert.strictEqual(table.rows.length, 2, 'expected the overridden table to hold the secondary table\'s 2 rows, got: ' + JSON.stringify(table.rows));
+}
+
 function testPublishFilterRequiresFieldAndLabel() {
   var result = runOne('badFilterMissingLabelPublish');
   assert.strictEqual(result.status, 'failed');
@@ -1425,6 +1482,10 @@ module.exports = {
   testPublishLinkToNewTabFalseRespected: testPublishLinkToNewTabFalseRespected,
   testPublishFilterClientJsAppliesMatchingQueryStringFilterOnLoad: testPublishFilterClientJsAppliesMatchingQueryStringFilterOnLoad,
   testPublishFilterClientJsIgnoresQueryStringValueNotInFilterOptions: testPublishFilterClientJsIgnoresQueryStringValueNotInFilterOptions,
+  testPublishBlockSourceMustBeInDependsOn: testPublishBlockSourceMustBeInDependsOn,
+  testPublishBlockSourceUnknownRefRejected: testPublishBlockSourceUnknownRefRejected,
+  testPublishBlockSourceCannotCombineWithReactsTo: testPublishBlockSourceCannotCombineWithReactsTo,
+  testPublishBlockSourceOverrideFetchesFromItsOwnRef: testPublishBlockSourceOverrideFetchesFromItsOwnRef,
   testPublishFilterRequiresFieldAndLabel: testPublishFilterRequiresFieldAndLabel,
   testPublishDuplicateFilterFieldRejected: testPublishDuplicateFilterFieldRejected,
   testPublishReactsToMustBeNonEmptyArray: testPublishReactsToMustBeNonEmptyArray,
