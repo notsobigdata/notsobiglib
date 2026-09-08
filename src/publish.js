@@ -107,20 +107,27 @@ function validateDetail(blockType, blockId, detail) {
 // every per-block loop in validatePublishConfig has already confirmed
 // ids are present and duplicate-free *within* charts[] and *within*
 // tables[] separately; this function additionally requires ids to be
-// unique *across* charts[] and tables[] combined, since relatesTo shares
-// one namespace over both arrays - no other publish() feature needs that
-// today (linkTo/detail/reactsTo never cross-reference a chart id against
-// a table id), so this is a new rule, not a relaxation of an old one.
+// unique *across* charts[] and tables[] combined, since computeBoardLayout/
+// renderBoardCanvas key a single positionById/sectionById map by id across
+// both arrays unconditionally whenever layout.type is 'board' - not only
+// when a block happens to declare relatesTo. So the cross-array check
+// below (and the self-ref/unknown-id/cycle checks that build on the same
+// parentOf map) run for every board-layout report; only the "relatesTo
+// requires layout.type board" throw is actually gated on relatesToUsed -
+// no other publish() feature needs a combined namespace today (linkTo/
+// detail/reactsTo never cross-reference a chart id against a table id),
+// so this is a new rule, not a relaxation of an old one.
 function validateBoardRelations(config) {
   var charts = config.charts || [];
   var tables = config.tables || [];
-  var relatesToUsed = charts.concat(tables).some(function (block) { return block.relatesTo; });
-  if (!relatesToUsed) {
-    return;
-  }
   var layoutType = (config.layout && config.layout.type) || 'linear';
-  if (layoutType !== 'board') {
+  var relatesToUsed = charts.concat(tables).some(function (block) { return block.relatesTo; });
+
+  if (relatesToUsed && layoutType !== 'board') {
     throw new Error('publish(): "relatesTo" is set on a chart or table, which requires layout.type "board".');
+  }
+  if (layoutType !== 'board') {
+    return;
   }
 
   var parentOf = emptyMap();
@@ -741,8 +748,8 @@ function escapeHtml(value) {
 
 // Fixed box/gap sizing for layout:'board' - no per-report customization
 // in v1, same posture the REPORT_CSS design tokens already have.
-var BOARD_BOX_WIDTH = 260;
-var BOARD_BOX_HEIGHT = 140;
+var BOARD_BOX_WIDTH = 520;
+var BOARD_BOX_HEIGHT = 340;
 var BOARD_H_GAP = 40;
 var BOARD_V_GAP = 60;
 
@@ -845,9 +852,9 @@ var TABLE_DETAIL_CSS = '.table-detail-toggle { font-family: var(--mono); font-si
 // CSS for layout:'board', only emitted when config.layout.type is
 // 'board' (see renderReportHtml's isBoardLayout branch below).
 var BOARD_CSS = [
-  '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); }',
-  '.board-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; cursor: grab; }',
-  '.board-canvas.board-panning { cursor: grabbing; }',
+  '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); cursor: grab; }',
+  '.board-viewport.board-panning { cursor: grabbing; }',
+  '.board-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }',
   '.board-node { position: absolute; background: var(--paper); border: 1px solid var(--paper-line); padding: 12px; box-sizing: border-box; overflow: auto; }',
   '.board-node .chart, .board-node .table-block { border-top: none; margin-top: 0; padding-top: 0; }',
   '.board-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }',
@@ -1439,13 +1446,13 @@ var BOARD_CLIENT_JS = [
   '  function applyTransform() {',
   '    canvas.style.transform = "translate(" + panX + "px," + panY + "px) scale(" + zoom + ")";',
   '  }',
-  '  function startDrag(x, y) { dragging = true; lastX = x; lastY = y; canvas.classList.add("board-panning"); }',
+  '  function startDrag(x, y) { dragging = true; lastX = x; lastY = y; viewport.classList.add("board-panning"); }',
   '  function moveDrag(x, y) {',
   '    if (!dragging) { return; }',
   '    panX += x - lastX; panY += y - lastY; lastX = x; lastY = y;',
   '    applyTransform();',
   '  }',
-  '  function endDrag() { dragging = false; canvas.classList.remove("board-panning"); }',
+  '  function endDrag() { dragging = false; viewport.classList.remove("board-panning"); }',
   '  viewport.addEventListener("mousedown", function (e) { startDrag(e.clientX, e.clientY); });',
   '  window.addEventListener("mousemove", function (e) { moveDrag(e.clientX, e.clientY); });',
   '  window.addEventListener("mouseup", endDrag);',
@@ -1513,8 +1520,6 @@ function renderReportHtml(payload, config) {
       + '<div class="chart-canvas" id="chart-' + escapeHtml(chart.id) + '"></div></section>';
   });
   var tableSectionsList = payload.tables.map(renderTableSection);
-  var chartSections = chartSectionsList.join('');
-  var tableSections = tableSectionsList.join('');
   var hasDetail = payload.tables.some(function (t) { return t.detail; }) || payload.charts.some(function (c) { return c.detail; });
   var hasFilters = !!(payload.filters && payload.filters.length);
   var script = 'window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';';
@@ -1541,9 +1546,10 @@ function renderReportHtml(payload, config) {
   }
   var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
   var css = REPORT_CSS + (hasDetail ? TABLE_DETAIL_CSS : '') + (isBoardLayout ? BOARD_CSS : '');
-  var body = isBoardLayout
-    ? filtersSection + '<div class="kpis">' + kpiCards + '</div>' + renderBoardCanvas(config, chartSectionsList, tableSectionsList)
-    : filtersSection + '<div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections;
+  var blocks = isBoardLayout
+    ? renderBoardCanvas(config, chartSectionsList, tableSectionsList)
+    : chartSectionsList.join('') + tableSectionsList.join('');
+  var body = filtersSection + '<div class="kpis">' + kpiCards + '</div>' + blocks;
   return '<!doctype html><html><head><meta charset="utf-8">'
     + '<title>' + escapeHtml(config.target.fileName) + '</title>'
     + '<style>' + css + '</style>' + d3Script + '</head><body>'

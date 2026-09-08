@@ -120,6 +120,19 @@ function testPublishBoardDuplicateCrossTypeIdRejected() {
   assert.ok(/used as both a chart id and a table id/.test(result.error), 'expected a cross-type duplicate-id error, got: ' + result.error);
 }
 
+// Regression for the finding where validateBoardRelations skipped the
+// cross-array uniqueness check entirely whenever no block declared
+// relatesTo, even though computeBoardLayout/renderBoardCanvas key a single
+// id-keyed map across charts[]+tables[] unconditionally once layout.type
+// is "board" - silently dropping one block's markup on a collision. Same
+// error as testPublishBoardDuplicateCrossTypeIdRejected above, just with
+// no relatesTo anywhere on either block.
+function testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo() {
+  var result = runOne('boardDuplicateCrossTypeIdNoRelatesToPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/used as both a chart id and a table id/.test(result.error), 'expected a cross-type duplicate-id error, got: ' + result.error);
+}
+
 function testPublishBoardValidRelationsProceedPastValidation() {
   var result = runOne('boardValidPublish');
   // Same proof pattern as testPublishValidRefProceedsPastValidation: no
@@ -131,19 +144,19 @@ function testPublishBoardValidRelationsProceedPastValidation() {
 }
 
 // boardValidPublish: root "r" with two children "c1" (chart) and "c2"
-// (table). Hand-computed with BOARD_BOX_WIDTH=260, BOARD_BOX_HEIGHT=140,
-// BOARD_H_GAP=40, BOARD_V_GAP=60: leaves land at x=0 and x=300 (0 and 1
-// slots * 300px-with-gap), y=200 (depth 1 * 200px-with-gap); the root
-// centers over its children at x=(0+300)/2=150, y=0.
+// (table). Hand-computed with BOARD_BOX_WIDTH=520, BOARD_BOX_HEIGHT=340,
+// BOARD_H_GAP=40, BOARD_V_GAP=60: leaves land at x=0 and x=560 (0 and 1
+// slots * (520+40)px-with-gap), y=400 (depth 1 * (340+60)px-with-gap); the
+// root centers over its children at x=(0+560)/2=280, y=0.
 function testPublishBoardLayoutPositionsSingleRootTwoChildren() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
   var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
-  assert.ok(html.indexOf('left:150px;top:0px') !== -1, 'expected the root positioned at (150,0), got: ' + html);
-  assert.ok(html.indexOf('left:0px;top:200px') !== -1, 'expected the first child positioned at (0,200), got: ' + html);
-  assert.ok(html.indexOf('left:300px;top:200px') !== -1, 'expected the second child positioned at (300,200), got: ' + html);
+  assert.ok(html.indexOf('left:280px;top:0px') !== -1, 'expected the root positioned at (280,0), got: ' + html);
+  assert.ok(html.indexOf('left:0px;top:400px') !== -1, 'expected the first child positioned at (0,400), got: ' + html);
+  assert.ok(html.indexOf('left:560px;top:400px') !== -1, 'expected the second child positioned at (560,400), got: ' + html);
   var edgeCount = (html.match(/class="board-edge"/g) || []).length;
   assert.strictEqual(edgeCount, 2, 'expected 2 edges (r->c1, r->c2), got ' + edgeCount + ' in: ' + html);
 }
@@ -155,8 +168,8 @@ function testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine() {
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
   assert.ok(html.indexOf('left:0px;top:0px') !== -1, 'expected "g" at (0,0), got: ' + html);
-  assert.ok(html.indexOf('left:0px;top:200px') !== -1, 'expected "p" at (0,200), got: ' + html);
-  assert.ok(html.indexOf('left:0px;top:400px') !== -1, 'expected "c" at (0,400), got: ' + html);
+  assert.ok(html.indexOf('left:0px;top:400px') !== -1, 'expected "p" at (0,400), got: ' + html);
+  assert.ok(html.indexOf('left:0px;top:800px') !== -1, 'expected "c" at (0,800), got: ' + html);
   var edgeCount = (html.match(/class="board-edge"/g) || []).length;
   assert.strictEqual(edgeCount, 2, 'expected 2 edges (g->p, p->c), got ' + edgeCount + ' in: ' + html);
 }
@@ -168,7 +181,7 @@ function testPublishBoardLayoutPlacesMultipleRootsSideBySide() {
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
   assert.ok(html.indexOf('left:0px;top:0px') !== -1, 'expected root "a" at (0,0), got: ' + html);
-  assert.ok(html.indexOf('left:300px;top:0px') !== -1, 'expected root "b" at (300,0), got: ' + html);
+  assert.ok(html.indexOf('left:560px;top:0px') !== -1, 'expected root "b" at (560,0), got: ' + html);
   var edgeCount = (html.match(/class="board-edge"/g) || []).length;
   assert.strictEqual(edgeCount, 0, 'expected 0 edges (two unrelated roots), got ' + edgeCount + ' in: ' + html);
 }
@@ -1864,6 +1877,7 @@ module.exports = {
   testPublishBoardRelatesToSelfRejected: testPublishBoardRelatesToSelfRejected,
   testPublishBoardRelatesToCycleRejected: testPublishBoardRelatesToCycleRejected,
   testPublishBoardDuplicateCrossTypeIdRejected: testPublishBoardDuplicateCrossTypeIdRejected,
+  testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo: testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo,
   testPublishBoardValidRelationsProceedPastValidation: testPublishBoardValidRelationsProceedPastValidation,
   testPublishBoardLayoutPositionsSingleRootTwoChildren: testPublishBoardLayoutPositionsSingleRootTwoChildren,
   testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine: testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine,

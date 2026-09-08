@@ -407,10 +407,15 @@ other publish() feature keeps chart ids and table ids in separate
 namespaces (duplicate-id checks run independently in
 `validatePublishConfig`'s two per-block loops), but a `relatesTo` value
 has no way to say which array it's pointing into, so this feature alone
-needed the combined-namespace rule. It's a new restriction, scoped to
-reports that actually use `relatesTo` - a `linear`-layout report (or a
-`board`-layout report with no `relatesTo` at all) can still reuse the
-same id for a chart and a table exactly as before.
+needed the combined-namespace rule. The rule is scoped to `layout.type
+"board"`, not to whether `relatesTo` is actually used anywhere:
+`computeBoardLayout`/`renderBoardCanvas` key a single `positionById`/
+`sectionById` map by id across both arrays unconditionally the moment
+board layout is active, so a chart/table id collision would silently
+drop one block's markup even with no `relatesTo` in sight. `validateBoardRelations`
+therefore runs the combined-namespace check for **every** `board`-layout
+report; only a `linear`-layout report keeps the old independent-namespaces
+behavior, reusing the same id for a chart and a table exactly as before.
 
 `renderBoardCanvas` reuses `chartSectionsList`/`tableSectionsList` -
 `renderReportHtml`'s per-block markup, computed once, unconditionally,

@@ -248,6 +248,29 @@ var boardDuplicateCrossTypeIdPublish = {
   ]
 };
 
+// Same cross-type id collision as boardDuplicateCrossTypeIdPublish above,
+// but with no "relatesTo" declared anywhere on either block - regression
+// fixture for the gap where validateBoardRelations used to skip its
+// cross-array uniqueness check whenever relatesTo went unused, even though
+// computeBoardLayout/renderBoardCanvas key a single id-keyed map across
+// charts[]+tables[] unconditionally once layout.type is "board", silently
+// dropping one block's markup on a collision. Must be rejected with the
+// same "used as both a chart id and a table id" error.
+var boardDuplicateCrossTypeIdNoRelatesToPublish = {
+  kind: 'publish',
+  name: 'boardDuplicateCrossTypeIdNoRelatesToPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-dup-cross-type-no-relatesto.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'shared', type: 'bar', title: 'Chart', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }
+  ],
+  tables: [
+    { id: 'shared', title: 'Table', mode: 'raw', columns: [{ field: 'category' }] }
+  ]
+};
+
 // A root chart with two children (one a chart, one a table) - proceeds
 // past validation; used by Task 2/3's rendering tests too (reused rather
 // than duplicated, same "one fixture per concern" precedent tablesPublish's
@@ -268,10 +291,10 @@ var boardValidPublish = {
   ]
 };
 
-// Straight 3-level chain: g -> p -> c. Every box is BOARD_BOX_WIDTH=260 +
-// BOARD_H_GAP=40 = 300px wide-with-gap, BOARD_BOX_HEIGHT=140 +
-// BOARD_V_GAP=60 = 200px tall-with-gap - a single-child chain has no
-// siblings to center over, so every node lands at x=0, y=depth*200.
+// Straight 3-level chain: g -> p -> c. Every box is BOARD_BOX_WIDTH=520 +
+// BOARD_H_GAP=40 = 560px wide-with-gap, BOARD_BOX_HEIGHT=340 +
+// BOARD_V_GAP=60 = 400px tall-with-gap - a single-child chain has no
+// siblings to center over, so every node lands at x=0, y=depth*400.
 var boardChainPublish = {
   kind: 'publish',
   name: 'boardChainPublish',
@@ -289,7 +312,7 @@ var boardChainPublish = {
 };
 
 // Two independent roots, each a single leaf with no relatesTo - proves
-// multiple trees land side by side (x=0 and x=300) rather than
+// multiple trees land side by side (x=0 and x=560) rather than
 // overlapping at x=0.
 var boardMultiRootPublish = {
   kind: 'publish',
