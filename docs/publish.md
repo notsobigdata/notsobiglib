@@ -281,6 +281,54 @@ rows are different — each cell is embedded already formatted (the exact
 string the table renders), since that's also what the client-side
 pager needs to page through without re-formatting anything.
 
+### Board layout (`layout: 'board'`)
+
+```javascript
+layout: { type: 'board' },
+charts: [
+  { id: 'overview', type: 'bar', title: 'Orders by region',
+    groupBy: 'region', metric: { agg: 'count_distinct', field: 'order_id' } },
+  { id: 'by_channel', type: 'bar', title: 'Orders by channel',
+    groupBy: 'channel', metric: { agg: 'count_distinct', field: 'order_id' },
+    relatesTo: 'overview' }
+],
+tables: [
+  { id: 'flagged_orders', title: 'Flagged orders', mode: 'raw',
+    columns: [{ field: 'order_id', label: 'Order' }],
+    relatesTo: 'by_channel' }
+]
+```
+
+- `layout: { type: 'board' }` (in place of the default `'linear'`)
+  renders `charts[]`/`tables[]` as a tree on a pan/zoomable infinite
+  canvas instead of one stacked column. `kpis[]` are unaffected — they
+  keep rendering as a fixed summary strip above the canvas, since KPIs
+  have no `id` and can't participate in a tree.
+- `relatesTo` (new on `charts[]`/`tables[]` entries) names another
+  chart/table `id` in the same report — that block becomes this one's
+  parent in the tree. No `relatesTo` means "root". `relatesTo` ids share
+  one namespace across `charts[]` and `tables[]` combined, so a chart and
+  a table cannot share an `id` in a board-layout report even though
+  that's otherwise allowed.
+- `relatesTo` is a config error unless `layout.type` is `'board'`
+  (dead-config guard), if it names an id that doesn't exist, if it
+  points at itself, or if it forms a cycle with other blocks'
+  `relatesTo`.
+- Multiple root blocks (no `relatesTo`) are all valid — each becomes its
+  own tree, laid out side by side on the same canvas.
+- Each block still renders exactly like it would in `linear` mode (same
+  chart/table markup, same `reactsTo`/`detail`/`linkKey`/`linkTo`
+  behavior) — `relatesTo` only changes where it sits on the page, never
+  what it computes or how it reacts.
+- Pan (click-drag or touch-drag) and zoom (mouse wheel, clamped
+  roughly 0.25×–2×) are built in, vanilla JS/CSS — no extra config, no
+  external library.
+- **Known ceiling:** the layout centers each parent over its children
+  but doesn't do full collision-avoiding tree layout, so a very lopsided
+  tree (a long chain next to a wide shallow one) can look uneven rather
+  than tightly packed. Fine for the box counts a dashboard realistically
+  has.
+
 ### Detail drill-down
 
 Any `chart` (bar/line/pie) or `mode: 'aggregated'` table can declare
@@ -392,8 +440,3 @@ tables: [
   hit an Apps Script execution timeout before `publish()` finishes
   reading it.
 
-## What's not here yet
-
-A `board` tree layout (`layout: 'board'`) is planned but not
-implemented — see `docs/superpowers/specs/2026-09-05-publish-kind-design.md`'s
-"Future direction" section.

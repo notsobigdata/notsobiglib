@@ -17,6 +17,11 @@ var PUBLISH_VALUE_FORMATS = ['string', 'currency', 'integer', 'decimal'];
 // isn't a separate type, just an optional second dimension on 'bar'.
 var CHART_TYPES = ['bar', 'line', 'pie'];
 
+// layout.type accepted values - see the design spec's §2. 'linear'
+// (default) stacks every block in one column; 'board' positions charts/
+// tables as a relatesTo-driven tree on a pan/zoomable canvas.
+var LAYOUT_TYPES = ['linear', 'board'];
+
 // Pinned exact version, never a floating tag - see CLAUDE.md's
 // "Downstream consumers pinned to a release" for the same reasoning
 // applied to a different kind of pin: a file reopened a year from now
@@ -97,6 +102,69 @@ function validateDetail(blockType, blockId, detail) {
   });
 }
 
+// relatesTo (charts[]/tables[] only) declares one block's parent in a
+// layout:'board' tree - undefined/absent means "root". Runs once, after
+// every per-block loop in validatePublishConfig has already confirmed
+// ids are present and duplicate-free *within* charts[] and *within*
+// tables[] separately; this function additionally requires ids to be
+// unique *across* charts[] and tables[] combined, since computeBoardLayout/
+// renderBoardCanvas key a single positionById/sectionById map by id across
+// both arrays unconditionally whenever layout.type is 'board' - not only
+// when a block happens to declare relatesTo. So the cross-array check
+// below (and the self-ref/unknown-id/cycle checks that build on the same
+// parentOf map) run for every board-layout report; only the "relatesTo
+// requires layout.type board" throw is actually gated on relatesToUsed -
+// no other publish() feature needs a combined namespace today (linkTo/
+// detail/reactsTo never cross-reference a chart id against a table id),
+// so this is a new rule, not a relaxation of an old one.
+function validateBoardRelations(config) {
+  var charts = config.charts || [];
+  var tables = config.tables || [];
+  var layoutType = (config.layout && config.layout.type) || 'linear';
+  var relatesToUsed = charts.concat(tables).some(function (block) { return block.relatesTo; });
+
+  if (relatesToUsed && layoutType !== 'board') {
+    throw new Error('publish(): "relatesTo" is set on a chart or table, which requires layout.type "board".');
+  }
+  if (layoutType !== 'board') {
+    return;
+  }
+
+  var parentOf = emptyMap();
+  function registerBlock(id) {
+    if (has(parentOf, id)) {
+      throw new Error('publish(): "' + id + '" is used as both a chart id and a table id - "relatesTo" ids must be unique across charts[] and tables[].');
+    }
+  }
+  charts.forEach(function (chart) { registerBlock(chart.id); parentOf[chart.id] = chart.relatesTo || null; });
+  tables.forEach(function (table) { registerBlock(table.id); parentOf[table.id] = table.relatesTo || null; });
+
+  Object.keys(parentOf).forEach(function (id) {
+    var relatesTo = parentOf[id];
+    if (relatesTo === null) {
+      return;
+    }
+    if (relatesTo === id) {
+      throw new Error('publish(): "' + id + '" has "relatesTo" pointing at itself.');
+    }
+    if (!has(parentOf, relatesTo)) {
+      throw new Error('publish(): "' + id + '" has "relatesTo: ' + relatesTo + '", which doesn\'t match any declared chart/table id.');
+    }
+  });
+
+  Object.keys(parentOf).forEach(function (id) {
+    var seen = emptyMap();
+    var current = id;
+    while (parentOf[current]) {
+      if (has(seen, current)) {
+        throw new Error('publish(): "relatesTo" forms a cycle at "' + current + '".');
+      }
+      seen[current] = true;
+      current = parentOf[current];
+    }
+  });
+}
+
 // Every check a publish node's config must pass before anything is
 // fetched or written - same "throw new Error('publish(): ...')"
 // convention move()/model() already use. Field-by-field, not a schema
@@ -112,8 +180,9 @@ function validatePublishConfig(config) {
   if (!config.target || config.target.type !== 'drive' || !config.target.folderId || !config.target.fileName) {
     throw new Error('publish(): config.target must be { type: "drive", folderId: "...", fileName: "..." }.');
   }
-  if (config.layout && config.layout.type !== 'linear') {
-    throw new Error('publish(): layout.type "' + config.layout.type + '" - only "linear" is supported.');
+  var layoutType = (config.layout && config.layout.type) || 'linear';
+  if (LAYOUT_TYPES.indexOf(layoutType) === -1) {
+    throw new Error('publish(): layout.type "' + layoutType + '" - expected one of ' + LAYOUT_TYPES.join(', ') + '.');
   }
   var seenFilterFields = emptyMap();
   (config.filters || []).forEach(function (filter) {
@@ -240,6 +309,7 @@ function validatePublishConfig(config) {
       });
     }
   });
+  validateBoardRelations(config);
 }
 
 // Resolves config.source.ref against every other declared node -
@@ -676,6 +746,64 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+// Fixed box/gap sizing for layout:'board' - no per-report customization
+// in v1, same posture the REPORT_CSS design tokens already have.
+var BOARD_BOX_WIDTH = 520;
+var BOARD_BOX_HEIGHT = 340;
+var BOARD_H_GAP = 40;
+var BOARD_V_GAP = 60;
+
+// Simple tidy-tree layout for layout:'board' - see the design spec's §4
+// "Known ceiling" for why this isn't a full Reingold-Tilford walk: each
+// parent centers over its children's span, but there's no contour-based
+// collision avoidance for a lopsided tree. blocks with no relatesTo are
+// roots; a shared `nextSlot` leaf counter across every root's DFS walk
+// is what makes multiple roots land side by side automatically, with no
+// separate "offset past the previous tree's width" step needed.
+// Trusts validateBoardRelations already ran (acyclic, every id/relatesTo
+// resolves) - does no error-checking of its own.
+function computeBoardLayout(charts, tables) {
+  var blocks = (charts || []).concat(tables || []);
+  var children = emptyMap();
+  var roots = [];
+  blocks.forEach(function (block) {
+    if (block.relatesTo) {
+      children[block.relatesTo] = children[block.relatesTo] || [];
+      children[block.relatesTo].push(block.id);
+    } else {
+      roots.push(block.id);
+    }
+  });
+
+  var positions = [];
+  var edges = [];
+  var positionById = emptyMap();
+  var nextSlot = 0;
+
+  function place(id, depth) {
+    var kids = children[id] || [];
+    var y = depth * (BOARD_BOX_HEIGHT + BOARD_V_GAP);
+    var x;
+    if (!kids.length) {
+      x = nextSlot * (BOARD_BOX_WIDTH + BOARD_H_GAP);
+      nextSlot += 1;
+    } else {
+      kids.forEach(function (childId) {
+        edges.push({ from: id, to: childId });
+        place(childId, depth + 1);
+      });
+      var childXs = kids.map(function (childId) { return positionById[childId]; });
+      x = (Math.min.apply(null, childXs) + Math.max.apply(null, childXs)) / 2;
+    }
+    positionById[id] = x;
+    positions.push({ id: id, x: x, y: y });
+  }
+
+  roots.forEach(function (rootId) { place(rootId, 0); });
+
+  return { positions: positions, edges: edges };
+}
+
 // Fixed design tokens - see the design spec's "Design tokens" section.
 // No per-report customization in v1: every published dashboard looks the
 // same on purpose, the same way every model's compiled SQL follows one
@@ -720,6 +848,18 @@ var REPORT_CSS = [
 // CSS for table detail toggle button, only emitted when detail is configured
 // on at least one table or chart.
 var TABLE_DETAIL_CSS = '.table-detail-toggle { font-family: var(--mono); font-size: 12px; background: none; border: none; cursor: pointer; padding: 0 4px; }';
+
+// CSS for layout:'board', only emitted when config.layout.type is
+// 'board' (see renderReportHtml's isBoardLayout branch below).
+var BOARD_CSS = [
+  '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); cursor: grab; }',
+  '.board-viewport.board-panning { cursor: grabbing; }',
+  '.board-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }',
+  '.board-node { position: absolute; background: var(--paper); border: 1px solid var(--paper-line); padding: 12px; box-sizing: border-box; overflow: auto; }',
+  '.board-node .chart, .board-node .table-block { border-top: none; margin-top: 0; padding-top: 0; }',
+  '.board-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }',
+  '.board-edge { fill: none; stroke: var(--paper-line); stroke-width: 2; }'
+].join('\n');
 
 // One <select> per filters[] entry: an "All" option plus every distinct
 // value already computed server-side in payload.filters[].options (see
@@ -1291,17 +1431,95 @@ var CHART_CLIENT_JS = [
   '});'
 ].join('\n');
 
+// Pan (mouse/touch drag) + zoom (wheel), vanilla JS/CSS transform, no
+// library - see the design spec's §5. Self-contained: its own
+// DOMContentLoaded listener, independent of TABLE_CLIENT_JS/
+// CHART_CLIENT_JS's own listeners, only emitted when layout:'board' is
+// used (see renderReportHtml's isBoardLayout branch).
+var BOARD_CLIENT_JS = [
+  'document.addEventListener("DOMContentLoaded", function () {',
+  '  var viewport = document.querySelector(".board-viewport");',
+  '  var canvas = document.getElementById("board-canvas");',
+  '  if (!viewport || !canvas) { return; }',
+  '  var panX = 0, panY = 0, zoom = 1;',
+  '  var dragging = false, lastX = 0, lastY = 0;',
+  '  function applyTransform() {',
+  '    canvas.style.transform = "translate(" + panX + "px," + panY + "px) scale(" + zoom + ")";',
+  '  }',
+  '  function startDrag(x, y) { dragging = true; lastX = x; lastY = y; viewport.classList.add("board-panning"); }',
+  '  function moveDrag(x, y) {',
+  '    if (!dragging) { return; }',
+  '    panX += x - lastX; panY += y - lastY; lastX = x; lastY = y;',
+  '    applyTransform();',
+  '  }',
+  '  function endDrag() { dragging = false; viewport.classList.remove("board-panning"); }',
+  '  viewport.addEventListener("mousedown", function (e) { startDrag(e.clientX, e.clientY); });',
+  '  window.addEventListener("mousemove", function (e) { moveDrag(e.clientX, e.clientY); });',
+  '  window.addEventListener("mouseup", endDrag);',
+  '  viewport.addEventListener("touchstart", function (e) { var t = e.touches[0]; startDrag(t.clientX, t.clientY); });',
+  '  viewport.addEventListener("touchmove", function (e) { var t = e.touches[0]; moveDrag(t.clientX, t.clientY); e.preventDefault(); }, { passive: false });',
+  '  viewport.addEventListener("touchend", endDrag);',
+  '  viewport.addEventListener("wheel", function (e) {',
+  '    e.preventDefault();',
+  '    var delta = e.deltaY > 0 ? -0.1 : 0.1;',
+  '    zoom = Math.min(2, Math.max(0.25, zoom + delta));',
+  '    applyTransform();',
+  '  }, { passive: false });',
+  '});'
+].join('\n');
+
+// Wraps the exact same per-block markup renderReportHtml's linear
+// branch already produces (chartSectionsList[i]/tableSectionsList[i],
+// unchanged) into positioned .board-node divs, plus an SVG layer
+// drawing one <path> per computeBoardLayout edge. sectionById maps a
+// block's id to its already-rendered markup - charts and tables are
+// zipped by array index since chartSectionsList/tableSectionsList are
+// built with .map() over config.charts/config.tables in the same order.
+function renderBoardCanvas(config, chartSectionsList, tableSectionsList) {
+  var charts = config.charts || [];
+  var tables = config.tables || [];
+  var layout = computeBoardLayout(charts, tables);
+  var positionById = emptyMap();
+  layout.positions.forEach(function (p) { positionById[p.id] = p; });
+  var sectionById = emptyMap();
+  charts.forEach(function (chart, index) { sectionById[chart.id] = chartSectionsList[index]; });
+  tables.forEach(function (table, index) { sectionById[table.id] = tableSectionsList[index]; });
+
+  var nodesHtml = layout.positions.map(function (p) {
+    return '<div class="board-node" style="left:' + p.x + 'px;top:' + p.y + 'px;width:' + BOARD_BOX_WIDTH + 'px;height:' + BOARD_BOX_HEIGHT + 'px">' + sectionById[p.id] + '</div>';
+  }).join('');
+
+  var maxX = layout.positions.reduce(function (m, p) { return Math.max(m, p.x + BOARD_BOX_WIDTH); }, 0);
+  var maxY = layout.positions.reduce(function (m, p) { return Math.max(m, p.y + BOARD_BOX_HEIGHT); }, 0);
+
+  var edgesHtml = layout.edges.map(function (edge) {
+    var from = positionById[edge.from];
+    var to = positionById[edge.to];
+    var x1 = from.x + BOARD_BOX_WIDTH / 2;
+    var y1 = from.y + BOARD_BOX_HEIGHT;
+    var x2 = to.x + BOARD_BOX_WIDTH / 2;
+    var y2 = to.y;
+    return '<path class="board-edge" d="M' + x1 + ' ' + y1 + ' L' + x2 + ' ' + y2 + '"></path>';
+  }).join('');
+
+  return '<div class="board-viewport"><div class="board-canvas" id="board-canvas">'
+    + '<svg class="board-edges" width="' + maxX + '" height="' + maxY + '">' + edgesHtml + '</svg>'
+    + nodesHtml
+    + '</div></div>';
+}
+
 function renderReportHtml(payload, config) {
+  var isBoardLayout = !!(config.layout && config.layout.type === 'board');
   var filtersSection = (payload.filters && payload.filters.length) ? renderFiltersSection(payload.filters) : '';
   var kpiCards = payload.kpis.map(function (kpi) {
     return '<div class="kpi"><div class="kpi-label">' + escapeHtml(kpi.label) + '</div>'
       + '<div class="kpi-value">' + escapeHtml(kpi.formatted) + '</div></div>';
   }).join('');
-  var chartSections = payload.charts.map(function (chart) {
+  var chartSectionsList = payload.charts.map(function (chart) {
     return '<section class="chart" data-chart-id="' + escapeHtml(chart.id) + '"><h2>' + escapeHtml(chart.title) + '</h2>'
       + '<div class="chart-canvas" id="chart-' + escapeHtml(chart.id) + '"></div></section>';
-  }).join('');
-  var tableSections = payload.tables.map(renderTableSection).join('');
+  });
+  var tableSectionsList = payload.tables.map(renderTableSection);
   var hasDetail = payload.tables.some(function (t) { return t.detail; }) || payload.charts.some(function (c) { return c.detail; });
   var hasFilters = !!(payload.filters && payload.filters.length);
   var script = 'window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';';
@@ -1315,6 +1533,9 @@ function renderReportHtml(payload, config) {
   if (payload.charts.length) {
     script += CHART_CLIENT_JS;
   }
+  if (isBoardLayout) {
+    script += BOARD_CLIENT_JS;
+  }
   if (hasFilters) {
     script += FILTER_REUSED_FUNCTIONS_JS + FILTER_CLIENT_JS;
   } else if (hasDetail) {
@@ -1324,11 +1545,15 @@ function renderReportHtml(payload, config) {
     script += DETAIL_CLIENT_JS;
   }
   var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
-  var css = REPORT_CSS + (hasDetail ? TABLE_DETAIL_CSS : '');
+  var css = REPORT_CSS + (hasDetail ? TABLE_DETAIL_CSS : '') + (isBoardLayout ? BOARD_CSS : '');
+  var blocks = isBoardLayout
+    ? renderBoardCanvas(config, chartSectionsList, tableSectionsList)
+    : chartSectionsList.join('') + tableSectionsList.join('');
+  var body = filtersSection + '<div class="kpis">' + kpiCards + '</div>' + blocks;
   return '<!doctype html><html><head><meta charset="utf-8">'
     + '<title>' + escapeHtml(config.target.fileName) + '</title>'
     + '<style>' + css + '</style>' + d3Script + '</head><body>'
-    + '<main>' + filtersSection + '<div class="kpis">' + kpiCards + '</div>' + chartSections + tableSections + '</main>'
+    + '<main>' + body + '</main>'
     + '<script>' + script + '</script>'
     + '</body></html>';
 }

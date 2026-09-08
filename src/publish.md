@@ -389,3 +389,36 @@ table's current config from `window.__PUBLISH_PAYLOAD__.tables` — but that
 would show a stale copy if a filter just ran and swapped `payload.tables`
 with newly-filtered rows. One shared closure, one click handler holding the
 live reference, is the only version that stays in sync.
+
+## Board layout (`layout: 'board'`)
+
+`computeBoardLayout(charts, tables)` is a simple tidy-tree walk, not a
+full Reingold-Tilford implementation: each parent centers over its
+children's already-computed x positions, and a shared `nextSlot` counter
+(incremented once per leaf, across every root's DFS walk) is what makes
+multiple independent roots land side by side automatically - no separate
+"offset this root past the previous tree's total width" step was needed,
+which is simpler than the design spec originally sketched (per-root
+subtree-width bookkeeping) once the shared-counter trick was in hand.
+
+`relatesTo` deliberately shares one id namespace across `charts[]` and
+`tables[]` (`validateBoardRelations`'s `registerBlock` check) - every
+other publish() feature keeps chart ids and table ids in separate
+namespaces (duplicate-id checks run independently in
+`validatePublishConfig`'s two per-block loops), but a `relatesTo` value
+has no way to say which array it's pointing into, so this feature alone
+needed the combined-namespace rule. The rule is scoped to `layout.type
+"board"`, not to whether `relatesTo` is actually used anywhere:
+`computeBoardLayout`/`renderBoardCanvas` key a single `positionById`/
+`sectionById` map by id across both arrays unconditionally the moment
+board layout is active, so a chart/table id collision would silently
+drop one block's markup even with no `relatesTo` in sight. `validateBoardRelations`
+therefore runs the combined-namespace check for **every** `board`-layout
+report; only a `linear`-layout report keeps the old independent-namespaces
+behavior, reusing the same id for a chart and a table exactly as before.
+
+`renderBoardCanvas` reuses `chartSectionsList`/`tableSectionsList` -
+`renderReportHtml`'s per-block markup, computed once, unconditionally,
+regardless of layout - rather than re-deriving chart/table HTML a second
+time for board mode. Both layout modes read from the same two arrays;
+only how they're assembled into the page differs.

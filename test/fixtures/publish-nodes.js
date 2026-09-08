@@ -180,8 +180,151 @@ var badLayoutPublish = {
   dependsOn: ['moveWithBigQueryTarget'],
   source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
   target: { type: 'drive', folderId: 'folder-id', fileName: 'bad-layout.html' },
-  layout: { type: 'board' },
+  layout: { type: 'grid' },
   kpis: [{ label: 'Revenue', agg: 'sum', field: 'revenue', format: 'currency' }]
+};
+
+var boardRelatesToWithoutBoardLayoutPublish = {
+  kind: 'publish',
+  name: 'boardRelatesToWithoutBoardLayoutPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-no-layout.html' },
+  charts: [
+    { id: 'a', type: 'bar', title: 'A', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'b', type: 'bar', title: 'B', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'a' }
+  ]
+};
+
+var boardRelatesToUnknownIdPublish = {
+  kind: 'publish',
+  name: 'boardRelatesToUnknownIdPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-unknown-id.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'a', type: 'bar', title: 'A', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'does_not_exist' }
+  ]
+};
+
+var boardRelatesToSelfPublish = {
+  kind: 'publish',
+  name: 'boardRelatesToSelfPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-self.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'a', type: 'bar', title: 'A', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'a' }
+  ]
+};
+
+var boardRelatesToCyclePublish = {
+  kind: 'publish',
+  name: 'boardRelatesToCyclePublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-cycle.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'a', type: 'bar', title: 'A', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'b' },
+    { id: 'b', type: 'bar', title: 'B', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'a' }
+  ]
+};
+
+var boardDuplicateCrossTypeIdPublish = {
+  kind: 'publish',
+  name: 'boardDuplicateCrossTypeIdPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-dup-cross-type.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'shared', type: 'bar', title: 'Chart', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }
+  ],
+  tables: [
+    { id: 'shared', title: 'Table', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'shared' }
+  ]
+};
+
+// Same cross-type id collision as boardDuplicateCrossTypeIdPublish above,
+// but with no "relatesTo" declared anywhere on either block - regression
+// fixture for the gap where validateBoardRelations used to skip its
+// cross-array uniqueness check whenever relatesTo went unused, even though
+// computeBoardLayout/renderBoardCanvas key a single id-keyed map across
+// charts[]+tables[] unconditionally once layout.type is "board", silently
+// dropping one block's markup on a collision. Must be rejected with the
+// same "used as both a chart id and a table id" error.
+var boardDuplicateCrossTypeIdNoRelatesToPublish = {
+  kind: 'publish',
+  name: 'boardDuplicateCrossTypeIdNoRelatesToPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-dup-cross-type-no-relatesto.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'shared', type: 'bar', title: 'Chart', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }
+  ],
+  tables: [
+    { id: 'shared', title: 'Table', mode: 'raw', columns: [{ field: 'category' }] }
+  ]
+};
+
+// A root chart with two children (one a chart, one a table) - proceeds
+// past validation; used by Task 2/3's rendering tests too (reused rather
+// than duplicated, same "one fixture per concern" precedent tablesPublish's
+// own comment already sets).
+var boardValidPublish = {
+  kind: 'publish',
+  name: 'boardValidPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-valid.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'r', type: 'bar', title: 'Root', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'c1', type: 'bar', title: 'Child 1', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'r' }
+  ],
+  tables: [
+    { id: 'c2', title: 'Child 2', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'r' }
+  ]
+};
+
+// Straight 3-level chain: g -> p -> c. Every box is BOARD_BOX_WIDTH=520 +
+// BOARD_H_GAP=40 = 560px wide-with-gap, BOARD_BOX_HEIGHT=340 +
+// BOARD_V_GAP=60 = 400px tall-with-gap - a single-child chain has no
+// siblings to center over, so every node lands at x=0, y=depth*400.
+var boardChainPublish = {
+  kind: 'publish',
+  name: 'boardChainPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-chain.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'g', type: 'bar', title: 'G', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'p', type: 'bar', title: 'P', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' }, relatesTo: 'g' }
+  ],
+  tables: [
+    { id: 'c', title: 'C', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'p' }
+  ]
+};
+
+// Two independent roots, each a single leaf with no relatesTo - proves
+// multiple trees land side by side (x=0 and x=560) rather than
+// overlapping at x=0.
+var boardMultiRootPublish = {
+  kind: 'publish',
+  name: 'boardMultiRootPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-multi-root.html' },
+  layout: { type: 'board' },
+  charts: [
+    { id: 'a', type: 'bar', title: 'A', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } },
+    { id: 'b', type: 'bar', title: 'B', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }
+  ]
 };
 
 // One raw table (columns: order_id, revenue) and one aggregated table

@@ -87,7 +87,130 @@ function testPublishV2ChartTypesProceedPastValidation() {
 function testPublishLayoutTypeOtherThanLinearRejected() {
   var result = runOne('badLayoutPublish');
   assert.strictEqual(result.status, 'failed');
-  assert.ok(/only "linear" is supported/.test(result.error), 'expected a layout-type error, got: ' + result.error);
+  assert.ok(/expected one of linear, board/.test(result.error), 'expected a layout-type error, got: ' + result.error);
+}
+
+function testPublishBoardRelatesToWithoutBoardLayoutRejected() {
+  var result = runOne('boardRelatesToWithoutBoardLayoutPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/requires layout\.type "board"/.test(result.error), 'expected a relatesTo-requires-board error, got: ' + result.error);
+}
+
+function testPublishBoardRelatesToUnknownIdRejected() {
+  var result = runOne('boardRelatesToUnknownIdPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/doesn't match any declared chart\/table id/.test(result.error), 'expected an unknown-relatesTo-id error, got: ' + result.error);
+}
+
+function testPublishBoardRelatesToSelfRejected() {
+  var result = runOne('boardRelatesToSelfPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/pointing at itself/.test(result.error), 'expected a self-relatesTo error, got: ' + result.error);
+}
+
+function testPublishBoardRelatesToCycleRejected() {
+  var result = runOne('boardRelatesToCyclePublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/forms a cycle/.test(result.error), 'expected a relatesTo-cycle error, got: ' + result.error);
+}
+
+function testPublishBoardDuplicateCrossTypeIdRejected() {
+  var result = runOne('boardDuplicateCrossTypeIdPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/used as both a chart id and a table id/.test(result.error), 'expected a cross-type duplicate-id error, got: ' + result.error);
+}
+
+// Regression for the finding where validateBoardRelations skipped the
+// cross-array uniqueness check entirely whenever no block declared
+// relatesTo, even though computeBoardLayout/renderBoardCanvas key a single
+// id-keyed map across charts[]+tables[] unconditionally once layout.type
+// is "board" - silently dropping one block's markup on a collision. Same
+// error as testPublishBoardDuplicateCrossTypeIdRejected above, just with
+// no relatesTo anywhere on either block.
+function testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo() {
+  var result = runOne('boardDuplicateCrossTypeIdNoRelatesToPublish');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/used as both a chart id and a table id/.test(result.error), 'expected a cross-type duplicate-id error, got: ' + result.error);
+}
+
+function testPublishBoardValidRelationsProceedPastValidation() {
+  var result = runOne('boardValidPublish');
+  // Same proof pattern as testPublishValidRefProceedsPastValidation: no
+  // BigQuery shim in this test, so a config that gets all the way past
+  // validation fails next at the un-shimmed BigQuery call, not at
+  // validation.
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
+}
+
+// boardValidPublish: root "r" with two children "c1" (chart) and "c2"
+// (table). Hand-computed with BOARD_BOX_WIDTH=520, BOARD_BOX_HEIGHT=340,
+// BOARD_H_GAP=40, BOARD_V_GAP=60: leaves land at x=0 and x=560 (0 and 1
+// slots * (520+40)px-with-gap), y=400 (depth 1 * (340+60)px-with-gap); the
+// root centers over its children at x=(0+560)/2=280, y=0.
+function testPublishBoardLayoutPositionsSingleRootTwoChildren() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(html.indexOf('left:280px;top:0px') !== -1, 'expected the root positioned at (280,0), got: ' + html);
+  assert.ok(html.indexOf('left:0px;top:400px') !== -1, 'expected the first child positioned at (0,400), got: ' + html);
+  assert.ok(html.indexOf('left:560px;top:400px') !== -1, 'expected the second child positioned at (560,400), got: ' + html);
+  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
+  assert.strictEqual(edgeCount, 2, 'expected 2 edges (r->c1, r->c2), got ' + edgeCount + ' in: ' + html);
+}
+
+function testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardChainPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(html.indexOf('left:0px;top:0px') !== -1, 'expected "g" at (0,0), got: ' + html);
+  assert.ok(html.indexOf('left:0px;top:400px') !== -1, 'expected "p" at (0,400), got: ' + html);
+  assert.ok(html.indexOf('left:0px;top:800px') !== -1, 'expected "c" at (0,800), got: ' + html);
+  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
+  assert.strictEqual(edgeCount, 2, 'expected 2 edges (g->p, p->c), got ' + edgeCount + ' in: ' + html);
+}
+
+function testPublishBoardLayoutPlacesMultipleRootsSideBySide() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardMultiRootPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(html.indexOf('left:0px;top:0px') !== -1, 'expected root "a" at (0,0), got: ' + html);
+  assert.ok(html.indexOf('left:560px;top:0px') !== -1, 'expected root "b" at (560,0), got: ' + html);
+  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
+  assert.strictEqual(edgeCount, 0, 'expected 0 edges (two unrelated roots), got ' + edgeCount + ' in: ' + html);
+}
+
+function testPublishBoardClientJsEmittedOnlyForBoardLayout() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+
+  var boardResult = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(boardResult.status, 'success', 'expected the shimmed board run to succeed, got: ' + boardResult.error);
+  var boardHtml = getHtml();
+  assert.ok(/viewport\.addEventListener\("wheel"/.test(boardHtml), 'expected the board wheel-zoom listener, got: ' + boardHtml);
+  assert.ok(/viewport\.addEventListener\("mousedown"/.test(boardHtml), 'expected the board pan listener, got: ' + boardHtml);
+
+  var linearResult = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(linearResult.status, 'success', 'expected the shimmed linear run to succeed, got: ' + linearResult.error);
+  var linearHtml = getHtml();
+  assert.ok(!/board-viewport/.test(linearHtml), 'expected no board markup on a layout:"linear" report, got: ' + linearHtml);
+  assert.ok(!/viewport\.addEventListener\("wheel"/.test(linearHtml), 'expected no board client JS on a layout:"linear" report, got: ' + linearHtml);
+}
+
+function testPublishBoardClientJsClampsZoomAndAppliesTransform() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/Math\.min\(2, Math\.max\(0\.25, zoom \+ delta\)\)/.test(html), 'expected zoom clamped to [0.25, 2], got: ' + html);
+  assert.ok(/canvas\.style\.transform = "translate\("/.test(html), 'expected the pan\/zoom transform application, got: ' + html);
 }
 
 // Shims BigQuery.Tables.get/Tabledata.list and DriveApp.getFolderById
@@ -1749,6 +1872,18 @@ module.exports = {
   testPublishChartBadStackingRejected: testPublishChartBadStackingRejected,
   testPublishV2ChartTypesProceedPastValidation: testPublishV2ChartTypesProceedPastValidation,
   testPublishLayoutTypeOtherThanLinearRejected: testPublishLayoutTypeOtherThanLinearRejected,
+  testPublishBoardRelatesToWithoutBoardLayoutRejected: testPublishBoardRelatesToWithoutBoardLayoutRejected,
+  testPublishBoardRelatesToUnknownIdRejected: testPublishBoardRelatesToUnknownIdRejected,
+  testPublishBoardRelatesToSelfRejected: testPublishBoardRelatesToSelfRejected,
+  testPublishBoardRelatesToCycleRejected: testPublishBoardRelatesToCycleRejected,
+  testPublishBoardDuplicateCrossTypeIdRejected: testPublishBoardDuplicateCrossTypeIdRejected,
+  testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo: testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo,
+  testPublishBoardValidRelationsProceedPastValidation: testPublishBoardValidRelationsProceedPastValidation,
+  testPublishBoardLayoutPositionsSingleRootTwoChildren: testPublishBoardLayoutPositionsSingleRootTwoChildren,
+  testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine: testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine,
+  testPublishBoardLayoutPlacesMultipleRootsSideBySide: testPublishBoardLayoutPlacesMultipleRootsSideBySide,
+  testPublishBoardClientJsEmittedOnlyForBoardLayout: testPublishBoardClientJsEmittedOnlyForBoardLayout,
+  testPublishBoardClientJsClampsZoomAndAppliesTransform: testPublishBoardClientJsClampsZoomAndAppliesTransform,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
   testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,
