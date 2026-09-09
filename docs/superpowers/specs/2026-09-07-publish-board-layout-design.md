@@ -146,13 +146,27 @@ existing design tokens have): `BOX_WIDTH`, `BOX_HEIGHT`, `H_GAP`,
 `V_GAP` — sized to comfortably fit a chart/table section at its
 existing rendered width.
 
-**Known ceiling:** this centers a parent over its children's span but
-doesn't do full contour-based collision avoidance, so a very lopsided
-tree (one deep chain next to a wide shallow one) can look uneven
-rather than compactly packed. Fine for the box counts a dashboard
-realistically has; an upgrade to a proper Reingold-Tilford walk is a
-self-contained swap of this one function if a real report ever needs
-it.
+**Known ceiling (resolved):** `computeBoardLayout` now does contour-based
+placement — a simplified Reingold-Tilford/Walker walk (`layoutSubtree`/
+`shiftPastSiblingContour`/`mergeContour` in `src/publish.js`), not the
+original naive version, which gave every *leaf* a slot from one global
+counter and could waste width on a lopsided tree (a sibling subtree got
+pushed right by its neighbor's total leaf count, even when that
+neighbor's leaves never actually coexisted at any single depth). Each
+sibling is now shifted right only as far as its real per-depth overlap
+with previously-placed siblings requires, and forest roots (blocks with
+no `relatesTo`) are placed through the same mechanism as any other
+sibling group, rather than a separate `nextSlot`-style special case.
+
+**New, smaller ceiling:** this is a greedy left-to-right contour merge,
+not the full Buchheim/Walker algorithm's O(n) apportionment pass — it
+never shifts an already-placed sibling back left to tighten the result
+once a later sibling turns out narrower than it, so a very bushy, uneven
+board can still end up somewhat wider than the true minimum-width
+packing (though never overlapping — that invariant holds unconditionally
+by construction). Board box counts are small in realistic dashboards, so
+exact-minimum packing isn't worth a second apportionment pass; upgrade
+if a real board ever has enough boxes for the slack to visibly matter.
 
 ## 5. Rendering (`renderReportHtml`)
 
@@ -177,6 +191,15 @@ When `config.layout.type === 'board'`:
   `0.25`–`2`. No canvas/graph library — CSS transforms and pointer
   events are native platform features, same posture the rest of this
   file already has toward dependencies.
+- Each `.board-node` also gets native CSS `resize: both` (it already has
+  `overflow: auto`, the one precondition `resize` needs) plus a
+  `min-width`/`min-height` floor — the browser draws its own resize grip
+  in the bottom-right corner, same affordance a `<textarea>` has, no JS.
+  Resizing one node can visually overlap a neighbor, since positions are
+  computed once for the fixed default box size and don't reflow on
+  resize — a deliberate scope limit, not a bug; a live constraint-based
+  re-layout on resize would be a much bigger feature than this manual
+  affordance.
 - The KPI strip and the filters dropdown bar render exactly as in
   `linear` mode, fixed above `.board-viewport` — filters, `reactsTo`
   recompute, `linkKey`/`seriesLinkKey` highlighting, and `detail`

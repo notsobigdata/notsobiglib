@@ -17,6 +17,12 @@ read, not a query — no query cost), so any join, filter, or pre-
 aggregation the dashboard needs must already be done by the `move`/
 `model` node it references.
 
+Every report also ships a built-in light/dark toggle (a small button in
+the top-right corner) — no config option, because there isn't one to
+document: it defaults to the viewer's OS color-scheme preference and
+remembers the last explicit choice via `localStorage`, the same fixed,
+non-configurable design every other visual detail of a report follows.
+
 ## Config
 
 ```javascript

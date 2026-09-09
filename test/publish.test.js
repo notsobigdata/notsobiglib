@@ -213,6 +213,24 @@ function testPublishBoardClientJsClampsZoomAndAppliesTransform() {
   assert.ok(/canvas\.style\.transform = "translate\("/.test(html), 'expected the pan\/zoom transform application, got: ' + html);
 }
 
+// Native CSS resize (the same browser-drawn grip a <textarea> has), not
+// custom JS - .board-node already has overflow:auto, the one
+// precondition `resize` needs. min-width/min-height keep a node from
+// being shrunk below readability. Resizing can overlap a neighbor since
+// positions are computed once for the fixed default size - deliberately
+// not auto-reflowed, see the CSS comment.
+function testPublishBoardNodesAreNativelyResizable() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var boardNodeRule = html.match(/\.board-node\s*\{[^}]*\}/);
+  assert.ok(boardNodeRule, 'expected a .board-node CSS rule, got: ' + html);
+  assert.ok(/resize:\s*both/.test(boardNodeRule[0]), 'expected resize: both on .board-node, got: ' + boardNodeRule[0]);
+  assert.ok(/min-width:/.test(boardNodeRule[0]) && /min-height:/.test(boardNodeRule[0]), 'expected a min-width/min-height floor on .board-node, got: ' + boardNodeRule[0]);
+}
+
 // Shims BigQuery.Tables.get/Tabledata.list and DriveApp.getFolderById
 // directly on the harness's vm sandbox (harness.loadContext returns the
 // actual global object for that vm context, so adding properties to it
@@ -285,12 +303,12 @@ function testPublishEscapesScriptCloseInEmbeddedPayload() {
   var html = getHtml();
   assert.ok(html, 'expected renderReportHtml\'s output to reach DriveApp.createFile');
 
-  // xssPublish has a chart, so Task 3 now also emits a second, legitimate
-  // <script src="..."> (the D3 CDN tag) alongside the inline payload
-  // script - two real closing tags is the correct baseline here, not a
+  // xssPublish has a chart, so this also emits the D3 CDN <script src="...">
+  // tag, plus (unconditional on every report) the theme-init <script> in
+  // <head> - three real closing tags is the correct baseline here, not a
   // regression; the XSS-relevant assertion is that it's not more than that.
   var scriptCloseCount = html.split('</script').length - 1;
-  assert.strictEqual(scriptCloseCount, 2, 'expected exactly two </script closing tags (the D3 CDN tag + the template\'s own inline script), found ' + scriptCloseCount + ' in: ' + html);
+  assert.strictEqual(scriptCloseCount, 3, 'expected exactly three </script closing tags (the theme-init script + the D3 CDN tag + the template\'s own inline script), found ' + scriptCloseCount + ' in: ' + html);
 }
 
 // Spec-mandated Layer-1 coverage for buildReportPayload's actual math
@@ -606,7 +624,12 @@ function testPublishChartRendersMountPointAndD3Script() {
   assert.ok(/<section class="chart" data-chart-id="by_category">/.test(html), 'expected a chart section with data-chart-id, got: ' + html);
   assert.ok(/<div class="chart-canvas" id="chart-by_category"><\/div>/.test(html), 'expected an empty chart-canvas mount point, got: ' + html);
   assert.ok(html.indexOf('https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js') !== -1, 'expected the pinned D3 CDN script tag, got: ' + html);
-  assert.ok(!/<svg/.test(html), 'expected no server-rendered <svg> now that charts draw client-side, got: ' + html);
+  // The theme toggle's two inline-SVG icons (sun/moon, see
+  // THEME_TOGGLE_HTML) are the one legitimate server-rendered <svg> on
+  // every report - strip those before asserting no *chart* svg was
+  // server-rendered.
+  var htmlWithoutToggleIcons = html.replace(/<svg class="theme-toggle-icon[\s\S]*?<\/svg>/g, '');
+  assert.ok(!/<svg/.test(htmlWithoutToggleIcons), 'expected no server-rendered <svg> outside the theme toggle icons now that charts draw client-side, got: ' + html);
 }
 
 function testPublishNoD3ScriptWithoutCharts() {
@@ -1490,13 +1513,16 @@ function testPublishSeriesChartHandlesSpacesWithoutCollision() {
     'expected New / Organic zero-filled to 0, got: ' + JSON.stringify(groupNew));
 }
 
-// Pulls the report's one inline <script>...</script> (the bare-tag one -
-// the D3 CDN tag always carries a "src" attribute, so this regex can't
-// match that one instead) back out so it can actually be executed, not
-// just regex-matched like every other filters[] test in this file.
+// Pulls the report's end-of-body inline <script>...</script> (the one
+// carrying the payload + every *_CLIENT_JS bundle) back out so it can
+// actually be executed, not just regex-matched like every other
+// filters[] test in this file. Anchored on "</main><script>...</script>"
+// specifically - every report also has a second, unrelated bare
+// <script> in <head> now (THEME_INIT_JS), and a plain greedy match would
+// span both, capturing the literal "</script><script>" text between them.
 function extractInlineScript(html) {
-  var match = html.match(/<script>([\s\S]*)<\/script>/);
-  assert.ok(match, 'expected a bare inline <script> in: ' + html);
+  var match = html.match(/<\/main><script>([\s\S]*)<\/script><\/body>/);
+  assert.ok(match, 'expected the end-of-body inline <script> in: ' + html);
   return match[1];
 }
 
@@ -1860,6 +1886,174 @@ function testPublishDetailToggleReflectsActiveFilterNotStaleSnapshot() {
   assert.deepStrictEqual(afterFilter.rows, [['o2', '$20.00']], 'expected only the channel=store row for group A after filtering - a stale snapshot would still show o1, got: ' + JSON.stringify(afterFilter));
 }
 
+// Design-system task: every report gets a built-in light/dark toggle,
+// unconditionally. Button id + both inline-SVG icon classes present.
+function testPublishThemeToggleButtonRendered() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/id="theme-toggle"/.test(html), 'expected the theme toggle button, got: ' + html);
+  assert.ok(/theme-toggle-icon-sun/.test(html), 'expected the sun icon class, got: ' + html);
+  assert.ok(/theme-toggle-icon-moon/.test(html), 'expected the moon icon class, got: ' + html);
+}
+
+// The dark palette is a second fixed token set (not per-report config):
+// a prefers-color-scheme media block plus a manual [data-theme="dark"]
+// override, both present unconditionally in every report's <style>.
+function testPublishDarkModeTokensPresent() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/prefers-color-scheme:\s*dark/.test(html), 'expected an OS-preference dark-mode media block, got: ' + html);
+  assert.ok(/data-theme="dark"/.test(html), 'expected a manual [data-theme="dark"] override selector, got: ' + html);
+  assert.ok(html.indexOf('#202124') !== -1, 'expected the dark-mode canvas color token, got: ' + html);
+}
+
+// FOUC avoidance: the theme-init script (reads localStorage, sets
+// documentElement.dataset.theme before first paint) must run in <head>,
+// strictly before <body> - a script that ran after <body> would paint
+// the wrong theme for one frame on every reload with a stored preference.
+function testPublishThemeInitScriptRunsInHeadBeforeBody() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var initIndex = html.indexOf('localStorage.getItem("publish-theme")');
+  var bodyIndex = html.indexOf('<body>');
+  assert.ok(initIndex !== -1, 'expected the theme-init script reading localStorage, got: ' + html);
+  assert.ok(bodyIndex !== -1, 'expected a <body> tag, got: ' + html);
+  assert.ok(initIndex < bodyIndex, 'expected the theme-init script to run before <body> (FOUC avoidance), got indices init=' + initIndex + ' body=' + bodyIndex);
+}
+
+// The click handler must persist an explicit choice so a later reload
+// doesn't require re-clicking - localStorage.setItem call present, once,
+// guarded (see testPublishThemeInitScriptRunsInHeadBeforeBody's comment
+// on why a try/catch matters for a file:// origin, checked separately by
+// running the actual script below rather than just string-matching here).
+function testPublishThemeToggleClickHandlerPersistsChoice() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/localStorage\.setItem\("publish-theme"/.test(html), 'expected the toggle click handler to persist the chosen theme, got: ' + html);
+  assert.ok(/document\.getElementById\("theme-toggle"\)/.test(html), 'expected the click handler to look up the toggle button by id, got: ' + html);
+}
+
+// Regression guard for the one hardcoded chart color CHART_CLIENT_JS had
+// (the line chart's stroke) - every other D3 fill already read a CSS
+// custom property (see testPublishChartClientJsUsesStyleForColorScaledFills),
+// so a literal hex here was the one series that wouldn't have re-themed.
+function testPublishLineChartUsesVarTealNotHardcodedHex() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'day', 'revenue'], [['A', '1', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select lineChartPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/\.style\("stroke", "var\(--teal\)"\)/.test(html), 'expected the line chart stroke to read var(--teal), got: ' + html);
+  assert.ok(html.indexOf('#3F6659') === -1, 'expected no remaining hardcoded line-chart color, got: ' + html);
+}
+
+// The toggle/dark-mode CSS lives in REPORT_CSS, unconditionally - unlike
+// TABLE_DETAIL_CSS/BOARD_CSS, which only exist because their markup
+// doesn't exist without that config, the toggle button and its CSS are
+// always emitted. validPublish has no charts/tables/board, only a KPI -
+// this locks in "unconditional" as a test, not just a design comment.
+function testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['revenue'], [['10']]);
+  var result = ctx.NotSoBigData.cli('run --select validPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/id="theme-toggle"/.test(html), 'expected the theme toggle even on a KPI-only report, got: ' + html);
+  assert.ok(/data-theme="dark"/.test(html), 'expected dark-mode tokens even on a KPI-only report, got: ' + html);
+}
+
+// Regression for a real dark-mode contrast bug: native <button>/<select>/
+// <input> elements don't inherit `color` from the page by default (the
+// UA stylesheet sets an explicit default, usually black, regardless of
+// the page's own dark palette) - so any control that only themed its
+// background (.table-pager button, .table-search and its placeholder)
+// or set none at all (.table-csv-export, which had no CSS rule
+// whatsoever) rendered unreadable black-on-dark text once dark mode was
+// on. Fixed with one blanket `button, select, input { color: inherit }`
+// reset, an explicit themed `::placeholder` color (placeholder text
+// isn't covered by a plain `color: inherit` on the input itself in
+// every browser), and giving .table-csv-export its own styled rule to
+// match the other secondary buttons instead of bare native chrome.
+function testPublishButtonsAndSelectsInheritThemedTextColor() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [['A', 'o1', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/button,\s*select,\s*input\s*\{[^}]*color:\s*inherit/.test(html), 'expected a blanket button/select/input color-inherit reset, got: ' + html);
+  assert.ok(/\.table-search::placeholder\s*\{[^}]*color:\s*var\(--ink-soft\)/.test(html), 'expected a themed .table-search placeholder color, got: ' + html);
+  assert.ok(/\.table-csv-export\s*\{[^}]*background:\s*var\(--paper\)/.test(html), 'expected .table-csv-export to have its own themed background (not bare native chrome), got: ' + html);
+}
+
+// computeBoardLayout task: the naive placement gave every leaf a slot
+// from one global counter, so a subtree that fans out wide at a *deeper*
+// level than its sibling's own immediate children still pushed that
+// sibling as far right as the fanned-out subtree's total leaf count,
+// even though at no single depth do all those leaves actually compete
+// for space. The contour-based rewrite clears each sibling only as far
+// as the real per-depth overlap requires.
+//
+// Fixture "boardLopsidedPublish": root r -> {bushy, narrow} (bushy first).
+// bushy -> {b1 (leaf), b2 (-> b2x, b2y, both leaves)}. narrow is a lone
+// leaf. Hand-traced against the contour algorithm (BOARD_BOX_WIDTH=520,
+// BOARD_H_GAP=40, BOARD_BOX_HEIGHT=340, BOARD_V_GAP=60):
+//   r=(560,0) bushy=(280,400) narrow=(840,400)
+//   b1=(0,800) b2=(560,800) b2x=(280,1200) b2y=(840,1200)
+// The old leaf-slot algorithm would have placed narrow at x=1680 (one
+// slot past all 3 of bushy's leaves, counted globally) instead of x=840
+// (one slot past bushy's own worst-case per-depth width, which is 2, not
+// 3, since b1 and b2 share a depth but b1 doesn't coexist with b2x/b2y) -
+// asserting narrow's exact x is the concrete proof the rewrite is doing
+// real contour clearance, not just a relabeled leaf count.
+function testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardLopsidedPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var expected = {
+    r: [560, 0], bushy: [280, 400], narrow: [840, 400],
+    b1: [0, 800], b2: [560, 800], b2x: [280, 1200], b2y: [840, 1200]
+  };
+  Object.keys(expected).forEach(function (id) {
+    var xy = expected[id];
+    var needle = 'left:' + xy[0] + 'px;top:' + xy[1] + 'px';
+    assert.ok(html.indexOf(needle) !== -1, 'expected "' + id + '" at (' + xy[0] + ',' + xy[1] + '), got: ' + html);
+  });
+  assert.ok(html.indexOf('left:1680px;top:400px') === -1, 'expected narrow NOT to land at the old leaf-slot-counted x=1680, got: ' + html);
+
+  // General safety net, independent of the hand-traced numbers above: no
+  // two rendered board-node rectangles may overlap, for any tree shape.
+  var boxes = [];
+  var re = /left:(-?\d+)px;top:(-?\d+)px;width:(\d+)px;height:(\d+)px/g;
+  var m;
+  while ((m = re.exec(html))) {
+    boxes.push({ x: +m[1], y: +m[2], w: +m[3], h: +m[4] });
+  }
+  assert.strictEqual(boxes.length, 7, 'expected 7 positioned board nodes, got ' + boxes.length + ' in: ' + html);
+  for (var i = 0; i < boxes.length; i++) {
+    for (var j = i + 1; j < boxes.length; j++) {
+      var a = boxes[i], b = boxes[j];
+      var overlapX = a.x < b.x + b.w && b.x < a.x + a.w;
+      var overlapY = a.y < b.y + b.h && b.y < a.y + a.h;
+      assert.ok(!(overlapX && overlapY), 'expected no overlap between board nodes ' + JSON.stringify(a) + ' and ' + JSON.stringify(b));
+    }
+  }
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -1884,6 +2078,7 @@ module.exports = {
   testPublishBoardLayoutPlacesMultipleRootsSideBySide: testPublishBoardLayoutPlacesMultipleRootsSideBySide,
   testPublishBoardClientJsEmittedOnlyForBoardLayout: testPublishBoardClientJsEmittedOnlyForBoardLayout,
   testPublishBoardClientJsClampsZoomAndAppliesTransform: testPublishBoardClientJsClampsZoomAndAppliesTransform,
+  testPublishBoardNodesAreNativelyResizable: testPublishBoardNodesAreNativelyResizable,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
   testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,
@@ -1976,5 +2171,13 @@ module.exports = {
   testPublishNoTableDetailToggleWithoutDetailConfigured: testPublishNoTableDetailToggleWithoutDetailConfigured,
   testPublishTableClientJsOpensDetailModalOnToggleClick: testPublishTableClientJsOpensDetailModalOnToggleClick,
   testPublishTableClientJsSortsCurrencyColumnNumerically: testPublishTableClientJsSortsCurrencyColumnNumerically,
-  testPublishTableClientJsSearchNarrowsRowsAndCsvExport: testPublishTableClientJsSearchNarrowsRowsAndCsvExport
+  testPublishTableClientJsSearchNarrowsRowsAndCsvExport: testPublishTableClientJsSearchNarrowsRowsAndCsvExport,
+  testPublishThemeToggleButtonRendered: testPublishThemeToggleButtonRendered,
+  testPublishDarkModeTokensPresent: testPublishDarkModeTokensPresent,
+  testPublishThemeInitScriptRunsInHeadBeforeBody: testPublishThemeInitScriptRunsInHeadBeforeBody,
+  testPublishThemeToggleClickHandlerPersistsChoice: testPublishThemeToggleClickHandlerPersistsChoice,
+  testPublishLineChartUsesVarTealNotHardcodedHex: testPublishLineChartUsesVarTealNotHardcodedHex,
+  testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard: testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard,
+  testPublishButtonsAndSelectsInheritThemedTextColor: testPublishButtonsAndSelectsInheritThemedTextColor,
+  testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth: testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth
 };
