@@ -85,10 +85,11 @@ existing markup, unpositioned":
   `mergeContour` are deleted from `src/publish.js` entirely — nothing
   server-side computes tree positions anymore.
 - `BOARD_BOX_WIDTH`/`BOARD_BOX_HEIGHT`/`BOARD_H_GAP`/`BOARD_V_GAP`
-  (`src/publish.js:751-754`) are **kept**, but repurposed: `REPORT_CSS`
-  gets `.board-node { width: <BOARD_BOX_WIDTH>px; height:
-  <BOARD_BOX_HEIGHT>px; }` (interpolated the same way other computed
-  values already join `REPORT_CSS`'s string array), replacing today's
+  (`src/publish.js:751-754`) are **kept**, but repurposed: `BOARD_CSS`'s
+  existing `.board-node { ... }` rule (`src/publish.js:951`) gets
+  `width: <BOARD_BOX_WIDTH>px; height: <BOARD_BOX_HEIGHT>px;` appended
+  (interpolated the same way other computed values already join
+  `BOARD_CSS`'s string array), replacing today's
   per-node inline `width`/`height`. The same four numbers are also
   serialized into the new client script (next section) as the spacing
   `d3.tree().nodeSize()` needs — one source of truth in the server-side
