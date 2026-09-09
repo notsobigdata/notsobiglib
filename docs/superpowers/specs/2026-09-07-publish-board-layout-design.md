@@ -191,6 +191,15 @@ When `config.layout.type === 'board'`:
   `0.25`–`2`. No canvas/graph library — CSS transforms and pointer
   events are native platform features, same posture the rest of this
   file already has toward dependencies.
+- Each `.board-node` also gets native CSS `resize: both` (it already has
+  `overflow: auto`, the one precondition `resize` needs) plus a
+  `min-width`/`min-height` floor — the browser draws its own resize grip
+  in the bottom-right corner, same affordance a `<textarea>` has, no JS.
+  Resizing one node can visually overlap a neighbor, since positions are
+  computed once for the fixed default box size and don't reflow on
+  resize — a deliberate scope limit, not a bug; a live constraint-based
+  re-layout on resize would be a much bigger feature than this manual
+  affordance.
 - The KPI strip and the filters dropdown bar render exactly as in
   `linear` mode, fixed above `.board-viewport` — filters, `reactsTo`
   recompute, `linkKey`/`seriesLinkKey` highlighting, and `detail`

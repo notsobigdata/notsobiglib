@@ -213,6 +213,24 @@ function testPublishBoardClientJsClampsZoomAndAppliesTransform() {
   assert.ok(/canvas\.style\.transform = "translate\("/.test(html), 'expected the pan\/zoom transform application, got: ' + html);
 }
 
+// Native CSS resize (the same browser-drawn grip a <textarea> has), not
+// custom JS - .board-node already has overflow:auto, the one
+// precondition `resize` needs. min-width/min-height keep a node from
+// being shrunk below readability. Resizing can overlap a neighbor since
+// positions are computed once for the fixed default size - deliberately
+// not auto-reflowed, see the CSS comment.
+function testPublishBoardNodesAreNativelyResizable() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var boardNodeRule = html.match(/\.board-node\s*\{[^}]*\}/);
+  assert.ok(boardNodeRule, 'expected a .board-node CSS rule, got: ' + html);
+  assert.ok(/resize:\s*both/.test(boardNodeRule[0]), 'expected resize: both on .board-node, got: ' + boardNodeRule[0]);
+  assert.ok(/min-width:/.test(boardNodeRule[0]) && /min-height:/.test(boardNodeRule[0]), 'expected a min-width/min-height floor on .board-node, got: ' + boardNodeRule[0]);
+}
+
 // Shims BigQuery.Tables.get/Tabledata.list and DriveApp.getFolderById
 // directly on the harness's vm sandbox (harness.loadContext returns the
 // actual global object for that vm context, so adding properties to it
@@ -2057,6 +2075,7 @@ module.exports = {
   testPublishBoardLayoutPlacesMultipleRootsSideBySide: testPublishBoardLayoutPlacesMultipleRootsSideBySide,
   testPublishBoardClientJsEmittedOnlyForBoardLayout: testPublishBoardClientJsEmittedOnlyForBoardLayout,
   testPublishBoardClientJsClampsZoomAndAppliesTransform: testPublishBoardClientJsClampsZoomAndAppliesTransform,
+  testPublishBoardNodesAreNativelyResizable: testPublishBoardNodesAreNativelyResizable,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
   testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,

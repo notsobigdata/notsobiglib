@@ -947,7 +947,7 @@ var BOARD_CSS = [
   '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); border-radius: var(--radius); cursor: grab; }',
   '.board-viewport.board-panning { cursor: grabbing; }',
   '.board-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }',
-  '.board-node { position: absolute; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 12px; box-sizing: border-box; overflow: auto; }',
+  '.board-node { position: absolute; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 12px; box-sizing: border-box; overflow: auto; resize: both; min-width: 160px; min-height: 100px; }',
   '.board-node .chart, .board-node .table-block { border: none; box-shadow: none; margin-top: 0; padding: 0; }',
   '.board-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }',
   '.board-edge { fill: none; stroke: var(--paper-line); stroke-width: 2; }'
