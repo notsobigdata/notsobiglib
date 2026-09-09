@@ -4758,53 +4758,119 @@ var NotSoBigData = (function () {
   var BOARD_H_GAP = 40;
   var BOARD_V_GAP = 60;
 
-  // Simple tidy-tree layout for layout:'board' - see the design spec's §4
-  // "Known ceiling" for why this isn't a full Reingold-Tilford walk: each
-  // parent centers over its children's span, but there's no contour-based
-  // collision avoidance for a lopsided tree. blocks with no relatesTo are
-  // roots; a shared `nextSlot` leaf counter across every root's DFS walk
-  // is what makes multiple roots land side by side automatically, with no
-  // separate "offset past the previous tree's width" step needed.
-  // Trusts validateBoardRelations already ran (acyclic, every id/relatesTo
-  // resolves) - does no error-checking of its own.
+  // Contour-based tidy-tree layout for layout:'board' (a simplified
+  // Reingold-Tilford/Walker walk, not the full Buchheim O(n) apportionment
+  // pass - see the ponytail note on shiftPastSiblingContour below for why
+  // that's the right stopping point). blocks with no relatesTo are roots,
+  // treated as siblings of an implicit super-root so multiple trees land
+  // side by side through the exact same clearance mechanism as any other
+  // sibling group - no separate "offset past the previous tree" special
+  // case. Trusts validateBoardRelations already ran (acyclic, every
+  // id/relatesTo resolves) - does no error-checking of its own.
+  //
+  // layoutSubtree(id) returns the subtree rooted at `id` laid out in its
+  // own *local* coordinates (its own root at relative x=0): `positions`
+  // (id/x/depth-from-this-root, depth 0 = the root itself), and
+  // `leftContour`/`rightContour` (index d = the min/max x reached by any
+  // node at depth d within this subtree, in these same local coordinates).
+  // A subtree with no children is the base case: itself, alone, at x=0.
+  function layoutSubtree(id, children) {
+    var kids = children[id] || [];
+    if (!kids.length) {
+      return { x: 0, positions: [{ id: id, x: 0, depth: 0 }], leftContour: [0], rightContour: [BOARD_BOX_WIDTH] };
+    }
+
+    var combinedLeft = [];
+    var combinedRight = [];
+    var offsets = kids.map(function (childId, i) {
+      var child = layoutSubtree(childId, children);
+      var offset = i === 0 ? 0 : shiftPastSiblingContour(child, combinedLeft, combinedRight);
+      mergeContour(combinedLeft, combinedRight, child, offset);
+      return { child: child, offset: offset };
+    });
+
+    var positions = [];
+    var childXs = [];
+    offsets.forEach(function (o) {
+      o.child.positions.forEach(function (p) {
+        positions.push({ id: p.id, x: p.x + o.offset, depth: p.depth + 1 });
+      });
+      childXs.push(o.child.x + o.offset);
+    });
+    var myX = (Math.min.apply(null, childXs) + Math.max.apply(null, childXs)) / 2;
+    positions.push({ id: id, x: myX, depth: 0 });
+
+    return {
+      x: myX,
+      positions: positions,
+      leftContour: [myX].concat(combinedLeft),
+      rightContour: [myX + BOARD_BOX_WIDTH].concat(combinedRight)
+    };
+  }
+
+  // Minimum rightward shift so `child`'s own left contour clears
+  // `siblingLeft`/`siblingRight` (the contour merged from every sibling
+  // already placed) by at least BOARD_H_GAP at every depth both reach -
+  // this is the actual fix over the old nextSlot counter: clearance is
+  // checked against siblings' real per-depth shape, not a fixed leaf-slot
+  // width, so a subtree that's narrow at a shallow depth but wide deeper
+  // down only pushes its neighbor as far as its worst *single* depth
+  // requires, not its total leaf count.
+  //
+  // ponytail: this is a greedy left-to-right contour merge, not a full
+  // Buchheim/Walker apportionment pass - it never shifts an *earlier*
+  // sibling back left to tighten the result once a later one turns out
+  // narrower than it. That means a very bushy, uneven board can end up
+  // slightly wider than the true minimum. The design spec already notes
+  // board box counts are small in realistic dashboards, so exact-minimum
+  // packing isn't worth the extra pass; upgrade to full apportionment if a
+  // real board ever has enough boxes for the slack to visibly matter.
+  function shiftPastSiblingContour(child, siblingLeft, siblingRight) {
+    var shift = 0;
+    for (var d = 0; d < child.leftContour.length && d < siblingRight.length; d++) {
+      var need = siblingRight[d] + BOARD_H_GAP - child.leftContour[d];
+      if (need > shift) { shift = need; }
+    }
+    return shift;
+  }
+
+  // Folds `child`'s contour (shifted by `offset`) into the running
+  // `combinedLeft`/`combinedRight` arrays, in place.
+  function mergeContour(combinedLeft, combinedRight, child, offset) {
+    for (var d = 0; d < child.leftContour.length; d++) {
+      var l = child.leftContour[d] + offset;
+      var r = child.rightContour[d] + offset;
+      combinedLeft[d] = (combinedLeft[d] === undefined) ? l : Math.min(combinedLeft[d], l);
+      combinedRight[d] = (combinedRight[d] === undefined) ? r : Math.max(combinedRight[d], r);
+    }
+  }
+
   function computeBoardLayout(charts, tables) {
     var blocks = (charts || []).concat(tables || []);
     var children = emptyMap();
     var roots = [];
+    var edges = [];
     blocks.forEach(function (block) {
       if (block.relatesTo) {
         children[block.relatesTo] = children[block.relatesTo] || [];
         children[block.relatesTo].push(block.id);
+        edges.push({ from: block.relatesTo, to: block.id });
       } else {
         roots.push(block.id);
       }
     });
 
     var positions = [];
-    var edges = [];
-    var positionById = emptyMap();
-    var nextSlot = 0;
-
-    function place(id, depth) {
-      var kids = children[id] || [];
-      var y = depth * (BOARD_BOX_HEIGHT + BOARD_V_GAP);
-      var x;
-      if (!kids.length) {
-        x = nextSlot * (BOARD_BOX_WIDTH + BOARD_H_GAP);
-        nextSlot += 1;
-      } else {
-        kids.forEach(function (childId) {
-          edges.push({ from: id, to: childId });
-          place(childId, depth + 1);
-        });
-        var childXs = kids.map(function (childId) { return positionById[childId]; });
-        x = (Math.min.apply(null, childXs) + Math.max.apply(null, childXs)) / 2;
-      }
-      positionById[id] = x;
-      positions.push({ id: id, x: x, y: y });
-    }
-
-    roots.forEach(function (rootId) { place(rootId, 0); });
+    var combinedLeft = [];
+    var combinedRight = [];
+    roots.forEach(function (rootId, i) {
+      var root = layoutSubtree(rootId, children);
+      var offset = i === 0 ? 0 : shiftPastSiblingContour(root, combinedLeft, combinedRight);
+      root.positions.forEach(function (p) {
+        positions.push({ id: p.id, x: p.x + offset, y: p.depth * (BOARD_BOX_HEIGHT + BOARD_V_GAP) });
+      });
+      mergeContour(combinedLeft, combinedRight, root, offset);
+    });
 
     return { positions: positions, edges: edges };
   }

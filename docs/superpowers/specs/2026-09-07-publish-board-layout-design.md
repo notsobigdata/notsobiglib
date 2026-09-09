@@ -146,13 +146,27 @@ existing design tokens have): `BOX_WIDTH`, `BOX_HEIGHT`, `H_GAP`,
 `V_GAP` — sized to comfortably fit a chart/table section at its
 existing rendered width.
 
-**Known ceiling:** this centers a parent over its children's span but
-doesn't do full contour-based collision avoidance, so a very lopsided
-tree (one deep chain next to a wide shallow one) can look uneven
-rather than compactly packed. Fine for the box counts a dashboard
-realistically has; an upgrade to a proper Reingold-Tilford walk is a
-self-contained swap of this one function if a real report ever needs
-it.
+**Known ceiling (resolved):** `computeBoardLayout` now does contour-based
+placement — a simplified Reingold-Tilford/Walker walk (`layoutSubtree`/
+`shiftPastSiblingContour`/`mergeContour` in `src/publish.js`), not the
+original naive version, which gave every *leaf* a slot from one global
+counter and could waste width on a lopsided tree (a sibling subtree got
+pushed right by its neighbor's total leaf count, even when that
+neighbor's leaves never actually coexisted at any single depth). Each
+sibling is now shifted right only as far as its real per-depth overlap
+with previously-placed siblings requires, and forest roots (blocks with
+no `relatesTo`) are placed through the same mechanism as any other
+sibling group, rather than a separate `nextSlot`-style special case.
+
+**New, smaller ceiling:** this is a greedy left-to-right contour merge,
+not the full Buchheim/Walker algorithm's O(n) apportionment pass — it
+never shifts an already-placed sibling back left to tighten the result
+once a later sibling turns out narrower than it, so a very bushy, uneven
+board can still end up somewhat wider than the true minimum-width
+packing (though never overlapping — that invariant holds unconditionally
+by construction). Board box counts are small in realistic dashboards, so
+exact-minimum packing isn't worth a second apportionment pass; upgrade
+if a real board ever has enough boxes for the slack to visibly matter.
 
 ## 5. Rendering (`renderReportHtml`)
 

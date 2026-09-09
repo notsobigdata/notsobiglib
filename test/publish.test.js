@@ -1956,6 +1956,63 @@ function testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard() {
   assert.ok(/data-theme="dark"/.test(html), 'expected dark-mode tokens even on a KPI-only report, got: ' + html);
 }
 
+// computeBoardLayout task: the naive placement gave every leaf a slot
+// from one global counter, so a subtree that fans out wide at a *deeper*
+// level than its sibling's own immediate children still pushed that
+// sibling as far right as the fanned-out subtree's total leaf count,
+// even though at no single depth do all those leaves actually compete
+// for space. The contour-based rewrite clears each sibling only as far
+// as the real per-depth overlap requires.
+//
+// Fixture "boardLopsidedPublish": root r -> {bushy, narrow} (bushy first).
+// bushy -> {b1 (leaf), b2 (-> b2x, b2y, both leaves)}. narrow is a lone
+// leaf. Hand-traced against the contour algorithm (BOARD_BOX_WIDTH=520,
+// BOARD_H_GAP=40, BOARD_BOX_HEIGHT=340, BOARD_V_GAP=60):
+//   r=(560,0) bushy=(280,400) narrow=(840,400)
+//   b1=(0,800) b2=(560,800) b2x=(280,1200) b2y=(840,1200)
+// The old leaf-slot algorithm would have placed narrow at x=1680 (one
+// slot past all 3 of bushy's leaves, counted globally) instead of x=840
+// (one slot past bushy's own worst-case per-depth width, which is 2, not
+// 3, since b1 and b2 share a depth but b1 doesn't coexist with b2x/b2y) -
+// asserting narrow's exact x is the concrete proof the rewrite is doing
+// real contour clearance, not just a relabeled leaf count.
+function testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardLopsidedPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  var expected = {
+    r: [560, 0], bushy: [280, 400], narrow: [840, 400],
+    b1: [0, 800], b2: [560, 800], b2x: [280, 1200], b2y: [840, 1200]
+  };
+  Object.keys(expected).forEach(function (id) {
+    var xy = expected[id];
+    var needle = 'left:' + xy[0] + 'px;top:' + xy[1] + 'px';
+    assert.ok(html.indexOf(needle) !== -1, 'expected "' + id + '" at (' + xy[0] + ',' + xy[1] + '), got: ' + html);
+  });
+  assert.ok(html.indexOf('left:1680px;top:400px') === -1, 'expected narrow NOT to land at the old leaf-slot-counted x=1680, got: ' + html);
+
+  // General safety net, independent of the hand-traced numbers above: no
+  // two rendered board-node rectangles may overlap, for any tree shape.
+  var boxes = [];
+  var re = /left:(-?\d+)px;top:(-?\d+)px;width:(\d+)px;height:(\d+)px/g;
+  var m;
+  while ((m = re.exec(html))) {
+    boxes.push({ x: +m[1], y: +m[2], w: +m[3], h: +m[4] });
+  }
+  assert.strictEqual(boxes.length, 7, 'expected 7 positioned board nodes, got ' + boxes.length + ' in: ' + html);
+  for (var i = 0; i < boxes.length; i++) {
+    for (var j = i + 1; j < boxes.length; j++) {
+      var a = boxes[i], b = boxes[j];
+      var overlapX = a.x < b.x + b.w && b.x < a.x + a.w;
+      var overlapY = a.y < b.y + b.h && b.y < a.y + a.h;
+      assert.ok(!(overlapX && overlapY), 'expected no overlap between board nodes ' + JSON.stringify(a) + ' and ' + JSON.stringify(b));
+    }
+  }
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -2078,5 +2135,6 @@ module.exports = {
   testPublishThemeInitScriptRunsInHeadBeforeBody: testPublishThemeInitScriptRunsInHeadBeforeBody,
   testPublishThemeToggleClickHandlerPersistsChoice: testPublishThemeToggleClickHandlerPersistsChoice,
   testPublishLineChartUsesVarTealNotHardcodedHex: testPublishLineChartUsesVarTealNotHardcodedHex,
-  testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard: testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard
+  testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard: testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard,
+  testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth: testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth
 };
