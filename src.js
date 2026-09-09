@@ -4812,42 +4812,65 @@ var NotSoBigData = (function () {
   // Fixed design tokens - see the design spec's "Design tokens" section.
   // No per-report customization in v1: every published dashboard looks the
   // same on purpose, the same way every model's compiled SQL follows one
-  // convention rather than a per-model style knob.
+  // convention rather than a per-model style knob. This now means exactly
+  // two fixed token sets (light default + dark), switched by the
+  // report-agnostic toggle in THEME_TOGGLE_HTML/THEME_INIT_JS/
+  // THEME_TOGGLE_JS below - still nothing a report author can configure.
+  // Colors follow Google's own Material palette (Workspace/Cloud Console
+  // grays, the rgba(60,64,67,...) elevation-shadow tint, Google's actual
+  // light/dark accent blues and reds) rather than an invented brand.
+  var DARK_TOKENS_CSS = '--paper: #202124; --surface: #292A2D; --paper-line: #3C4043; --ink: #E8EAED; --ink-soft: #9AA0A6; --teal: #8AB4F8; --teal-soft: #29344A; --coral: #F28B82; --shadow-sm: 0 1px 2px 0 rgba(0,0,0,.45), 0 2px 6px 2px rgba(0,0,0,.3); --shadow: 0 1px 3px 0 rgba(0,0,0,.5), 0 4px 8px 3px rgba(0,0,0,.35);';
   var REPORT_CSS = [
     ':root {',
-    '  --paper: #FAF8F3; --paper-line: #E4E0D4; --ink: #1F2421; --ink-soft: #6B6A61;',
-    '  --teal: #3F6659; --teal-soft: #DCE6E1; --coral: #B65A3C;',
+    '  --paper: #F8F9FA; --surface: #FFFFFF; --paper-line: #DADCE0; --ink: #202124; --ink-soft: #5F6368;',
+    '  --teal: #1A73E8; --teal-soft: #E8F0FE; --coral: #EA4335;',
+    '  --shadow-sm: 0 1px 2px 0 rgba(60,64,67,.30), 0 2px 6px 2px rgba(60,64,67,.15);',
+    '  --shadow: 0 1px 3px 0 rgba(60,64,67,.30), 0 4px 8px 3px rgba(60,64,67,.15);',
+    '  --radius: 8px; --radius-sm: 4px;',
     '  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;',
-    '  --sans: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
+    '  --sans: Roboto, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;',
     '}',
+    '@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { ' + DARK_TOKENS_CSS + ' } }',
+    ':root[data-theme="dark"] { ' + DARK_TOKENS_CSS + ' }',
     'body { background: var(--paper); color: var(--ink); font-family: var(--sans); margin: 0; padding: 24px; }',
     '.kpis { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }',
-    '.kpi { border: 1px solid var(--paper-line); padding: 12px 16px; }',
+    '.kpi { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 12px 16px; transition: box-shadow .15s ease, transform .15s ease; }',
+    '.kpi:hover { box-shadow: var(--shadow); transform: translateY(-1px); }',
     '.kpi-label { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.05em; font-size: 11px; color: var(--ink-soft); }',
     '.kpi-value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 24px; }',
-    '.chart { border-top: 1px solid var(--paper-line); padding-top: 16px; margin-top: 16px; }',
-    '.chart h2 { font-size: 14px; }',
+    '.chart { background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 20px; margin-top: 16px; }',
+    '.chart h2 { font-size: 14px; margin-top: 0; }',
     '.chart-label, .chart-value { font-family: var(--mono); font-size: 12px; fill: var(--ink); }',
     '.chart-bar { fill: var(--teal); }',
-    '.table-block { border-top: 1px solid var(--paper-line); padding-top: 16px; margin-top: 16px; }',
-    '.table-block h2 { font-size: 14px; }',
+    '.table-block { background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 20px; margin-top: 16px; }',
+    '.table-block h2 { font-size: 14px; margin-top: 0; }',
     '.table-block table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }',
     '.table-block th, .table-block td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); font-variant-numeric: tabular-nums; }',
     '.table-block th.table-sortable { cursor: pointer; user-select: none; }',
-    '.table-search { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 6px; margin-bottom: 8px; display: block; }',
+    '.table-block tbody tr:hover { background: var(--teal-soft); }',
+    '.table-search { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); border-radius: var(--radius-sm); padding: 2px 6px; margin-bottom: 8px; display: block; transition: border-color .15s ease; }',
+    '.table-search:hover, .table-search:focus-visible { border-color: var(--teal); }',
     '.table-pager { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-family: var(--mono); font-size: 12px; }',
-    '.table-pager button { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 8px; cursor: pointer; }',
+    '.table-pager button { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); border-radius: var(--radius-sm); padding: 2px 8px; cursor: pointer; transition: border-color .15s ease; }',
+    '.table-pager button:hover:not(:disabled) { border-color: var(--teal); }',
     '.table-pager button:disabled { color: var(--ink-soft); cursor: default; }',
     '.filters { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }',
     '.filter { font-family: var(--mono); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }',
-    '.filter select { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); padding: 2px 6px; }',
-    '.detail-modal-backdrop { position: fixed; inset: 0; background: rgba(31, 36, 33, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }',
-    '.detail-modal { background: var(--paper); border: 1px solid var(--paper-line); padding: 16px; max-width: 90vw; max-height: 80vh; overflow: auto; }',
+    '.filter select { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); border-radius: var(--radius-sm); padding: 2px 6px; transition: border-color .15s ease; }',
+    '.filter select:hover, .filter select:focus-visible { border-color: var(--teal); }',
+    '.detail-modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 1000; }',
+    '.detail-modal { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; max-width: 90vw; max-height: 80vh; overflow: auto; }',
     '.detail-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }',
     '.detail-modal-header h3 { margin: 0; font-size: 14px; }',
     '.detail-modal-close { font-family: var(--mono); font-size: 16px; background: none; border: none; cursor: pointer; }',
     '.detail-modal table { border-collapse: collapse; font-family: var(--mono); font-size: 12px; }',
-    '.detail-modal th, .detail-modal td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); }'
+    '.detail-modal th, .detail-modal td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); }',
+    '.theme-toggle { position: fixed; top: 12px; right: 12px; z-index: 1100; width: 32px; height: 32px; border-radius: 999px; border: 1px solid var(--paper-line); background: var(--surface); color: var(--ink-soft); display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: var(--shadow-sm); transition: background-color .15s ease, border-color .15s ease, color .15s ease; }',
+    '.theme-toggle:hover { color: var(--teal); border-color: var(--teal); }',
+    '.theme-toggle-icon-moon { display: none; }',
+    '@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .theme-toggle-icon-sun { display: none; } :root:not([data-theme="light"]) .theme-toggle-icon-moon { display: block; } }',
+    ':root[data-theme="dark"] .theme-toggle-icon-sun { display: none; }',
+    ':root[data-theme="dark"] .theme-toggle-icon-moon { display: block; }'
   ].join('\n');
 
   // CSS for table detail toggle button, only emitted when detail is configured
@@ -4857,11 +4880,11 @@ var NotSoBigData = (function () {
   // CSS for layout:'board', only emitted when config.layout.type is
   // 'board' (see renderReportHtml's isBoardLayout branch below).
   var BOARD_CSS = [
-    '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); cursor: grab; }',
+    '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); border-radius: var(--radius); cursor: grab; }',
     '.board-viewport.board-panning { cursor: grabbing; }',
     '.board-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }',
-    '.board-node { position: absolute; background: var(--paper); border: 1px solid var(--paper-line); padding: 12px; box-sizing: border-box; overflow: auto; }',
-    '.board-node .chart, .board-node .table-block { border-top: none; margin-top: 0; padding-top: 0; }',
+    '.board-node { position: absolute; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 12px; box-sizing: border-box; overflow: auto; }',
+    '.board-node .chart, .board-node .table-block { border: none; box-shadow: none; margin-top: 0; padding: 0; }',
     '.board-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }',
     '.board-edge { fill: none; stroke: var(--paper-line); stroke-width: 2; }'
   ].join('\n');
@@ -5387,7 +5410,7 @@ var NotSoBigData = (function () {
     '  var maxTotal = d3.max(chart.data, function (d) { return d.total; }) || 1;',
     '  var y = d3.scaleLinear().domain([0, maxTotal]).range([height - margin.bottom, margin.top]);',
     '  var line = d3.line().x(function (d) { return x(d.groupValue); }).y(function (d) { return y(d.total); });',
-    '  svg.append("path").datum(chart.data).attr("class", "chart-bar").style("fill", "none").attr("stroke", "#3F6659").attr("stroke-width", 2).attr("d", line);',
+    '  svg.append("path").datum(chart.data).attr("class", "chart-bar").style("fill", "none").style("stroke", "var(--teal)").attr("stroke-width", 2).attr("d", line);',
     '  var points = svg.append("g").selectAll("circle").data(chart.data).join("circle")',
     '    .attr("class", "chart-bar").attr("cx", function (d) { return x(d.groupValue); }).attr("cy", function (d) { return y(d.total); }).attr("r", 3);',
     '  if (chart.linkKey || chart.linkTo || chart.detail) {',
@@ -5473,6 +5496,52 @@ var NotSoBigData = (function () {
     '});'
   ].join('\n');
 
+  // Runs in <head>, before <body> - must resolve any stored explicit
+  // choice ahead of first paint, or a reload with a stored preference
+  // flashes the wrong theme for one frame. If nothing is stored, the
+  // @media(prefers-color-scheme) rules in REPORT_CSS already resolve the
+  // OS-default case with zero JS, so doing nothing here is correct.
+  var THEME_INIT_JS = [
+    '(function () {',
+    '  try {',
+    '    var stored = localStorage.getItem("publish-theme");',
+    '    if (stored === "light" || stored === "dark") { document.documentElement.dataset.theme = stored; }',
+    '  } catch (e) {}',
+    '})();'
+  ].join('\n');
+
+  // Joins the normal end-of-body script bundle like every other *_CLIENT_JS
+  // constant. localStorage calls are wrapped in try/catch since a file://
+  // origin (this report's normal delivery method - see publish.md) can
+  // throw or behave inconsistently across browsers.
+  var THEME_TOGGLE_JS = [
+    'document.addEventListener("DOMContentLoaded", function () {',
+    '  var toggle = document.getElementById("theme-toggle");',
+    '  if (!toggle) { return; }',
+    '  function currentTheme() {',
+    '    var explicit = document.documentElement.dataset.theme;',
+    '    if (explicit === "light" || explicit === "dark") { return explicit; }',
+    '    return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";',
+    '  }',
+    '  toggle.addEventListener("click", function () {',
+    '    var next = currentTheme() === "dark" ? "light" : "dark";',
+    '    document.documentElement.dataset.theme = next;',
+    '    try { localStorage.setItem("publish-theme", next); } catch (e) {}',
+    '  });',
+    '});'
+  ].join('\n');
+
+  // Discreet fixed corner control, unconditional on every report (see
+  // REPORT_CSS's .theme-toggle* rules). Inline SVG sun/moon icons - no
+  // icon font, no CDN; stroke="currentColor" follows .theme-toggle's own
+  // color so hover/theme changes recolor them for free. Which icon shows
+  // is driven purely by the same CSS selectors gating the color tokens, no
+  // JS bookkeeping needed to keep the icon in sync with the active theme.
+  var THEME_TOGGLE_HTML = '<button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">'
+    + '<svg class="theme-toggle-icon theme-toggle-icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>'
+    + '<svg class="theme-toggle-icon theme-toggle-icon-moon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"></path></svg>'
+    + '</button>';
+
   // Wraps the exact same per-block markup renderReportHtml's linear
   // branch already produces (chartSectionsList[i]/tableSectionsList[i],
   // unchanged) into positioned .board-node divs, plus an SVG layer
@@ -5528,6 +5597,7 @@ var NotSoBigData = (function () {
     var hasDetail = payload.tables.some(function (t) { return t.detail; }) || payload.charts.some(function (c) { return c.detail; });
     var hasFilters = !!(payload.filters && payload.filters.length);
     var script = 'window.__PUBLISH_PAYLOAD__ = ' + JSON.stringify(payload).replace(/</g, '\\u003c') + ';';
+    script += THEME_TOGGLE_JS;
     if (payload.tables.length) {
       script += TABLE_CLIENT_JS;
       if (hasDetail) {
@@ -5550,6 +5620,7 @@ var NotSoBigData = (function () {
       script += DETAIL_CLIENT_JS;
     }
     var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
+    var themeInitScript = '<script>' + THEME_INIT_JS + '</script>';
     var css = REPORT_CSS + (hasDetail ? TABLE_DETAIL_CSS : '') + (isBoardLayout ? BOARD_CSS : '');
     var blocks = isBoardLayout
       ? renderBoardCanvas(config, chartSectionsList, tableSectionsList)
@@ -5557,7 +5628,8 @@ var NotSoBigData = (function () {
     var body = filtersSection + '<div class="kpis">' + kpiCards + '</div>' + blocks;
     return '<!doctype html><html><head><meta charset="utf-8">'
       + '<title>' + escapeHtml(config.target.fileName) + '</title>'
-      + '<style>' + css + '</style>' + d3Script + '</head><body>'
+      + '<style>' + css + '</style>' + themeInitScript + d3Script + '</head><body>'
+      + THEME_TOGGLE_HTML
       + '<main>' + body + '</main>'
       + '<script>' + script + '</script>'
       + '</body></html>';

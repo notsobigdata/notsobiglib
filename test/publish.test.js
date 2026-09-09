@@ -285,12 +285,12 @@ function testPublishEscapesScriptCloseInEmbeddedPayload() {
   var html = getHtml();
   assert.ok(html, 'expected renderReportHtml\'s output to reach DriveApp.createFile');
 
-  // xssPublish has a chart, so Task 3 now also emits a second, legitimate
-  // <script src="..."> (the D3 CDN tag) alongside the inline payload
-  // script - two real closing tags is the correct baseline here, not a
+  // xssPublish has a chart, so this also emits the D3 CDN <script src="...">
+  // tag, plus (unconditional on every report) the theme-init <script> in
+  // <head> - three real closing tags is the correct baseline here, not a
   // regression; the XSS-relevant assertion is that it's not more than that.
   var scriptCloseCount = html.split('</script').length - 1;
-  assert.strictEqual(scriptCloseCount, 2, 'expected exactly two </script closing tags (the D3 CDN tag + the template\'s own inline script), found ' + scriptCloseCount + ' in: ' + html);
+  assert.strictEqual(scriptCloseCount, 3, 'expected exactly three </script closing tags (the theme-init script + the D3 CDN tag + the template\'s own inline script), found ' + scriptCloseCount + ' in: ' + html);
 }
 
 // Spec-mandated Layer-1 coverage for buildReportPayload's actual math
@@ -606,7 +606,12 @@ function testPublishChartRendersMountPointAndD3Script() {
   assert.ok(/<section class="chart" data-chart-id="by_category">/.test(html), 'expected a chart section with data-chart-id, got: ' + html);
   assert.ok(/<div class="chart-canvas" id="chart-by_category"><\/div>/.test(html), 'expected an empty chart-canvas mount point, got: ' + html);
   assert.ok(html.indexOf('https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js') !== -1, 'expected the pinned D3 CDN script tag, got: ' + html);
-  assert.ok(!/<svg/.test(html), 'expected no server-rendered <svg> now that charts draw client-side, got: ' + html);
+  // The theme toggle's two inline-SVG icons (sun/moon, see
+  // THEME_TOGGLE_HTML) are the one legitimate server-rendered <svg> on
+  // every report - strip those before asserting no *chart* svg was
+  // server-rendered.
+  var htmlWithoutToggleIcons = html.replace(/<svg class="theme-toggle-icon[\s\S]*?<\/svg>/g, '');
+  assert.ok(!/<svg/.test(htmlWithoutToggleIcons), 'expected no server-rendered <svg> outside the theme toggle icons now that charts draw client-side, got: ' + html);
 }
 
 function testPublishNoD3ScriptWithoutCharts() {
@@ -1490,13 +1495,16 @@ function testPublishSeriesChartHandlesSpacesWithoutCollision() {
     'expected New / Organic zero-filled to 0, got: ' + JSON.stringify(groupNew));
 }
 
-// Pulls the report's one inline <script>...</script> (the bare-tag one -
-// the D3 CDN tag always carries a "src" attribute, so this regex can't
-// match that one instead) back out so it can actually be executed, not
-// just regex-matched like every other filters[] test in this file.
+// Pulls the report's end-of-body inline <script>...</script> (the one
+// carrying the payload + every *_CLIENT_JS bundle) back out so it can
+// actually be executed, not just regex-matched like every other
+// filters[] test in this file. Anchored on "</main><script>...</script>"
+// specifically - every report also has a second, unrelated bare
+// <script> in <head> now (THEME_INIT_JS), and a plain greedy match would
+// span both, capturing the literal "</script><script>" text between them.
 function extractInlineScript(html) {
-  var match = html.match(/<script>([\s\S]*)<\/script>/);
-  assert.ok(match, 'expected a bare inline <script> in: ' + html);
+  var match = html.match(/<\/main><script>([\s\S]*)<\/script><\/body>/);
+  assert.ok(match, 'expected the end-of-body inline <script> in: ' + html);
   return match[1];
 }
 
@@ -1860,6 +1868,94 @@ function testPublishDetailToggleReflectsActiveFilterNotStaleSnapshot() {
   assert.deepStrictEqual(afterFilter.rows, [['o2', '$20.00']], 'expected only the channel=store row for group A after filtering - a stale snapshot would still show o1, got: ' + JSON.stringify(afterFilter));
 }
 
+// Design-system task: every report gets a built-in light/dark toggle,
+// unconditionally. Button id + both inline-SVG icon classes present.
+function testPublishThemeToggleButtonRendered() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/id="theme-toggle"/.test(html), 'expected the theme toggle button, got: ' + html);
+  assert.ok(/theme-toggle-icon-sun/.test(html), 'expected the sun icon class, got: ' + html);
+  assert.ok(/theme-toggle-icon-moon/.test(html), 'expected the moon icon class, got: ' + html);
+}
+
+// The dark palette is a second fixed token set (not per-report config):
+// a prefers-color-scheme media block plus a manual [data-theme="dark"]
+// override, both present unconditionally in every report's <style>.
+function testPublishDarkModeTokensPresent() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/prefers-color-scheme:\s*dark/.test(html), 'expected an OS-preference dark-mode media block, got: ' + html);
+  assert.ok(/data-theme="dark"/.test(html), 'expected a manual [data-theme="dark"] override selector, got: ' + html);
+  assert.ok(html.indexOf('#202124') !== -1, 'expected the dark-mode canvas color token, got: ' + html);
+}
+
+// FOUC avoidance: the theme-init script (reads localStorage, sets
+// documentElement.dataset.theme before first paint) must run in <head>,
+// strictly before <body> - a script that ran after <body> would paint
+// the wrong theme for one frame on every reload with a stored preference.
+function testPublishThemeInitScriptRunsInHeadBeforeBody() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var initIndex = html.indexOf('localStorage.getItem("publish-theme")');
+  var bodyIndex = html.indexOf('<body>');
+  assert.ok(initIndex !== -1, 'expected the theme-init script reading localStorage, got: ' + html);
+  assert.ok(bodyIndex !== -1, 'expected a <body> tag, got: ' + html);
+  assert.ok(initIndex < bodyIndex, 'expected the theme-init script to run before <body> (FOUC avoidance), got indices init=' + initIndex + ' body=' + bodyIndex);
+}
+
+// The click handler must persist an explicit choice so a later reload
+// doesn't require re-clicking - localStorage.setItem call present, once,
+// guarded (see testPublishThemeInitScriptRunsInHeadBeforeBody's comment
+// on why a try/catch matters for a file:// origin, checked separately by
+// running the actual script below rather than just string-matching here).
+function testPublishThemeToggleClickHandlerPersistsChoice() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/localStorage\.setItem\("publish-theme"/.test(html), 'expected the toggle click handler to persist the chosen theme, got: ' + html);
+  assert.ok(/document\.getElementById\("theme-toggle"\)/.test(html), 'expected the click handler to look up the toggle button by id, got: ' + html);
+}
+
+// Regression guard for the one hardcoded chart color CHART_CLIENT_JS had
+// (the line chart's stroke) - every other D3 fill already read a CSS
+// custom property (see testPublishChartClientJsUsesStyleForColorScaledFills),
+// so a literal hex here was the one series that wouldn't have re-themed.
+function testPublishLineChartUsesVarTealNotHardcodedHex() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'day', 'revenue'], [['A', '1', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select lineChartPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/\.style\("stroke", "var\(--teal\)"\)/.test(html), 'expected the line chart stroke to read var(--teal), got: ' + html);
+  assert.ok(html.indexOf('#3F6659') === -1, 'expected no remaining hardcoded line-chart color, got: ' + html);
+}
+
+// The toggle/dark-mode CSS lives in REPORT_CSS, unconditionally - unlike
+// TABLE_DETAIL_CSS/BOARD_CSS, which only exist because their markup
+// doesn't exist without that config, the toggle button and its CSS are
+// always emitted. validPublish has no charts/tables/board, only a KPI -
+// this locks in "unconditional" as a test, not just a design comment.
+function testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['revenue'], [['10']]);
+  var result = ctx.NotSoBigData.cli('run --select validPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/id="theme-toggle"/.test(html), 'expected the theme toggle even on a KPI-only report, got: ' + html);
+  assert.ok(/data-theme="dark"/.test(html), 'expected dark-mode tokens even on a KPI-only report, got: ' + html);
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -1976,5 +2072,11 @@ module.exports = {
   testPublishNoTableDetailToggleWithoutDetailConfigured: testPublishNoTableDetailToggleWithoutDetailConfigured,
   testPublishTableClientJsOpensDetailModalOnToggleClick: testPublishTableClientJsOpensDetailModalOnToggleClick,
   testPublishTableClientJsSortsCurrencyColumnNumerically: testPublishTableClientJsSortsCurrencyColumnNumerically,
-  testPublishTableClientJsSearchNarrowsRowsAndCsvExport: testPublishTableClientJsSearchNarrowsRowsAndCsvExport
+  testPublishTableClientJsSearchNarrowsRowsAndCsvExport: testPublishTableClientJsSearchNarrowsRowsAndCsvExport,
+  testPublishThemeToggleButtonRendered: testPublishThemeToggleButtonRendered,
+  testPublishDarkModeTokensPresent: testPublishDarkModeTokensPresent,
+  testPublishThemeInitScriptRunsInHeadBeforeBody: testPublishThemeInitScriptRunsInHeadBeforeBody,
+  testPublishThemeToggleClickHandlerPersistsChoice: testPublishThemeToggleClickHandlerPersistsChoice,
+  testPublishLineChartUsesVarTealNotHardcodedHex: testPublishLineChartUsesVarTealNotHardcodedHex,
+  testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard: testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard
 };

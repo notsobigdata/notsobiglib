@@ -185,18 +185,44 @@ resource (§7), and it's the same "keep the pure computation apart from
 the I/O" shape `model`'s macro parser already has relative to
 `model.js`'s BigQuery execution code.
 
-Design tokens for step 4 (fixed, no per-report customization in v1):
+Design tokens for step 4 (fixed, no per-report customization): still
+true — nothing here becomes a per-report config knob — but as of the
+design-system revision this means exactly *two* fixed, systemic token
+sets (light default + dark), switched by one report-agnostic toggle
+baked into every generated file, not a per-report style choice. Colors
+follow Google's own Material palette (Workspace/Cloud Console grays, the
+`rgba(60,64,67,…)` elevation-shadow tint, Google's actual light/dark
+accent blue and red) rather than an invented brand:
 
 ```css
---paper: #FAF8F3; --paper-line: #E4E0D4; --ink: #1F2421; --ink-soft: #6B6A61;
---teal: #3F6659; --teal-soft: #DCE6E1; --coral: #B65A3C;
---mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
---sans: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+:root {
+  --paper: #F8F9FA; --surface: #FFFFFF; --paper-line: #DADCE0; --ink: #202124; --ink-soft: #5F6368;
+  --teal: #1A73E8; --teal-soft: #E8F0FE; --coral: #EA4335;
+  --shadow-sm: 0 1px 2px 0 rgba(60,64,67,.30), 0 2px 6px 2px rgba(60,64,67,.15);
+  --shadow: 0 1px 3px 0 rgba(60,64,67,.30), 0 4px 8px 3px rgba(60,64,67,.15);
+  --radius: 8px; --radius-sm: 4px;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+  --sans: Roboto, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+/* dark: @media(prefers-color-scheme: dark) unless data-theme="light",
+   and unconditionally under [data-theme="dark"] */
+--paper: #202124; --surface: #292A2D; --paper-line: #3C4043; --ink: #E8EAED; --ink-soft: #9AA0A6;
+--teal: #8AB4F8; --teal-soft: #29344A; --coral: #F28B82;
+--shadow-sm: 0 1px 2px 0 rgba(0,0,0,.45), 0 2px 6px 2px rgba(0,0,0,.3);
+--shadow: 0 1px 3px 0 rgba(0,0,0,.5), 0 4px 8px 3px rgba(0,0,0,.35);
 ```
 
 Numbers render in `--mono` with `font-variant-numeric: tabular-nums`;
-labels render in uppercase `--mono` with slightly open letter-spacing;
-sections separate with 1px hairlines (`--paper-line`), not shadows.
+labels render in uppercase `--mono` with slightly open letter-spacing.
+KPI/chart/table/modal/board-node surfaces are cards now (`--surface`
+background, `--radius`, `--shadow-sm`/`--shadow`), not hairline-separated
+flat sections — the rest of the chart/table markup is unchanged, since
+every rule already reads these custom properties and re-themes through
+the cascade with no per-block dark-mode code. A discreet toggle button
+(top-right corner, inline-SVG sun/moon icons) switches between the two
+token sets: defaults to `prefers-color-scheme`, an explicit click sets
+`documentElement.dataset.theme` and persists it via `localStorage`
+(wrapped in try/catch — the report's usual `file://` delivery can throw).
 
 Return shape from `publishExecutor` matches the existing per-node run
 result convention (`status`, and on success whatever identifies the
