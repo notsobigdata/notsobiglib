@@ -1974,23 +1974,26 @@ function testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard() {
   assert.ok(/data-theme="dark"/.test(html), 'expected dark-mode tokens even on a KPI-only report, got: ' + html);
 }
 
-// Regression for a real dark-mode contrast bug: native <button>/<select>
-// elements don't inherit `color` from the page by default (the UA
-// stylesheet sets an explicit default, usually black, regardless of the
-// page's own dark palette) - so any button that only themed its
-// background (.table-pager button, .table-search) or set none at all
-// (.table-csv-export, which had no CSS rule whatsoever) rendered
-// unreadable black-on-dark text once dark mode was on. Fixed with one
-// blanket `button, select { color: inherit }` reset plus giving
-// .table-csv-export its own styled rule to match the other secondary
-// buttons instead of bare native chrome.
+// Regression for a real dark-mode contrast bug: native <button>/<select>/
+// <input> elements don't inherit `color` from the page by default (the
+// UA stylesheet sets an explicit default, usually black, regardless of
+// the page's own dark palette) - so any control that only themed its
+// background (.table-pager button, .table-search and its placeholder)
+// or set none at all (.table-csv-export, which had no CSS rule
+// whatsoever) rendered unreadable black-on-dark text once dark mode was
+// on. Fixed with one blanket `button, select, input { color: inherit }`
+// reset, an explicit themed `::placeholder` color (placeholder text
+// isn't covered by a plain `color: inherit` on the input itself in
+// every browser), and giving .table-csv-export its own styled rule to
+// match the other secondary buttons instead of bare native chrome.
 function testPublishButtonsAndSelectsInheritThemedTextColor() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'order_id', 'revenue'], [['A', 'o1', '10']]);
   var result = ctx.NotSoBigData.cli('run --select tablesPublish').nodes[0];
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
-  assert.ok(/button,\s*select\s*\{[^}]*color:\s*inherit/.test(html), 'expected a blanket button/select color-inherit reset, got: ' + html);
+  assert.ok(/button,\s*select,\s*input\s*\{[^}]*color:\s*inherit/.test(html), 'expected a blanket button/select/input color-inherit reset, got: ' + html);
+  assert.ok(/\.table-search::placeholder\s*\{[^}]*color:\s*var\(--ink-soft\)/.test(html), 'expected a themed .table-search placeholder color, got: ' + html);
   assert.ok(/\.table-csv-export\s*\{[^}]*background:\s*var\(--paper\)/.test(html), 'expected .table-csv-export to have its own themed background (not bare native chrome), got: ' + html);
 }
 
