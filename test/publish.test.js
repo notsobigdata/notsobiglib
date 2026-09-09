@@ -377,6 +377,50 @@ function testPublishTableModeMustBeRawOrAggregated() {
   assert.ok(/mode "raw" or "aggregated"/.test(result.error), 'expected a table-mode error, got: ' + result.error);
 }
 
+// Task 1: buildReportPayload now attaches relatesTo to every chart/table
+// payload entry (null when not declared) - the client-side layout script
+// (Task 3) needs this to rebuild the relatesTo graph in the browser,
+// since positioning no longer happens server-side. Attached
+// unconditionally (not gated on layout:'board'), same posture "detail"
+// already has - so a plain layout:'linear' report gets relatesTo: null
+// on every block too, asserted below via aggregationPublish.
+function testPublishPayloadCarriesRelatesToPerBlock() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+
+  var boardResult = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(boardResult.status, 'success', 'expected the shimmed board run to succeed, got: ' + boardResult.error);
+  var boardPayload = extractPayload(getHtml());
+  var root = boardPayload.charts.filter(function (c) { return c.id === 'r'; })[0];
+  var childChart = boardPayload.charts.filter(function (c) { return c.id === 'c1'; })[0];
+  var childTable = boardPayload.tables.filter(function (t) { return t.id === 'c2'; })[0];
+  assert.strictEqual(root.relatesTo, null, 'expected the root chart\'s relatesTo to be null, got: ' + JSON.stringify(root));
+  assert.strictEqual(childChart.relatesTo, 'r', 'expected the child chart\'s relatesTo to round-trip into the payload, got: ' + JSON.stringify(childChart));
+  assert.strictEqual(childTable.relatesTo, 'r', 'expected the child table\'s relatesTo to round-trip into the payload, got: ' + JSON.stringify(childTable));
+
+  var chainResult = ctx.NotSoBigData.cli('run --select boardChainPublish').nodes[0];
+  assert.strictEqual(chainResult.status, 'success', 'expected the shimmed chain run to succeed, got: ' + chainResult.error);
+  var chainPayload = extractPayload(getHtml());
+  var g = chainPayload.charts.filter(function (c) { return c.id === 'g'; })[0];
+  var p = chainPayload.charts.filter(function (c) { return c.id === 'p'; })[0];
+  var c = chainPayload.tables.filter(function (t) { return t.id === 'c'; })[0];
+  assert.strictEqual(g.relatesTo, null, 'expected chain root "g" relatesTo null, got: ' + JSON.stringify(g));
+  assert.strictEqual(p.relatesTo, 'g', 'expected chain middle "p" relatesTo "g", got: ' + JSON.stringify(p));
+  assert.strictEqual(c.relatesTo, 'p', 'expected chain leaf "c" relatesTo "p", got: ' + JSON.stringify(c));
+
+  var multiRootResult = ctx.NotSoBigData.cli('run --select boardMultiRootPublish').nodes[0];
+  assert.strictEqual(multiRootResult.status, 'success', 'expected the shimmed multi-root run to succeed, got: ' + multiRootResult.error);
+  var multiRootPayload = extractPayload(getHtml());
+  multiRootPayload.charts.forEach(function (chart) {
+    assert.strictEqual(chart.relatesTo, null, 'expected every multi-root chart to have relatesTo null, got: ' + JSON.stringify(chart));
+  });
+
+  var linearResult = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(linearResult.status, 'success', 'expected the shimmed linear run to succeed, got: ' + linearResult.error);
+  var linearPayload = extractPayload(getHtml());
+  assert.strictEqual(linearPayload.charts[0].relatesTo, null, 'expected a layout:"linear" chart with no relatesTo declared to default to null, got: ' + JSON.stringify(linearPayload.charts[0]));
+}
+
 function testPublishRawTableRequiresColumns() {
   var result = runOne('badTableRawColumnsPublish');
   assert.strictEqual(result.status, 'failed');
@@ -2083,6 +2127,7 @@ module.exports = {
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
   testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,
   testPublishTableModeMustBeRawOrAggregated: testPublishTableModeMustBeRawOrAggregated,
+  testPublishPayloadCarriesRelatesToPerBlock: testPublishPayloadCarriesRelatesToPerBlock,
   testPublishRawTableRequiresColumns: testPublishRawTableRequiresColumns,
   testPublishRawTableColumnRequiresField: testPublishRawTableColumnRequiresField,
   testPublishAggregatedTableRequiresGroupBy: testPublishAggregatedTableRequiresGroupBy,

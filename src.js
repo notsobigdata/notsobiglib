@@ -4724,12 +4724,16 @@ var NotSoBigData = (function () {
     });
     var charts = (config.charts || []).map(function (chart) {
       var chartRows = rowsForBlock(chart, rows, blockRowsByRef);
-      return withDetail(buildChartPayload(chart, chartRows), chart, chartRows);
+      var built = withDetail(buildChartPayload(chart, chartRows), chart, chartRows);
+      built.relatesTo = chart.relatesTo || null;
+      return built;
     });
     var tables = (config.tables || []).map(function (table) {
       var tableRows = rowsForBlock(table, rows, blockRowsByRef);
       var built = table.mode === 'raw' ? buildRawTablePayload(table, tableRows) : buildAggregatedTablePayload(table, tableRows);
-      return withDetail(built, table, tableRows);
+      built = withDetail(built, table, tableRows);
+      built.relatesTo = table.relatesTo || null;
+      return built;
     });
     var payload = { kpis: kpis, charts: charts, tables: tables };
     if (config.filters && config.filters.length) {
