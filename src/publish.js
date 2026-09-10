@@ -107,9 +107,9 @@ function validateDetail(blockType, blockId, detail) {
 // every per-block loop in validatePublishConfig has already confirmed
 // ids are present and duplicate-free *within* charts[] and *within*
 // tables[] separately; this function additionally requires ids to be
-// unique *across* charts[] and tables[] combined, since computeBoardLayout/
-// renderBoardCanvas key a single positionById/sectionById map by id across
-// both arrays unconditionally whenever layout.type is 'board' - not only
+// unique *across* charts[] and tables[] combined, since renderBoardCanvas
+// keys a single sectionById map by id across both arrays unconditionally
+// whenever layout.type is 'board' - not only
 // when a block happens to declare relatesTo. So the cross-array check
 // below (and the self-ref/unknown-id/cycle checks that build on the same
 // parentOf map) run for every board-layout report; only the "relatesTo
@@ -719,12 +719,16 @@ function buildReportPayload(config, rows, blockRowsByRef) {
   });
   var charts = (config.charts || []).map(function (chart) {
     var chartRows = rowsForBlock(chart, rows, blockRowsByRef);
-    return withDetail(buildChartPayload(chart, chartRows), chart, chartRows);
+    var built = withDetail(buildChartPayload(chart, chartRows), chart, chartRows);
+    built.relatesTo = chart.relatesTo || null;
+    return built;
   });
   var tables = (config.tables || []).map(function (table) {
     var tableRows = rowsForBlock(table, rows, blockRowsByRef);
     var built = table.mode === 'raw' ? buildRawTablePayload(table, tableRows) : buildAggregatedTablePayload(table, tableRows);
-    return withDetail(built, table, tableRows);
+    built = withDetail(built, table, tableRows);
+    built.relatesTo = table.relatesTo || null;
+    return built;
   });
   var payload = { kpis: kpis, charts: charts, tables: tables };
   if (config.filters && config.filters.length) {
@@ -752,123 +756,6 @@ var BOARD_BOX_WIDTH = 520;
 var BOARD_BOX_HEIGHT = 340;
 var BOARD_H_GAP = 40;
 var BOARD_V_GAP = 60;
-
-// Contour-based tidy-tree layout for layout:'board' (a simplified
-// Reingold-Tilford/Walker walk, not the full Buchheim O(n) apportionment
-// pass - see the ponytail note on shiftPastSiblingContour below for why
-// that's the right stopping point). blocks with no relatesTo are roots,
-// treated as siblings of an implicit super-root so multiple trees land
-// side by side through the exact same clearance mechanism as any other
-// sibling group - no separate "offset past the previous tree" special
-// case. Trusts validateBoardRelations already ran (acyclic, every
-// id/relatesTo resolves) - does no error-checking of its own.
-//
-// layoutSubtree(id) returns the subtree rooted at `id` laid out in its
-// own *local* coordinates (its own root at relative x=0): `positions`
-// (id/x/depth-from-this-root, depth 0 = the root itself), and
-// `leftContour`/`rightContour` (index d = the min/max x reached by any
-// node at depth d within this subtree, in these same local coordinates).
-// A subtree with no children is the base case: itself, alone, at x=0.
-function layoutSubtree(id, children) {
-  var kids = children[id] || [];
-  if (!kids.length) {
-    return { x: 0, positions: [{ id: id, x: 0, depth: 0 }], leftContour: [0], rightContour: [BOARD_BOX_WIDTH] };
-  }
-
-  var combinedLeft = [];
-  var combinedRight = [];
-  var offsets = kids.map(function (childId, i) {
-    var child = layoutSubtree(childId, children);
-    var offset = i === 0 ? 0 : shiftPastSiblingContour(child, combinedLeft, combinedRight);
-    mergeContour(combinedLeft, combinedRight, child, offset);
-    return { child: child, offset: offset };
-  });
-
-  var positions = [];
-  var childXs = [];
-  offsets.forEach(function (o) {
-    o.child.positions.forEach(function (p) {
-      positions.push({ id: p.id, x: p.x + o.offset, depth: p.depth + 1 });
-    });
-    childXs.push(o.child.x + o.offset);
-  });
-  var myX = (Math.min.apply(null, childXs) + Math.max.apply(null, childXs)) / 2;
-  positions.push({ id: id, x: myX, depth: 0 });
-
-  return {
-    x: myX,
-    positions: positions,
-    leftContour: [myX].concat(combinedLeft),
-    rightContour: [myX + BOARD_BOX_WIDTH].concat(combinedRight)
-  };
-}
-
-// Minimum rightward shift so `child`'s own left contour clears
-// `siblingLeft`/`siblingRight` (the contour merged from every sibling
-// already placed) by at least BOARD_H_GAP at every depth both reach -
-// this is the actual fix over the old nextSlot counter: clearance is
-// checked against siblings' real per-depth shape, not a fixed leaf-slot
-// width, so a subtree that's narrow at a shallow depth but wide deeper
-// down only pushes its neighbor as far as its worst *single* depth
-// requires, not its total leaf count.
-//
-// ponytail: this is a greedy left-to-right contour merge, not a full
-// Buchheim/Walker apportionment pass - it never shifts an *earlier*
-// sibling back left to tighten the result once a later one turns out
-// narrower than it. That means a very bushy, uneven board can end up
-// slightly wider than the true minimum. The design spec already notes
-// board box counts are small in realistic dashboards, so exact-minimum
-// packing isn't worth the extra pass; upgrade to full apportionment if a
-// real board ever has enough boxes for the slack to visibly matter.
-function shiftPastSiblingContour(child, siblingLeft, siblingRight) {
-  var shift = 0;
-  for (var d = 0; d < child.leftContour.length && d < siblingRight.length; d++) {
-    var need = siblingRight[d] + BOARD_H_GAP - child.leftContour[d];
-    if (need > shift) { shift = need; }
-  }
-  return shift;
-}
-
-// Folds `child`'s contour (shifted by `offset`) into the running
-// `combinedLeft`/`combinedRight` arrays, in place.
-function mergeContour(combinedLeft, combinedRight, child, offset) {
-  for (var d = 0; d < child.leftContour.length; d++) {
-    var l = child.leftContour[d] + offset;
-    var r = child.rightContour[d] + offset;
-    combinedLeft[d] = (combinedLeft[d] === undefined) ? l : Math.min(combinedLeft[d], l);
-    combinedRight[d] = (combinedRight[d] === undefined) ? r : Math.max(combinedRight[d], r);
-  }
-}
-
-function computeBoardLayout(charts, tables) {
-  var blocks = (charts || []).concat(tables || []);
-  var children = emptyMap();
-  var roots = [];
-  var edges = [];
-  blocks.forEach(function (block) {
-    if (block.relatesTo) {
-      children[block.relatesTo] = children[block.relatesTo] || [];
-      children[block.relatesTo].push(block.id);
-      edges.push({ from: block.relatesTo, to: block.id });
-    } else {
-      roots.push(block.id);
-    }
-  });
-
-  var positions = [];
-  var combinedLeft = [];
-  var combinedRight = [];
-  roots.forEach(function (rootId, i) {
-    var root = layoutSubtree(rootId, children);
-    var offset = i === 0 ? 0 : shiftPastSiblingContour(root, combinedLeft, combinedRight);
-    root.positions.forEach(function (p) {
-      positions.push({ id: p.id, x: p.x + offset, y: p.depth * (BOARD_BOX_HEIGHT + BOARD_V_GAP) });
-    });
-    mergeContour(combinedLeft, combinedRight, root, offset);
-  });
-
-  return { positions: positions, edges: edges };
-}
 
 // Fixed design tokens - see the design spec's "Design tokens" section.
 // No per-report customization in v1: every published dashboard looks the
@@ -948,7 +835,7 @@ var BOARD_CSS = [
   '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); border-radius: var(--radius); cursor: grab; }',
   '.board-viewport.board-panning { cursor: grabbing; }',
   '.board-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }',
-  '.board-node { position: absolute; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 12px; box-sizing: border-box; overflow: auto; resize: both; min-width: 160px; min-height: 100px; }',
+  '.board-node { position: absolute; width: ' + BOARD_BOX_WIDTH + 'px; height: ' + BOARD_BOX_HEIGHT + 'px; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 12px; box-sizing: border-box; overflow: auto; resize: both; min-width: 160px; min-height: 100px; }',
   '.board-node .chart, .board-node .table-block { border: none; box-shadow: none; margin-top: 0; padding: 0; }',
   '.board-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }',
   '.board-edge { fill: none; stroke: var(--paper-line); stroke-width: 2; }'
@@ -1524,40 +1411,141 @@ var CHART_CLIENT_JS = [
   '});'
 ].join('\n');
 
-// Pan (mouse/touch drag) + zoom (wheel), vanilla JS/CSS transform, no
-// library - see the design spec's §5. Self-contained: its own
-// DOMContentLoaded listener, independent of TABLE_CLIENT_JS/
-// CHART_CLIENT_JS's own listeners, only emitted when layout:'board' is
-// used (see renderReportHtml's isBoardLayout branch).
+// Client-side board layout via d3-hierarchy - runs on DOMContentLoaded,
+// before BOARD_CLIENT_JS's pan/zoom setup (registered right after it in
+// the same script, so it always executes first - see renderReportHtml).
+// Rebuilds the relatesTo graph from window.__PUBLISH_PAYLOAD__ (server
+// no longer computes positions, see renderBoardCanvas), wraps it in one
+// synthetic root (d3.stratify() requires exactly one; relatesTo is a
+// forest - zero or more independent roots), runs d3.tree(), then shifts
+// every x by -minX so no real node lands at a negative style.left (d3.tree()
+// centers the root at x=0 and spreads children on both sides, unlike the
+// deleted contour algorithm which always started at 0). See
+// docs/superpowers/specs/2026-09-09-publish-board-d3-layout-design.md §4.
+//
+// Edge <path>s are recomputed from each node element's *live* offsetLeft/
+// offsetTop/offsetWidth/offsetHeight, not the fixed BOARD_BOX_WIDTH/HEIGHT
+// used only for the tree's initial spacing - a node's native CSS `resize`
+// grip (BOARD_CSS's .board-node rule) lets a human grow/shrink it after
+// load, and an edge computed from the nominal box size would stay visually
+// anchored to where the box *used to* end. A ResizeObserver on every real
+// node calls the same redraw function whenever any of them changes size,
+// so a resized node's edges track it continuously, not just once at load.
+//
+// window.__BOARD_BOUNDS__ exposes the tree's nominal bounding box (the
+// four extremes actually reached by a positioned node) for BOARD_CLIENT_JS
+// to fit/center the initial pan/zoom against - the two scripts don't share
+// a closure, so this is the hand-off point.
+var BOARD_LAYOUT_CLIENT_JS = [
+  'document.addEventListener("DOMContentLoaded", function () {',
+  '  var payload = window.__PUBLISH_PAYLOAD__;',
+  '  var blocks = payload.charts.concat(payload.tables);',
+  '  var rootId = "__board_root__";',
+  '  var nodesData = blocks.map(function (b) { return { id: b.id, relatesTo: b.relatesTo }; });',
+  '  nodesData.push({ id: rootId, relatesTo: null });',
+  '  nodesData.forEach(function (n) { if (n.id !== rootId && !n.relatesTo) { n.relatesTo = rootId; } });',
+  '  var stratify = d3.stratify().id(function (n) { return n.id; }).parentId(function (n) { return n.relatesTo; });',
+  '  var root = stratify(nodesData);',
+  '  var treeLayout = d3.tree().nodeSize([' + (BOARD_BOX_WIDTH + BOARD_H_GAP) + ', ' + (BOARD_BOX_HEIGHT + BOARD_V_GAP) + ']);',
+  '  treeLayout(root);',
+  '  var realNodes = root.descendants().filter(function (n) { return n.id !== rootId; });',
+  '  if (!realNodes.length) { return; }',
+  '  var minX = Math.min.apply(null, realNodes.map(function (n) { return n.x; }));',
+  '  var minY = Math.min.apply(null, realNodes.map(function (n) { return n.y; }));',
+  '  var positionById = {};',
+  '  realNodes.forEach(function (n) {',
+  '    var x = n.x - minX;',
+  '    positionById[n.id] = { x: x, y: n.y };',
+  '    var el = document.querySelector("[data-block-id=\\"" + n.id + "\\"]");',
+  '    if (el) { el.style.left = x + "px"; el.style.top = n.y + "px"; }',
+  '  });',
+  '  var edges = blocks.filter(function (b) { return b.relatesTo; }).map(function (b) { return { from: b.relatesTo, to: b.id }; });',
+  '  var maxX = 0, maxY = 0;',
+  '  realNodes.forEach(function (n) {',
+  '    var p = positionById[n.id];',
+  '    maxX = Math.max(maxX, p.x + ' + BOARD_BOX_WIDTH + ');',
+  '    maxY = Math.max(maxY, p.y + ' + BOARD_BOX_HEIGHT + ');',
+  '  });',
+  '  var svg = document.getElementById("board-edges");',
+  '  svg.setAttribute("width", maxX);',
+  '  svg.setAttribute("height", maxY);',
+  '  window.__BOARD_BOUNDS__ = { minX: 0, minY: minY, maxX: maxX, maxY: maxY };',
+  '  function redrawEdges() {',
+  '    var edgePaths = edges.map(function (e) {',
+  '      var fromEl = document.querySelector("[data-block-id=\\"" + e.from + "\\"]");',
+  '      var toEl = document.querySelector("[data-block-id=\\"" + e.to + "\\"]");',
+  '      if (!fromEl || !toEl) { return ""; }',
+  '      var x1 = fromEl.offsetLeft + fromEl.offsetWidth / 2, y1 = fromEl.offsetTop + fromEl.offsetHeight;',
+  '      var x2 = toEl.offsetLeft + toEl.offsetWidth / 2, y2 = toEl.offsetTop;',
+  '      return "<path class=\\"board-edge\\" d=\\"M" + x1 + " " + y1 + " L" + x2 + " " + y2 + "\\"></path>";',
+  '    });',
+  '    svg.innerHTML = edgePaths.join("");',
+  '  }',
+  '  redrawEdges();',
+  '  if (window.ResizeObserver) {',
+  '    var resizeObserver = new ResizeObserver(redrawEdges);',
+  '    realNodes.forEach(function (n) {',
+  '      var el = document.querySelector("[data-block-id=\\"" + n.id + "\\"]");',
+  '      if (el) { resizeObserver.observe(el); }',
+  '    });',
+  '  }',
+  '});'
+].join('\n');
+
+// Pan (drag) + zoom (wheel/pinch/double-click) via d3-zoom - reuses the
+// D3 bundle already loaded for charts[]/BOARD_LAYOUT_CLIENT_JS, see
+// docs/superpowers/specs/2026-09-09-publish-board-d3-layout-design.md §5.
+// Registered right after BOARD_LAYOUT_CLIENT_JS in the same script (see
+// renderReportHtml), so #board-canvas already holds positioned content
+// by the time this runs. Self-contained: its own DOMContentLoaded
+// listener, independent of TABLE_CLIENT_JS/CHART_CLIENT_JS's own
+// listeners, only emitted when layout:'board' is used (see
+// renderReportHtml's isBoardLayout branch).
+//
+// After creating the zoom behavior, applies one initial "fit to view"
+// transform (the standard d3-zoom pattern: zoom.transform + a computed
+// scale/translate) so the whole tree opens centered and fully visible
+// instead of at identity transform, where a tree taller/wider than
+// .board-viewport would leave some nodes below/beside the fold with no
+// hint they exist. Reads window.__BOARD_BOUNDS__, the tree's bounding
+// box BOARD_LAYOUT_CLIENT_JS already computed for #board-edges' sizing -
+// scale is clamped to the same [0.25, 2] range as manual zoom, and 0.9
+// leaves a small margin around the tree rather than touching the edges.
+//
+// `.filter()` excludes a drag-start (mousedown/touchstart) whose target
+// sits inside any .board-node from also starting a pan gesture - without
+// this, every mousedown bubbles up to the viewport where d3.zoom listens,
+// so dragging a node's native CSS resize grip (or clicking a chart bar,
+// sorting a table column, hitting "Export CSV"...) would *also* register
+// as a pan-start, fighting the node's own interaction for the same
+// pointer session (found during Layer 2 verification: a node's resize
+// felt like it kept tracking the cursor past mouseup). Wheel-zoom is
+// untouched - scrolling to zoom while the pointer happens to be over a
+// node's content is expected, only drag-to-pan needs this exclusion.
 var BOARD_CLIENT_JS = [
   'document.addEventListener("DOMContentLoaded", function () {',
   '  var viewport = document.querySelector(".board-viewport");',
   '  var canvas = document.getElementById("board-canvas");',
   '  if (!viewport || !canvas) { return; }',
-  '  var panX = 0, panY = 0, zoom = 1;',
-  '  var dragging = false, lastX = 0, lastY = 0;',
-  '  function applyTransform() {',
-  '    canvas.style.transform = "translate(" + panX + "px," + panY + "px) scale(" + zoom + ")";',
+  '  var zoom = d3.zoom().scaleExtent([0.25, 2])',
+  '    .filter(function (event) {',
+  '      if (event.ctrlKey && event.type !== "wheel") { return false; }',
+  '      if (event.button) { return false; }',
+  '      if ((event.type === "mousedown" || event.type === "touchstart") && event.target.closest(".board-node")) { return false; }',
+  '      return true;',
+  '    })',
+  '    .on("start", function () { viewport.classList.add("board-panning"); })',
+  '    .on("end", function () { viewport.classList.remove("board-panning"); })',
+  '    .on("zoom", function (event) { canvas.style.transform = "translate(" + event.transform.x + "px," + event.transform.y + "px) scale(" + event.transform.k + ")"; });',
+  '  d3.select(viewport).call(zoom);',
+  '  var bounds = window.__BOARD_BOUNDS__;',
+  '  if (bounds && viewport.clientWidth && viewport.clientHeight) {',
+  '    var boundsWidth = bounds.maxX - bounds.minX, boundsHeight = bounds.maxY - bounds.minY;',
+  '    var midX = (bounds.minX + bounds.maxX) / 2, midY = (bounds.minY + bounds.maxY) / 2;',
+  '    var scale = Math.min(2, Math.max(0.25, 0.9 / Math.max(boundsWidth / viewport.clientWidth, boundsHeight / viewport.clientHeight)));',
+  '    var fit = d3.zoomIdentity.translate(viewport.clientWidth / 2 - scale * midX, viewport.clientHeight / 2 - scale * midY).scale(scale);',
+  '    d3.select(viewport).call(zoom.transform, fit);',
   '  }',
-  '  function startDrag(x, y) { dragging = true; lastX = x; lastY = y; viewport.classList.add("board-panning"); }',
-  '  function moveDrag(x, y) {',
-  '    if (!dragging) { return; }',
-  '    panX += x - lastX; panY += y - lastY; lastX = x; lastY = y;',
-  '    applyTransform();',
-  '  }',
-  '  function endDrag() { dragging = false; viewport.classList.remove("board-panning"); }',
-  '  viewport.addEventListener("mousedown", function (e) { startDrag(e.clientX, e.clientY); });',
-  '  window.addEventListener("mousemove", function (e) { moveDrag(e.clientX, e.clientY); });',
-  '  window.addEventListener("mouseup", endDrag);',
-  '  viewport.addEventListener("touchstart", function (e) { var t = e.touches[0]; startDrag(t.clientX, t.clientY); });',
-  '  viewport.addEventListener("touchmove", function (e) { var t = e.touches[0]; moveDrag(t.clientX, t.clientY); e.preventDefault(); }, { passive: false });',
-  '  viewport.addEventListener("touchend", endDrag);',
-  '  viewport.addEventListener("wheel", function (e) {',
-  '    e.preventDefault();',
-  '    var delta = e.deltaY > 0 ? -0.1 : 0.1;',
-  '    zoom = Math.min(2, Math.max(0.25, zoom + delta));',
-  '    applyTransform();',
-  '  }, { passive: false });',
   '});'
 ].join('\n');
 
@@ -1607,42 +1595,26 @@ var THEME_TOGGLE_HTML = '<button id="theme-toggle" class="theme-toggle" type="bu
   + '<svg class="theme-toggle-icon theme-toggle-icon-moon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"></path></svg>'
   + '</button>';
 
-// Wraps the exact same per-block markup renderReportHtml's linear
-// branch already produces (chartSectionsList[i]/tableSectionsList[i],
-// unchanged) into positioned .board-node divs, plus an SVG layer
-// drawing one <path> per computeBoardLayout edge. sectionById maps a
-// block's id to its already-rendered markup - charts and tables are
-// zipped by array index since chartSectionsList/tableSectionsList are
-// built with .map() over config.charts/config.tables in the same order.
+// Wraps each block's already-rendered markup (chartSectionsList[i]/
+// tableSectionsList[i], unchanged) into an unpositioned .board-node div -
+// actual x/y positioning now happens client-side, via d3-hierarchy, once
+// the page has loaded (BOARD_LAYOUT_CLIENT_JS, below). The emitted
+// #board-edges svg starts empty for the same reason: edges are drawn
+// client-side too, once real positions exist. See docs/superpowers/specs/
+// 2026-09-09-publish-board-d3-layout-design.md §3.
 function renderBoardCanvas(config, chartSectionsList, tableSectionsList) {
   var charts = config.charts || [];
   var tables = config.tables || [];
-  var layout = computeBoardLayout(charts, tables);
-  var positionById = emptyMap();
-  layout.positions.forEach(function (p) { positionById[p.id] = p; });
   var sectionById = emptyMap();
   charts.forEach(function (chart, index) { sectionById[chart.id] = chartSectionsList[index]; });
   tables.forEach(function (table, index) { sectionById[table.id] = tableSectionsList[index]; });
 
-  var nodesHtml = layout.positions.map(function (p) {
-    return '<div class="board-node" style="left:' + p.x + 'px;top:' + p.y + 'px;width:' + BOARD_BOX_WIDTH + 'px;height:' + BOARD_BOX_HEIGHT + 'px">' + sectionById[p.id] + '</div>';
-  }).join('');
-
-  var maxX = layout.positions.reduce(function (m, p) { return Math.max(m, p.x + BOARD_BOX_WIDTH); }, 0);
-  var maxY = layout.positions.reduce(function (m, p) { return Math.max(m, p.y + BOARD_BOX_HEIGHT); }, 0);
-
-  var edgesHtml = layout.edges.map(function (edge) {
-    var from = positionById[edge.from];
-    var to = positionById[edge.to];
-    var x1 = from.x + BOARD_BOX_WIDTH / 2;
-    var y1 = from.y + BOARD_BOX_HEIGHT;
-    var x2 = to.x + BOARD_BOX_WIDTH / 2;
-    var y2 = to.y;
-    return '<path class="board-edge" d="M' + x1 + ' ' + y1 + ' L' + x2 + ' ' + y2 + '"></path>';
+  var nodesHtml = charts.concat(tables).map(function (block) {
+    return '<div class="board-node" data-block-id="' + escapeHtml(block.id) + '">' + sectionById[block.id] + '</div>';
   }).join('');
 
   return '<div class="board-viewport"><div class="board-canvas" id="board-canvas">'
-    + '<svg class="board-edges" width="' + maxX + '" height="' + maxY + '">' + edgesHtml + '</svg>'
+    + '<svg class="board-edges" id="board-edges"></svg>'
     + nodesHtml
     + '</div></div>';
 }
@@ -1674,6 +1646,7 @@ function renderReportHtml(payload, config) {
     script += CHART_CLIENT_JS;
   }
   if (isBoardLayout) {
+    script += BOARD_LAYOUT_CLIENT_JS;
     script += BOARD_CLIENT_JS;
   }
   if (hasFilters) {
@@ -1684,7 +1657,7 @@ function renderReportHtml(payload, config) {
   if (hasDetail) {
     script += DETAIL_CLIENT_JS;
   }
-  var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
+  var d3Script = (payload.charts.length || isBoardLayout) ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
   var themeInitScript = '<script>' + THEME_INIT_JS + '</script>';
   var css = REPORT_CSS + (hasDetail ? TABLE_DETAIL_CSS : '') + (isBoardLayout ? BOARD_CSS : '');
   var blocks = isBoardLayout

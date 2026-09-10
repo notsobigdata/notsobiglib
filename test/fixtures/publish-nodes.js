@@ -327,30 +327,19 @@ var boardMultiRootPublish = {
   ]
 };
 
-// A lopsided tree: r -> {bushy, narrow} (bushy declared first). bushy ->
-// {b1 (leaf), b2 (-> b2x, b2y, both leaves)} - a branch that's 2 leaves
-// wide at depth 3 but only 1 node wide (b1) at depth 2. narrow is a lone
-// leaf sibling of bushy. Exercises computeBoardLayout's per-depth contour
-// clearance instead of a flat fan or a straight chain - see
-// test/publish.test.js's testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth
-// for the hand-traced expected positions.
-var boardLopsidedPublish = {
+// Board layout with zero charts[] - exercises the d3Script inclusion
+// fix (Task 5): layout:'board' must load D3 even when payload.charts.length
+// is 0, since both positioning (Task 3) and pan/zoom (Task 4) need it now.
+var boardTablesOnlyPublish = {
   kind: 'publish',
-  name: 'boardLopsidedPublish',
+  name: 'boardTablesOnlyPublish',
   dependsOn: ['moveWithBigQueryTarget'],
   source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
-  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-lopsided.html' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-tables-only.html' },
   layout: { type: 'board' },
-  charts: [
-    { id: 'r', type: 'bar', title: 'R', groupBy: 'category', metric: { agg: 'sum', field: 'revenue' } }
-  ],
   tables: [
-    { id: 'bushy', title: 'Bushy', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'r' },
-    { id: 'narrow', title: 'Narrow', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'r' },
-    { id: 'b1', title: 'B1', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'bushy' },
-    { id: 'b2', title: 'B2', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'bushy' },
-    { id: 'b2x', title: 'B2X', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'b2' },
-    { id: 'b2y', title: 'B2Y', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'b2' }
+    { id: 'parent', title: 'Parent', mode: 'raw', columns: [{ field: 'category' }] },
+    { id: 'child', title: 'Child', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'parent' }
   ]
 };
 

@@ -122,9 +122,9 @@ function testPublishBoardDuplicateCrossTypeIdRejected() {
 
 // Regression for the finding where validateBoardRelations skipped the
 // cross-array uniqueness check entirely whenever no block declared
-// relatesTo, even though computeBoardLayout/renderBoardCanvas key a single
-// id-keyed map across charts[]+tables[] unconditionally once layout.type
-// is "board" - silently dropping one block's markup on a collision. Same
+// relatesTo, even though renderBoardCanvas keys a single id-keyed map
+// across charts[]+tables[] unconditionally once layout.type is "board" -
+// silently dropping one block's markup on a collision. Same
 // error as testPublishBoardDuplicateCrossTypeIdRejected above, just with
 // no relatesTo anywhere on either block.
 function testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo() {
@@ -143,49 +143,6 @@ function testPublishBoardValidRelationsProceedPastValidation() {
   assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
-// boardValidPublish: root "r" with two children "c1" (chart) and "c2"
-// (table). Hand-computed with BOARD_BOX_WIDTH=520, BOARD_BOX_HEIGHT=340,
-// BOARD_H_GAP=40, BOARD_V_GAP=60: leaves land at x=0 and x=560 (0 and 1
-// slots * (520+40)px-with-gap), y=400 (depth 1 * (340+60)px-with-gap); the
-// root centers over its children at x=(0+560)/2=280, y=0.
-function testPublishBoardLayoutPositionsSingleRootTwoChildren() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
-  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
-  var html = getHtml();
-  assert.ok(html.indexOf('left:280px;top:0px') !== -1, 'expected the root positioned at (280,0), got: ' + html);
-  assert.ok(html.indexOf('left:0px;top:400px') !== -1, 'expected the first child positioned at (0,400), got: ' + html);
-  assert.ok(html.indexOf('left:560px;top:400px') !== -1, 'expected the second child positioned at (560,400), got: ' + html);
-  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
-  assert.strictEqual(edgeCount, 2, 'expected 2 edges (r->c1, r->c2), got ' + edgeCount + ' in: ' + html);
-}
-
-function testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select boardChainPublish').nodes[0];
-  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
-  var html = getHtml();
-  assert.ok(html.indexOf('left:0px;top:0px') !== -1, 'expected "g" at (0,0), got: ' + html);
-  assert.ok(html.indexOf('left:0px;top:400px') !== -1, 'expected "p" at (0,400), got: ' + html);
-  assert.ok(html.indexOf('left:0px;top:800px') !== -1, 'expected "c" at (0,800), got: ' + html);
-  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
-  assert.strictEqual(edgeCount, 2, 'expected 2 edges (g->p, p->c), got ' + edgeCount + ' in: ' + html);
-}
-
-function testPublishBoardLayoutPlacesMultipleRootsSideBySide() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select boardMultiRootPublish').nodes[0];
-  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
-  var html = getHtml();
-  assert.ok(html.indexOf('left:0px;top:0px') !== -1, 'expected root "a" at (0,0), got: ' + html);
-  assert.ok(html.indexOf('left:560px;top:0px') !== -1, 'expected root "b" at (560,0), got: ' + html);
-  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
-  assert.strictEqual(edgeCount, 0, 'expected 0 edges (two unrelated roots), got ' + edgeCount + ' in: ' + html);
-}
-
 function testPublishBoardClientJsEmittedOnlyForBoardLayout() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
@@ -193,14 +150,14 @@ function testPublishBoardClientJsEmittedOnlyForBoardLayout() {
   var boardResult = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
   assert.strictEqual(boardResult.status, 'success', 'expected the shimmed board run to succeed, got: ' + boardResult.error);
   var boardHtml = getHtml();
-  assert.ok(/viewport\.addEventListener\("wheel"/.test(boardHtml), 'expected the board wheel-zoom listener, got: ' + boardHtml);
-  assert.ok(/viewport\.addEventListener\("mousedown"/.test(boardHtml), 'expected the board pan listener, got: ' + boardHtml);
+  assert.ok(/d3\.zoom\(\)\.scaleExtent\(\[0\.25, 2\]\)/.test(boardHtml), 'expected the d3.zoom() pan/zoom setup, got: ' + boardHtml);
+  assert.ok(/d3\.select\(viewport\)\.call\(zoom\)/.test(boardHtml), 'expected the zoom behavior attached to the viewport, got: ' + boardHtml);
 
   var linearResult = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
   assert.strictEqual(linearResult.status, 'success', 'expected the shimmed linear run to succeed, got: ' + linearResult.error);
   var linearHtml = getHtml();
   assert.ok(!/board-viewport/.test(linearHtml), 'expected no board markup on a layout:"linear" report, got: ' + linearHtml);
-  assert.ok(!/viewport\.addEventListener\("wheel"/.test(linearHtml), 'expected no board client JS on a layout:"linear" report, got: ' + linearHtml);
+  assert.ok(!/d3\.zoom\(\)/.test(linearHtml), 'expected no board pan/zoom client JS on a layout:"linear" report, got: ' + linearHtml);
 }
 
 function testPublishBoardClientJsClampsZoomAndAppliesTransform() {
@@ -209,8 +166,31 @@ function testPublishBoardClientJsClampsZoomAndAppliesTransform() {
   var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
-  assert.ok(/Math\.min\(2, Math\.max\(0\.25, zoom \+ delta\)\)/.test(html), 'expected zoom clamped to [0.25, 2], got: ' + html);
-  assert.ok(/canvas\.style\.transform = "translate\("/.test(html), 'expected the pan\/zoom transform application, got: ' + html);
+  assert.ok(/scaleExtent\(\[0\.25, 2\]\)/.test(html), 'expected zoom clamped to [0.25, 2] via d3.zoom().scaleExtent, got: ' + html);
+  // A mousedown/touchstart bubbling up from inside a .board-node (a
+  // resize-grip drag, a chart click, a table sort) must not also start a
+  // pan gesture - both would fight over the same pointer session.
+  // Confirmed via CDP: a resize drag felt like it kept tracking the
+  // cursor past mouseup before this filter existed.
+  assert.ok(/event\.target\.closest\(".board-node"\)/.test(html), 'expected zoom.filter() to exclude drags starting inside a .board-node, got: ' + html);
+  // event.transform.toString() produces SVG-style unitless "translate(x,y)"
+  // - invalid CSS on an HTML element's style.transform (requires px units),
+  // so the browser silently rejects the whole assignment and the canvas
+  // never visibly moves, even though d3-zoom's internal state updates
+  // correctly. Confirmed via a real headless-Chrome CDP session during
+  // Layer 2 verification: __zoom tracked drag/wheel gestures perfectly,
+  // but canvas.style.transform stayed empty the entire time.
+  assert.ok(/canvas\.style\.transform = "translate\(" \+ event\.transform\.x \+ "px," \+ event\.transform\.y \+ "px\) scale\(" \+ event\.transform\.k \+ "\)"/.test(html), 'expected the pan\/zoom transform applied with explicit px units, got: ' + html);
+  assert.ok(!/event\.transform\.toString\(\)/.test(html), 'expected event.transform.toString() (invalid, unitless CSS) to not be used, got: ' + html);
+}
+
+function testPublishBoardLoadsD3EvenWithoutCharts() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category'], [['A']]);
+  var result = ctx.NotSoBigData.cli('run --select boardTablesOnlyPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/<script src="https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/d3\//.test(html), 'expected the D3 CDN script tag on a chart-less board layout report, got: ' + html);
 }
 
 // Native CSS resize (the same browser-drawn grip a <textarea> has), not
@@ -229,6 +209,84 @@ function testPublishBoardNodesAreNativelyResizable() {
   assert.ok(boardNodeRule, 'expected a .board-node CSS rule, got: ' + html);
   assert.ok(/resize:\s*both/.test(boardNodeRule[0]), 'expected resize: both on .board-node, got: ' + boardNodeRule[0]);
   assert.ok(/min-width:/.test(boardNodeRule[0]) && /min-height:/.test(boardNodeRule[0]), 'expected a min-width/min-height floor on .board-node, got: ' + boardNodeRule[0]);
+}
+
+// Task 2: renderBoardCanvas no longer computes positions - it wraps each
+// block's markup in an unpositioned .board-node (data-block-id is the
+// only thing Task 3's client script needs to find it), and #board-edges
+// starts empty. The fixed box size moves from a per-node inline style
+// into .board-node's own CSS rule instead - one declaration instead of
+// N identical inline ones.
+function testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  ['r', 'c1', 'c2'].forEach(function (id) {
+    var needle = '<div class="board-node" data-block-id="' + id + '">';
+    assert.ok(html.indexOf(needle) !== -1, 'expected an unpositioned board-node for "' + id + '", got: ' + html);
+  });
+  assert.ok(!/board-node[^>]*style=/.test(html), 'expected no inline style on any board-node (positioning moved client-side), got: ' + html);
+  assert.ok(html.indexOf('<svg class="board-edges" id="board-edges"></svg>') !== -1, 'expected an empty board-edges svg with no width/height/paths baked in, got: ' + html);
+  assert.strictEqual((html.match(/class="board-edge"/g) || []).length, 0, 'expected zero server-rendered edges (drawn client-side now), got: ' + html);
+
+  var boardNodeRule = html.match(/\.board-node\s*\{[^}]*\}/);
+  assert.ok(boardNodeRule, 'expected a .board-node CSS rule, got: ' + html);
+  assert.ok(/width:\s*520px/.test(boardNodeRule[0]) && /height:\s*340px/.test(boardNodeRule[0]), 'expected the fixed box size baked into .board-node CSS instead of per-node inline style, got: ' + boardNodeRule[0]);
+}
+
+// Task 3: BOARD_LAYOUT_CLIENT_JS computes positions in the browser via
+// d3.stratify()/d3.tree() - can't be exercised end-to-end in Node (no
+// DOM/d3 in the harness, same reason CHART_CLIENT_JS's actual D3 drawing
+// is Layer-2-only, see src/publish.md), so this only asserts the script
+// is emitted with the right shape: the synthetic-root sentinel (needed
+// because relatesTo is a forest and d3.stratify() requires exactly one
+// root), and nodeSize computed from BOARD_BOX_WIDTH/HEIGHT/H_GAP/V_GAP
+// (520+40=560, 340+60=400).
+function testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+
+  var boardResult = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(boardResult.status, 'success', 'expected the shimmed board run to succeed, got: ' + boardResult.error);
+  var boardHtml = getHtml();
+  assert.ok(/d3\.stratify\(\)/.test(boardHtml), 'expected d3.stratify() in the board client script, got: ' + boardHtml);
+  assert.ok(/__board_root__/.test(boardHtml), 'expected the synthetic-root sentinel id, got: ' + boardHtml);
+  assert.ok(/d3\.tree\(\)\.nodeSize\(\[560, 400\]\)/.test(boardHtml), 'expected nodeSize([BOARD_BOX_WIDTH+BOARD_H_GAP, BOARD_BOX_HEIGHT+BOARD_V_GAP]) = [560, 400], got: ' + boardHtml);
+
+  var linearResult = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(linearResult.status, 'success', 'expected the shimmed linear run to succeed, got: ' + linearResult.error);
+  var linearHtml = getHtml();
+  assert.ok(!/d3\.stratify\(\)/.test(linearHtml), 'expected no board layout client JS on a layout:"linear" report, got: ' + linearHtml);
+}
+
+// Two follow-ups from Layer 2 verification: (1) the board used to open at
+// identity transform, leaving nodes below/beside the viewport invisible
+// with no hint they existed - BOARD_LAYOUT_CLIENT_JS now exposes the
+// tree's bounding box for BOARD_CLIENT_JS to fit/center on load; (2) a
+// node's edge used to be computed once from the fixed BOARD_BOX_WIDTH/
+// HEIGHT, so resizing a node (native CSS resize:both) visually detached
+// its edge from the new box - redrawEdges() now reads live offsetLeft/
+// offsetTop/offsetWidth/offsetHeight instead, and a ResizeObserver calls
+// it again whenever any node's size changes.
+function testPublishBoardExposesBoundsAndRedrawsEdgesOnResize() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/window\.__BOARD_BOUNDS__ = \{ minX: 0, minY: minY, maxX: maxX, maxY: maxY \}/.test(html), 'expected the layout script to expose its bounding box for fit-to-view, got: ' + html);
+  assert.ok(/function redrawEdges\(\)/.test(html), 'expected a reusable redrawEdges() function, got: ' + html);
+  assert.ok(/fromEl\.offsetLeft \+ fromEl\.offsetWidth \/ 2/.test(html), 'expected edge endpoints computed from live offsetLeft\/offsetWidth, not the fixed box size, got: ' + html);
+  assert.ok(/new ResizeObserver\(redrawEdges\)/.test(html), 'expected a ResizeObserver wired to redrawEdges, got: ' + html);
+  assert.ok(/resizeObserver\.observe\(el\)/.test(html), 'expected every real node to be observed, got: ' + html);
+
+  assert.ok(/var bounds = window\.__BOARD_BOUNDS__;/.test(html), 'expected BOARD_CLIENT_JS to read the exposed bounds, got: ' + html);
+  assert.ok(/d3\.zoomIdentity\.translate\(/.test(html), 'expected a d3.zoomIdentity-based fit transform, got: ' + html);
+  assert.ok(/d3\.select\(viewport\)\.call\(zoom\.transform, fit\)/.test(html), 'expected the fit transform applied via zoom.transform, got: ' + html);
 }
 
 // Shims BigQuery.Tables.get/Tabledata.list and DriveApp.getFolderById
@@ -375,6 +433,50 @@ function testPublishTableModeMustBeRawOrAggregated() {
   var result = runOne('badTableModePublish');
   assert.strictEqual(result.status, 'failed');
   assert.ok(/mode "raw" or "aggregated"/.test(result.error), 'expected a table-mode error, got: ' + result.error);
+}
+
+// Task 1: buildReportPayload now attaches relatesTo to every chart/table
+// payload entry (null when not declared) - the client-side layout script
+// (Task 3) needs this to rebuild the relatesTo graph in the browser,
+// since positioning no longer happens server-side. Attached
+// unconditionally (not gated on layout:'board'), same posture "detail"
+// already has - so a plain layout:'linear' report gets relatesTo: null
+// on every block too, asserted below via aggregationPublish.
+function testPublishPayloadCarriesRelatesToPerBlock() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+
+  var boardResult = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(boardResult.status, 'success', 'expected the shimmed board run to succeed, got: ' + boardResult.error);
+  var boardPayload = extractPayload(getHtml());
+  var root = boardPayload.charts.filter(function (c) { return c.id === 'r'; })[0];
+  var childChart = boardPayload.charts.filter(function (c) { return c.id === 'c1'; })[0];
+  var childTable = boardPayload.tables.filter(function (t) { return t.id === 'c2'; })[0];
+  assert.strictEqual(root.relatesTo, null, 'expected the root chart\'s relatesTo to be null, got: ' + JSON.stringify(root));
+  assert.strictEqual(childChart.relatesTo, 'r', 'expected the child chart\'s relatesTo to round-trip into the payload, got: ' + JSON.stringify(childChart));
+  assert.strictEqual(childTable.relatesTo, 'r', 'expected the child table\'s relatesTo to round-trip into the payload, got: ' + JSON.stringify(childTable));
+
+  var chainResult = ctx.NotSoBigData.cli('run --select boardChainPublish').nodes[0];
+  assert.strictEqual(chainResult.status, 'success', 'expected the shimmed chain run to succeed, got: ' + chainResult.error);
+  var chainPayload = extractPayload(getHtml());
+  var g = chainPayload.charts.filter(function (c) { return c.id === 'g'; })[0];
+  var p = chainPayload.charts.filter(function (c) { return c.id === 'p'; })[0];
+  var c = chainPayload.tables.filter(function (t) { return t.id === 'c'; })[0];
+  assert.strictEqual(g.relatesTo, null, 'expected chain root "g" relatesTo null, got: ' + JSON.stringify(g));
+  assert.strictEqual(p.relatesTo, 'g', 'expected chain middle "p" relatesTo "g", got: ' + JSON.stringify(p));
+  assert.strictEqual(c.relatesTo, 'p', 'expected chain leaf "c" relatesTo "p", got: ' + JSON.stringify(c));
+
+  var multiRootResult = ctx.NotSoBigData.cli('run --select boardMultiRootPublish').nodes[0];
+  assert.strictEqual(multiRootResult.status, 'success', 'expected the shimmed multi-root run to succeed, got: ' + multiRootResult.error);
+  var multiRootPayload = extractPayload(getHtml());
+  multiRootPayload.charts.forEach(function (chart) {
+    assert.strictEqual(chart.relatesTo, null, 'expected every multi-root chart to have relatesTo null, got: ' + JSON.stringify(chart));
+  });
+
+  var linearResult = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(linearResult.status, 'success', 'expected the shimmed linear run to succeed, got: ' + linearResult.error);
+  var linearPayload = extractPayload(getHtml());
+  assert.strictEqual(linearPayload.charts[0].relatesTo, null, 'expected a layout:"linear" chart with no relatesTo declared to default to null, got: ' + JSON.stringify(linearPayload.charts[0]));
 }
 
 function testPublishRawTableRequiresColumns() {
@@ -1997,63 +2099,6 @@ function testPublishButtonsAndSelectsInheritThemedTextColor() {
   assert.ok(/\.table-csv-export\s*\{[^}]*background:\s*var\(--paper\)/.test(html), 'expected .table-csv-export to have its own themed background (not bare native chrome), got: ' + html);
 }
 
-// computeBoardLayout task: the naive placement gave every leaf a slot
-// from one global counter, so a subtree that fans out wide at a *deeper*
-// level than its sibling's own immediate children still pushed that
-// sibling as far right as the fanned-out subtree's total leaf count,
-// even though at no single depth do all those leaves actually compete
-// for space. The contour-based rewrite clears each sibling only as far
-// as the real per-depth overlap requires.
-//
-// Fixture "boardLopsidedPublish": root r -> {bushy, narrow} (bushy first).
-// bushy -> {b1 (leaf), b2 (-> b2x, b2y, both leaves)}. narrow is a lone
-// leaf. Hand-traced against the contour algorithm (BOARD_BOX_WIDTH=520,
-// BOARD_H_GAP=40, BOARD_BOX_HEIGHT=340, BOARD_V_GAP=60):
-//   r=(560,0) bushy=(280,400) narrow=(840,400)
-//   b1=(0,800) b2=(560,800) b2x=(280,1200) b2y=(840,1200)
-// The old leaf-slot algorithm would have placed narrow at x=1680 (one
-// slot past all 3 of bushy's leaves, counted globally) instead of x=840
-// (one slot past bushy's own worst-case per-depth width, which is 2, not
-// 3, since b1 and b2 share a depth but b1 doesn't coexist with b2x/b2y) -
-// asserting narrow's exact x is the concrete proof the rewrite is doing
-// real contour clearance, not just a relabeled leaf count.
-function testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select boardLopsidedPublish').nodes[0];
-  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
-  var html = getHtml();
-
-  var expected = {
-    r: [560, 0], bushy: [280, 400], narrow: [840, 400],
-    b1: [0, 800], b2: [560, 800], b2x: [280, 1200], b2y: [840, 1200]
-  };
-  Object.keys(expected).forEach(function (id) {
-    var xy = expected[id];
-    var needle = 'left:' + xy[0] + 'px;top:' + xy[1] + 'px';
-    assert.ok(html.indexOf(needle) !== -1, 'expected "' + id + '" at (' + xy[0] + ',' + xy[1] + '), got: ' + html);
-  });
-  assert.ok(html.indexOf('left:1680px;top:400px') === -1, 'expected narrow NOT to land at the old leaf-slot-counted x=1680, got: ' + html);
-
-  // General safety net, independent of the hand-traced numbers above: no
-  // two rendered board-node rectangles may overlap, for any tree shape.
-  var boxes = [];
-  var re = /left:(-?\d+)px;top:(-?\d+)px;width:(\d+)px;height:(\d+)px/g;
-  var m;
-  while ((m = re.exec(html))) {
-    boxes.push({ x: +m[1], y: +m[2], w: +m[3], h: +m[4] });
-  }
-  assert.strictEqual(boxes.length, 7, 'expected 7 positioned board nodes, got ' + boxes.length + ' in: ' + html);
-  for (var i = 0; i < boxes.length; i++) {
-    for (var j = i + 1; j < boxes.length; j++) {
-      var a = boxes[i], b = boxes[j];
-      var overlapX = a.x < b.x + b.w && b.x < a.x + a.w;
-      var overlapY = a.y < b.y + b.h && b.y < a.y + a.h;
-      assert.ok(!(overlapX && overlapY), 'expected no overlap between board nodes ' + JSON.stringify(a) + ' and ' + JSON.stringify(b));
-    }
-  }
-}
-
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -2073,16 +2118,18 @@ module.exports = {
   testPublishBoardDuplicateCrossTypeIdRejected: testPublishBoardDuplicateCrossTypeIdRejected,
   testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo: testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo,
   testPublishBoardValidRelationsProceedPastValidation: testPublishBoardValidRelationsProceedPastValidation,
-  testPublishBoardLayoutPositionsSingleRootTwoChildren: testPublishBoardLayoutPositionsSingleRootTwoChildren,
-  testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine: testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine,
-  testPublishBoardLayoutPlacesMultipleRootsSideBySide: testPublishBoardLayoutPlacesMultipleRootsSideBySide,
   testPublishBoardClientJsEmittedOnlyForBoardLayout: testPublishBoardClientJsEmittedOnlyForBoardLayout,
   testPublishBoardClientJsClampsZoomAndAppliesTransform: testPublishBoardClientJsClampsZoomAndAppliesTransform,
+  testPublishBoardLoadsD3EvenWithoutCharts: testPublishBoardLoadsD3EvenWithoutCharts,
   testPublishBoardNodesAreNativelyResizable: testPublishBoardNodesAreNativelyResizable,
+  testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout: testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout,
+  testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize: testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize,
+  testPublishBoardExposesBoundsAndRedrawsEdgesOnResize: testPublishBoardExposesBoundsAndRedrawsEdgesOnResize,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
   testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,
   testPublishTableModeMustBeRawOrAggregated: testPublishTableModeMustBeRawOrAggregated,
+  testPublishPayloadCarriesRelatesToPerBlock: testPublishPayloadCarriesRelatesToPerBlock,
   testPublishRawTableRequiresColumns: testPublishRawTableRequiresColumns,
   testPublishRawTableColumnRequiresField: testPublishRawTableColumnRequiresField,
   testPublishAggregatedTableRequiresGroupBy: testPublishAggregatedTableRequiresGroupBy,
@@ -2178,6 +2225,5 @@ module.exports = {
   testPublishThemeToggleClickHandlerPersistsChoice: testPublishThemeToggleClickHandlerPersistsChoice,
   testPublishLineChartUsesVarTealNotHardcodedHex: testPublishLineChartUsesVarTealNotHardcodedHex,
   testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard: testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard,
-  testPublishButtonsAndSelectsInheritThemedTextColor: testPublishButtonsAndSelectsInheritThemedTextColor,
-  testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth: testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth
+  testPublishButtonsAndSelectsInheritThemedTextColor: testPublishButtonsAndSelectsInheritThemedTextColor
 };
