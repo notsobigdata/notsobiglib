@@ -1481,7 +1481,7 @@ var BOARD_CLIENT_JS = [
   '  var zoom = d3.zoom().scaleExtent([0.25, 2])',
   '    .on("start", function () { viewport.classList.add("board-panning"); })',
   '    .on("end", function () { viewport.classList.remove("board-panning"); })',
-  '    .on("zoom", function (event) { canvas.style.transform = event.transform.toString(); });',
+  '    .on("zoom", function (event) { canvas.style.transform = "translate(" + event.transform.x + "px," + event.transform.y + "px) scale(" + event.transform.k + ")"; });',
   '  d3.select(viewport).call(zoom);',
   '});'
 ].join('\n');

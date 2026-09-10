@@ -167,7 +167,15 @@ function testPublishBoardClientJsClampsZoomAndAppliesTransform() {
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
   assert.ok(/scaleExtent\(\[0\.25, 2\]\)/.test(html), 'expected zoom clamped to [0.25, 2] via d3.zoom().scaleExtent, got: ' + html);
-  assert.ok(/canvas\.style\.transform = event\.transform\.toString\(\)/.test(html), 'expected the pan\/zoom transform application via d3-zoom\'s event.transform, got: ' + html);
+  // event.transform.toString() produces SVG-style unitless "translate(x,y)"
+  // - invalid CSS on an HTML element's style.transform (requires px units),
+  // so the browser silently rejects the whole assignment and the canvas
+  // never visibly moves, even though d3-zoom's internal state updates
+  // correctly. Confirmed via a real headless-Chrome CDP session during
+  // Layer 2 verification: __zoom tracked drag/wheel gestures perfectly,
+  // but canvas.style.transform stayed empty the entire time.
+  assert.ok(/canvas\.style\.transform = "translate\(" \+ event\.transform\.x \+ "px," \+ event\.transform\.y \+ "px\) scale\(" \+ event\.transform\.k \+ "\)"/.test(html), 'expected the pan\/zoom transform applied with explicit px units, got: ' + html);
+  assert.ok(!/event\.transform\.toString\(\)/.test(html), 'expected event.transform.toString() (invalid, unitless CSS) to not be used, got: ' + html);
 }
 
 function testPublishBoardLoadsD3EvenWithoutCharts() {
