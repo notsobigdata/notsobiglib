@@ -1511,12 +1511,29 @@ var BOARD_LAYOUT_CLIENT_JS = [
 // box BOARD_LAYOUT_CLIENT_JS already computed for #board-edges' sizing -
 // scale is clamped to the same [0.25, 2] range as manual zoom, and 0.9
 // leaves a small margin around the tree rather than touching the edges.
+//
+// `.filter()` excludes a drag-start (mousedown/touchstart) whose target
+// sits inside any .board-node from also starting a pan gesture - without
+// this, every mousedown bubbles up to the viewport where d3.zoom listens,
+// so dragging a node's native CSS resize grip (or clicking a chart bar,
+// sorting a table column, hitting "Export CSV"...) would *also* register
+// as a pan-start, fighting the node's own interaction for the same
+// pointer session (found during Layer 2 verification: a node's resize
+// felt like it kept tracking the cursor past mouseup). Wheel-zoom is
+// untouched - scrolling to zoom while the pointer happens to be over a
+// node's content is expected, only drag-to-pan needs this exclusion.
 var BOARD_CLIENT_JS = [
   'document.addEventListener("DOMContentLoaded", function () {',
   '  var viewport = document.querySelector(".board-viewport");',
   '  var canvas = document.getElementById("board-canvas");',
   '  if (!viewport || !canvas) { return; }',
   '  var zoom = d3.zoom().scaleExtent([0.25, 2])',
+  '    .filter(function (event) {',
+  '      if (event.ctrlKey && event.type !== "wheel") { return false; }',
+  '      if (event.button) { return false; }',
+  '      if ((event.type === "mousedown" || event.type === "touchstart") && event.target.closest(".board-node")) { return false; }',
+  '      return true;',
+  '    })',
   '    .on("start", function () { viewport.classList.add("board-panning"); })',
   '    .on("end", function () { viewport.classList.remove("board-panning"); })',
   '    .on("zoom", function (event) { canvas.style.transform = "translate(" + event.transform.x + "px," + event.transform.y + "px) scale(" + event.transform.k + ")"; });',
