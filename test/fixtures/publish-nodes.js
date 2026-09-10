@@ -327,6 +327,22 @@ var boardMultiRootPublish = {
   ]
 };
 
+// Board layout with zero charts[] - exercises the d3Script inclusion
+// fix (Task 5): layout:'board' must load D3 even when payload.charts.length
+// is 0, since both positioning (Task 3) and pan/zoom (Task 4) need it now.
+var boardTablesOnlyPublish = {
+  kind: 'publish',
+  name: 'boardTablesOnlyPublish',
+  dependsOn: ['moveWithBigQueryTarget'],
+  source: { type: 'ref', ref: 'moveWithBigQueryTarget' },
+  target: { type: 'drive', folderId: 'folder-id', fileName: 'board-tables-only.html' },
+  layout: { type: 'board' },
+  tables: [
+    { id: 'parent', title: 'Parent', mode: 'raw', columns: [{ field: 'category' }] },
+    { id: 'child', title: 'Child', mode: 'raw', columns: [{ field: 'category' }], relatesTo: 'parent' }
+  ]
+};
+
 // One raw table (columns: order_id, revenue) and one aggregated table
 // (groupBy: category, metrics: revenue sum + distinct orders), pageSize 2
 // on the raw table so Task 3's pagination tests have >1 page to work

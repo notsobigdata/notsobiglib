@@ -5599,7 +5599,7 @@ var NotSoBigData = (function () {
     if (hasDetail) {
       script += DETAIL_CLIENT_JS;
     }
-    var d3Script = payload.charts.length ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
+    var d3Script = (payload.charts.length || isBoardLayout) ? '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>' : '';
     var themeInitScript = '<script>' + THEME_INIT_JS + '</script>';
     var css = REPORT_CSS + (hasDetail ? TABLE_DETAIL_CSS : '') + (isBoardLayout ? BOARD_CSS : '');
     var blocks = isBoardLayout

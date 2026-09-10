@@ -170,6 +170,15 @@ function testPublishBoardClientJsClampsZoomAndAppliesTransform() {
   assert.ok(/canvas\.style\.transform = event\.transform\.toString\(\)/.test(html), 'expected the pan\/zoom transform application via d3-zoom\'s event.transform, got: ' + html);
 }
 
+function testPublishBoardLoadsD3EvenWithoutCharts() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category'], [['A']]);
+  var result = ctx.NotSoBigData.cli('run --select boardTablesOnlyPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/<script src="https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/d3\//.test(html), 'expected the D3 CDN script tag on a chart-less board layout report, got: ' + html);
+}
+
 // Native CSS resize (the same browser-drawn grip a <textarea> has), not
 // custom JS - .board-node already has overflow:auto, the one
 // precondition `resize` needs. min-width/min-height keep a node from
@@ -2070,6 +2079,7 @@ module.exports = {
   testPublishBoardValidRelationsProceedPastValidation: testPublishBoardValidRelationsProceedPastValidation,
   testPublishBoardClientJsEmittedOnlyForBoardLayout: testPublishBoardClientJsEmittedOnlyForBoardLayout,
   testPublishBoardClientJsClampsZoomAndAppliesTransform: testPublishBoardClientJsClampsZoomAndAppliesTransform,
+  testPublishBoardLoadsD3EvenWithoutCharts: testPublishBoardLoadsD3EvenWithoutCharts,
   testPublishBoardNodesAreNativelyResizable: testPublishBoardNodesAreNativelyResizable,
   testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout: testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout,
   testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize: testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize,
