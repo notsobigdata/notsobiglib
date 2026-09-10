@@ -214,6 +214,31 @@ function testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout() {
   assert.ok(/width:\s*520px/.test(boardNodeRule[0]) && /height:\s*340px/.test(boardNodeRule[0]), 'expected the fixed box size baked into .board-node CSS instead of per-node inline style, got: ' + boardNodeRule[0]);
 }
 
+// Task 3: BOARD_LAYOUT_CLIENT_JS computes positions in the browser via
+// d3.stratify()/d3.tree() - can't be exercised end-to-end in Node (no
+// DOM/d3 in the harness, same reason CHART_CLIENT_JS's actual D3 drawing
+// is Layer-2-only, see src/publish.md), so this only asserts the script
+// is emitted with the right shape: the synthetic-root sentinel (needed
+// because relatesTo is a forest and d3.stratify() requires exactly one
+// root), and nodeSize computed from BOARD_BOX_WIDTH/HEIGHT/H_GAP/V_GAP
+// (520+40=560, 340+60=400).
+function testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+
+  var boardResult = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(boardResult.status, 'success', 'expected the shimmed board run to succeed, got: ' + boardResult.error);
+  var boardHtml = getHtml();
+  assert.ok(/d3\.stratify\(\)/.test(boardHtml), 'expected d3.stratify() in the board client script, got: ' + boardHtml);
+  assert.ok(/__board_root__/.test(boardHtml), 'expected the synthetic-root sentinel id, got: ' + boardHtml);
+  assert.ok(/d3\.tree\(\)\.nodeSize\(\[560, 400\]\)/.test(boardHtml), 'expected nodeSize([BOARD_BOX_WIDTH+BOARD_H_GAP, BOARD_BOX_HEIGHT+BOARD_V_GAP]) = [560, 400], got: ' + boardHtml);
+
+  var linearResult = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
+  assert.strictEqual(linearResult.status, 'success', 'expected the shimmed linear run to succeed, got: ' + linearResult.error);
+  var linearHtml = getHtml();
+  assert.ok(!/d3\.stratify\(\)/.test(linearHtml), 'expected no board layout client JS on a layout:"linear" report, got: ' + linearHtml);
+}
+
 // Shims BigQuery.Tables.get/Tabledata.list and DriveApp.getFolderById
 // directly on the harness's vm sandbox (harness.loadContext returns the
 // actual global object for that vm context, so adding properties to it
@@ -2047,6 +2072,7 @@ module.exports = {
   testPublishBoardClientJsClampsZoomAndAppliesTransform: testPublishBoardClientJsClampsZoomAndAppliesTransform,
   testPublishBoardNodesAreNativelyResizable: testPublishBoardNodesAreNativelyResizable,
   testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout: testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout,
+  testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize: testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
   testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,

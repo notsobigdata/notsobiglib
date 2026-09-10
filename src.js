@@ -5416,6 +5416,59 @@ var NotSoBigData = (function () {
     '});'
   ].join('\n');
 
+  // Client-side board layout via d3-hierarchy - runs on DOMContentLoaded,
+  // before BOARD_CLIENT_JS's pan/zoom setup (registered right after it in
+  // the same script, so it always executes first - see renderReportHtml).
+  // Rebuilds the relatesTo graph from window.__PUBLISH_PAYLOAD__ (server
+  // no longer computes positions, see renderBoardCanvas), wraps it in one
+  // synthetic root (d3.stratify() requires exactly one; relatesTo is a
+  // forest - zero or more independent roots), runs d3.tree(), then shifts
+  // every x by -minX so no real node lands at a negative style.left (d3.tree()
+  // centers the root at x=0 and spreads children on both sides, unlike the
+  // deleted contour algorithm which always started at 0). See
+  // docs/superpowers/specs/2026-09-09-publish-board-d3-layout-design.md §4.
+  var BOARD_LAYOUT_CLIENT_JS = [
+    'document.addEventListener("DOMContentLoaded", function () {',
+    '  var payload = window.__PUBLISH_PAYLOAD__;',
+    '  var blocks = payload.charts.concat(payload.tables);',
+    '  var rootId = "__board_root__";',
+    '  var nodesData = blocks.map(function (b) { return { id: b.id, relatesTo: b.relatesTo }; });',
+    '  nodesData.push({ id: rootId, relatesTo: null });',
+    '  nodesData.forEach(function (n) { if (n.id !== rootId && !n.relatesTo) { n.relatesTo = rootId; } });',
+    '  var stratify = d3.stratify().id(function (n) { return n.id; }).parentId(function (n) { return n.relatesTo; });',
+    '  var root = stratify(nodesData);',
+    '  var treeLayout = d3.tree().nodeSize([' + (BOARD_BOX_WIDTH + BOARD_H_GAP) + ', ' + (BOARD_BOX_HEIGHT + BOARD_V_GAP) + ']);',
+    '  treeLayout(root);',
+    '  var realNodes = root.descendants().filter(function (n) { return n.id !== rootId; });',
+    '  if (!realNodes.length) { return; }',
+    '  var minX = Math.min.apply(null, realNodes.map(function (n) { return n.x; }));',
+    '  var positionById = {};',
+    '  realNodes.forEach(function (n) {',
+    '    var x = n.x - minX;',
+    '    positionById[n.id] = { x: x, y: n.y };',
+    '    var el = document.querySelector("[data-block-id=\\"" + n.id + "\\"]");',
+    '    if (el) { el.style.left = x + "px"; el.style.top = n.y + "px"; }',
+    '  });',
+    '  var edges = blocks.filter(function (b) { return b.relatesTo; }).map(function (b) { return { from: b.relatesTo, to: b.id }; });',
+    '  var maxX = 0, maxY = 0;',
+    '  realNodes.forEach(function (n) {',
+    '    var p = positionById[n.id];',
+    '    maxX = Math.max(maxX, p.x + ' + BOARD_BOX_WIDTH + ');',
+    '    maxY = Math.max(maxY, p.y + ' + BOARD_BOX_HEIGHT + ');',
+    '  });',
+    '  var svg = document.getElementById("board-edges");',
+    '  svg.setAttribute("width", maxX);',
+    '  svg.setAttribute("height", maxY);',
+    '  var edgePaths = edges.map(function (e) {',
+    '    var from = positionById[e.from], to = positionById[e.to];',
+    '    var x1 = from.x + ' + (BOARD_BOX_WIDTH / 2) + ', y1 = from.y + ' + BOARD_BOX_HEIGHT + ';',
+    '    var x2 = to.x + ' + (BOARD_BOX_WIDTH / 2) + ', y2 = to.y;',
+    '    return "<path class=\\"board-edge\\" d=\\"M" + x1 + " " + y1 + " L" + x2 + " " + y2 + "\\"></path>";',
+    '  });',
+    '  svg.innerHTML = edgePaths.join("");',
+    '});'
+  ].join('\n');
+
   // Pan (mouse/touch drag) + zoom (wheel), vanilla JS/CSS transform, no
   // library - see the design spec's §5. Self-contained: its own
   // DOMContentLoaded listener, independent of TABLE_CLIENT_JS/
@@ -5550,6 +5603,7 @@ var NotSoBigData = (function () {
       script += CHART_CLIENT_JS;
     }
     if (isBoardLayout) {
+      script += BOARD_LAYOUT_CLIENT_JS;
       script += BOARD_CLIENT_JS;
     }
     if (hasFilters) {
