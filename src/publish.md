@@ -392,33 +392,82 @@ live reference, is the only version that stays in sync.
 
 ## Board layout (`layout: 'board'`)
 
-`computeBoardLayout(charts, tables)` is a simple tidy-tree walk, not a
-full Reingold-Tilford implementation: each parent centers over its
-children's already-computed x positions, and a shared `nextSlot` counter
-(incremented once per leaf, across every root's DFS walk) is what makes
-multiple independent roots land side by side automatically - no separate
-"offset this root past the previous tree's total width" step was needed,
-which is simpler than the design spec originally sketched (per-root
-subtree-width bookkeeping) once the shared-counter trick was in hand.
+Position computation moved from server-side (a hand-rolled contour-tree
+walk, `computeBoardLayout`/`layoutSubtree`/`shiftPastSiblingContour`/
+`mergeContour` — now deleted) to client-side, via D3's own
+`d3.stratify()`/`d3.tree()` (`BOARD_LAYOUT_CLIENT_JS`) — see
+`docs/superpowers/specs/2026-09-09-publish-board-d3-layout-design.md`
+for the full rationale (the driving constraint: this library ships as
+one `eval()`'d file with no npm/bundler, so `d3-hierarchy` can only ever
+run where D3 already runs — the reader's browser, not the GAS runtime
+`renderBoardCanvas` executes in). `relatesTo` is a forest (zero or more
+independent roots), but `d3.stratify()` requires exactly one root, so
+`BOARD_LAYOUT_CLIENT_JS` prepends a synthetic `__board_root__` node and
+points every real root at it before calling `stratify()` — this also
+gets every independent tree positioned side by side in one `d3.tree()`
+call, for free, which is the actual "full apportionment" upgrade the
+old contour algorithm's ceiling comment used to say wasn't worth a
+second hand-written pass.
+
+`d3.tree()` centers its root at `x = 0` and spreads children on both
+sides, so real nodes can land at negative `x` — unlike the deleted
+contour algorithm, which always started at `0`. `BOARD_LAYOUT_CLIENT_JS`
+shifts every node's `x` by `-minX` (the minimum `x` across all real,
+non-synthetic nodes) before writing any `style.left`, so nothing ever
+gets a negative position.
+
+Edges are **not** taken from `d3.tree()`'s own link objects — they're
+built directly from each block's `relatesTo` field (now attached to
+every payload entry by `buildReportPayload`, unconditionally — same
+"attach per-block, not gated on layout mode" posture `detail` already
+has), the same `{from, to}` shape the deleted `computeBoardLayout`'s
+`edges` array used to produce server-side. The `<path>` drawing itself
+(straight line, parent-bottom-midpoint to child-top-midpoint) is
+unchanged — only which side computes the coordinates moved.
+
+`BOARD_BOX_WIDTH`/`BOARD_BOX_HEIGHT`/`BOARD_H_GAP`/`BOARD_V_GAP` survive
+the rewrite, repurposed: `BOARD_CSS`'s `.board-node` rule now bakes
+`BOARD_BOX_WIDTH`/`BOARD_BOX_HEIGHT` in directly (replacing the old
+per-node inline `style="width:...;height:..."`), and the same four
+numbers are serialized as literal numbers into `BOARD_LAYOUT_CLIENT_JS`'s
+`d3.tree().nodeSize([...])` call — one source of truth in this
+server-side file, read by both CSS generation and the emitted client
+script.
+
+`BOARD_CLIENT_JS` (pan/zoom) is now a thin `d3.zoom()` setup instead of
+hand-rolled `mousedown`/`touchstart`/`wheel` listeners — same
+`.board-viewport`/`.board-canvas`/`.board-panning` CSS contract as
+before (`canvas.style.transform`, `.board-panning` toggled on
+drag-start/end), same `scaleExtent([0.25, 2])` clamp range, but gains
+real pinch-zoom and double-click-to-zoom for free from `d3.zoom()`'s
+own defaults. It's registered right after `BOARD_LAYOUT_CLIENT_JS` in
+`renderReportHtml`'s script assembly, so positions and edges already
+exist by the time pan/zoom is wired up.
+
+**Testing tradeoff:** `computeBoardLayout`'s own pure-function position
+tests (single root/2 children, 3-level chain, independent roots, a
+lopsided tree's per-depth contour clearance) no longer exist — that
+logic isn't server-side anymore, so it isn't Node-testable anymore.
+Layer 1 now only checks that `relatesTo` round-trips into the payload
+correctly and that the emitted markup/client-script shape is right
+(unpositioned `.board-node`s, empty `#board-edges`, the right
+`nodeSize()` numbers present in the emitted script). Actual tree
+geometry (no overlap, edges connecting the right boxes) is Layer2
+(`notsobigtests`, human-run) territory now — the same posture chart
+pixel-accuracy already has.
 
 `relatesTo` deliberately shares one id namespace across `charts[]` and
 `tables[]` (`validateBoardRelations`'s `registerBlock` check) - every
-other publish() feature keeps chart ids and table ids in separate
+other `publish()` feature keeps chart ids and table ids in separate
 namespaces (duplicate-id checks run independently in
 `validatePublishConfig`'s two per-block loops), but a `relatesTo` value
 has no way to say which array it's pointing into, so this feature alone
-needed the combined-namespace rule. The rule is scoped to `layout.type
-"board"`, not to whether `relatesTo` is actually used anywhere:
-`computeBoardLayout`/`renderBoardCanvas` key a single `positionById`/
-`sectionById` map by id across both arrays unconditionally the moment
-board layout is active, so a chart/table id collision would silently
-drop one block's markup even with no `relatesTo` in sight. `validateBoardRelations`
-therefore runs the combined-namespace check for **every** `board`-layout
-report; only a `linear`-layout report keeps the old independent-namespaces
-behavior, reusing the same id for a chart and a table exactly as before.
+needed the combined-namespace rule. This part is unchanged by the
+rework — `validateBoardRelations` was never touched.
 
 `renderBoardCanvas` reuses `chartSectionsList`/`tableSectionsList` -
 `renderReportHtml`'s per-block markup, computed once, unconditionally,
-regardless of layout - rather than re-deriving chart/table HTML a second
-time for board mode. Both layout modes read from the same two arrays;
-only how they're assembled into the page differs.
+regardless of layout - rather than re-deriving chart/table HTML a
+second time for board mode. Both layout modes read from the same two
+arrays; only how they're assembled into the page (and, now, how
+positions are computed) differs.

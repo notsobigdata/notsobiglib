@@ -326,14 +326,16 @@ tables: [
   chart/table markup, same `reactsTo`/`detail`/`linkKey`/`linkTo`
   behavior) — `relatesTo` only changes where it sits on the page, never
   what it computes or how it reacts.
-- Pan (click-drag or touch-drag) and zoom (mouse wheel, clamped
-  roughly 0.25×–2×) are built in, vanilla JS/CSS — no extra config, no
-  external library.
-- **Known ceiling:** the layout centers each parent over its children
-  but doesn't do full collision-avoiding tree layout, so a very lopsided
-  tree (a long chain next to a wide shallow one) can look uneven rather
-  than tightly packed. Fine for the box counts a dashboard realistically
-  has.
+- Pan (click-drag or touch-drag), zoom (mouse wheel, clamped roughly
+  0.25×–2×), pinch-zoom (touch), and double-click-to-zoom-in are built
+  in via [d3-zoom](https://d3js.org/d3-zoom) — the same D3 bundle
+  `charts[]` already loads, no extra config, no new dependency.
+- Node positions are computed in the reader's browser (via
+  [d3-hierarchy](https://d3js.org/d3-hierarchy)'s tree layout), not at
+  generation time — a real, non-approximate tree layout, and no more
+  "known ceiling" on lopsided trees. This does mean a board needs
+  JavaScript enabled to show any layout at all (it already needed
+  JavaScript for pan/zoom, and for any chart drawn on it).
 
 ### Detail drill-down
 
