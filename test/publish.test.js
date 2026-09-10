@@ -256,6 +256,33 @@ function testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize() {
   assert.ok(!/d3\.stratify\(\)/.test(linearHtml), 'expected no board layout client JS on a layout:"linear" report, got: ' + linearHtml);
 }
 
+// Two follow-ups from Layer 2 verification: (1) the board used to open at
+// identity transform, leaving nodes below/beside the viewport invisible
+// with no hint they existed - BOARD_LAYOUT_CLIENT_JS now exposes the
+// tree's bounding box for BOARD_CLIENT_JS to fit/center on load; (2) a
+// node's edge used to be computed once from the fixed BOARD_BOX_WIDTH/
+// HEIGHT, so resizing a node (native CSS resize:both) visually detached
+// its edge from the new box - redrawEdges() now reads live offsetLeft/
+// offsetTop/offsetWidth/offsetHeight instead, and a ResizeObserver calls
+// it again whenever any node's size changes.
+function testPublishBoardExposesBoundsAndRedrawsEdgesOnResize() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  assert.ok(/window\.__BOARD_BOUNDS__ = \{ minX: 0, minY: minY, maxX: maxX, maxY: maxY \}/.test(html), 'expected the layout script to expose its bounding box for fit-to-view, got: ' + html);
+  assert.ok(/function redrawEdges\(\)/.test(html), 'expected a reusable redrawEdges() function, got: ' + html);
+  assert.ok(/fromEl\.offsetLeft \+ fromEl\.offsetWidth \/ 2/.test(html), 'expected edge endpoints computed from live offsetLeft\/offsetWidth, not the fixed box size, got: ' + html);
+  assert.ok(/new ResizeObserver\(redrawEdges\)/.test(html), 'expected a ResizeObserver wired to redrawEdges, got: ' + html);
+  assert.ok(/resizeObserver\.observe\(el\)/.test(html), 'expected every real node to be observed, got: ' + html);
+
+  assert.ok(/var bounds = window\.__BOARD_BOUNDS__;/.test(html), 'expected BOARD_CLIENT_JS to read the exposed bounds, got: ' + html);
+  assert.ok(/d3\.zoomIdentity\.translate\(/.test(html), 'expected a d3.zoomIdentity-based fit transform, got: ' + html);
+  assert.ok(/d3\.select\(viewport\)\.call\(zoom\.transform, fit\)/.test(html), 'expected the fit transform applied via zoom.transform, got: ' + html);
+}
+
 // Shims BigQuery.Tables.get/Tabledata.list and DriveApp.getFolderById
 // directly on the harness's vm sandbox (harness.loadContext returns the
 // actual global object for that vm context, so adding properties to it
@@ -2091,6 +2118,7 @@ module.exports = {
   testPublishBoardNodesAreNativelyResizable: testPublishBoardNodesAreNativelyResizable,
   testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout: testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout,
   testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize: testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize,
+  testPublishBoardExposesBoundsAndRedrawsEdgesOnResize: testPublishBoardExposesBoundsAndRedrawsEdgesOnResize,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
   testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,

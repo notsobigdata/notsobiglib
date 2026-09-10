@@ -5427,6 +5427,20 @@ var NotSoBigData = (function () {
   // centers the root at x=0 and spreads children on both sides, unlike the
   // deleted contour algorithm which always started at 0). See
   // docs/superpowers/specs/2026-09-09-publish-board-d3-layout-design.md §4.
+  //
+  // Edge <path>s are recomputed from each node element's *live* offsetLeft/
+  // offsetTop/offsetWidth/offsetHeight, not the fixed BOARD_BOX_WIDTH/HEIGHT
+  // used only for the tree's initial spacing - a node's native CSS `resize`
+  // grip (BOARD_CSS's .board-node rule) lets a human grow/shrink it after
+  // load, and an edge computed from the nominal box size would stay visually
+  // anchored to where the box *used to* end. A ResizeObserver on every real
+  // node calls the same redraw function whenever any of them changes size,
+  // so a resized node's edges track it continuously, not just once at load.
+  //
+  // window.__BOARD_BOUNDS__ exposes the tree's nominal bounding box (the
+  // four extremes actually reached by a positioned node) for BOARD_CLIENT_JS
+  // to fit/center the initial pan/zoom against - the two scripts don't share
+  // a closure, so this is the hand-off point.
   var BOARD_LAYOUT_CLIENT_JS = [
     'document.addEventListener("DOMContentLoaded", function () {',
     '  var payload = window.__PUBLISH_PAYLOAD__;',
@@ -5442,6 +5456,7 @@ var NotSoBigData = (function () {
     '  var realNodes = root.descendants().filter(function (n) { return n.id !== rootId; });',
     '  if (!realNodes.length) { return; }',
     '  var minX = Math.min.apply(null, realNodes.map(function (n) { return n.x; }));',
+    '  var minY = Math.min.apply(null, realNodes.map(function (n) { return n.y; }));',
     '  var positionById = {};',
     '  realNodes.forEach(function (n) {',
     '    var x = n.x - minX;',
@@ -5459,13 +5474,26 @@ var NotSoBigData = (function () {
     '  var svg = document.getElementById("board-edges");',
     '  svg.setAttribute("width", maxX);',
     '  svg.setAttribute("height", maxY);',
-    '  var edgePaths = edges.map(function (e) {',
-    '    var from = positionById[e.from], to = positionById[e.to];',
-    '    var x1 = from.x + ' + (BOARD_BOX_WIDTH / 2) + ', y1 = from.y + ' + BOARD_BOX_HEIGHT + ';',
-    '    var x2 = to.x + ' + (BOARD_BOX_WIDTH / 2) + ', y2 = to.y;',
-    '    return "<path class=\\"board-edge\\" d=\\"M" + x1 + " " + y1 + " L" + x2 + " " + y2 + "\\"></path>";',
-    '  });',
-    '  svg.innerHTML = edgePaths.join("");',
+    '  window.__BOARD_BOUNDS__ = { minX: 0, minY: minY, maxX: maxX, maxY: maxY };',
+    '  function redrawEdges() {',
+    '    var edgePaths = edges.map(function (e) {',
+    '      var fromEl = document.querySelector("[data-block-id=\\"" + e.from + "\\"]");',
+    '      var toEl = document.querySelector("[data-block-id=\\"" + e.to + "\\"]");',
+    '      if (!fromEl || !toEl) { return ""; }',
+    '      var x1 = fromEl.offsetLeft + fromEl.offsetWidth / 2, y1 = fromEl.offsetTop + fromEl.offsetHeight;',
+    '      var x2 = toEl.offsetLeft + toEl.offsetWidth / 2, y2 = toEl.offsetTop;',
+    '      return "<path class=\\"board-edge\\" d=\\"M" + x1 + " " + y1 + " L" + x2 + " " + y2 + "\\"></path>";',
+    '    });',
+    '    svg.innerHTML = edgePaths.join("");',
+    '  }',
+    '  redrawEdges();',
+    '  if (window.ResizeObserver) {',
+    '    var resizeObserver = new ResizeObserver(redrawEdges);',
+    '    realNodes.forEach(function (n) {',
+    '      var el = document.querySelector("[data-block-id=\\"" + n.id + "\\"]");',
+    '      if (el) { resizeObserver.observe(el); }',
+    '    });',
+    '  }',
     '});'
   ].join('\n');
 
@@ -5478,6 +5506,16 @@ var NotSoBigData = (function () {
   // listener, independent of TABLE_CLIENT_JS/CHART_CLIENT_JS's own
   // listeners, only emitted when layout:'board' is used (see
   // renderReportHtml's isBoardLayout branch).
+  //
+  // After creating the zoom behavior, applies one initial "fit to view"
+  // transform (the standard d3-zoom pattern: zoom.transform + a computed
+  // scale/translate) so the whole tree opens centered and fully visible
+  // instead of at identity transform, where a tree taller/wider than
+  // .board-viewport would leave some nodes below/beside the fold with no
+  // hint they exist. Reads window.__BOARD_BOUNDS__, the tree's bounding
+  // box BOARD_LAYOUT_CLIENT_JS already computed for #board-edges' sizing -
+  // scale is clamped to the same [0.25, 2] range as manual zoom, and 0.9
+  // leaves a small margin around the tree rather than touching the edges.
   var BOARD_CLIENT_JS = [
     'document.addEventListener("DOMContentLoaded", function () {',
     '  var viewport = document.querySelector(".board-viewport");',
@@ -5488,6 +5526,14 @@ var NotSoBigData = (function () {
     '    .on("end", function () { viewport.classList.remove("board-panning"); })',
     '    .on("zoom", function (event) { canvas.style.transform = "translate(" + event.transform.x + "px," + event.transform.y + "px) scale(" + event.transform.k + ")"; });',
     '  d3.select(viewport).call(zoom);',
+    '  var bounds = window.__BOARD_BOUNDS__;',
+    '  if (bounds && viewport.clientWidth && viewport.clientHeight) {',
+    '    var boundsWidth = bounds.maxX - bounds.minX, boundsHeight = bounds.maxY - bounds.minY;',
+    '    var midX = (bounds.minX + bounds.maxX) / 2, midY = (bounds.minY + bounds.maxY) / 2;',
+    '    var scale = Math.min(2, Math.max(0.25, 0.9 / Math.max(boundsWidth / viewport.clientWidth, boundsHeight / viewport.clientHeight)));',
+    '    var fit = d3.zoomIdentity.translate(viewport.clientWidth / 2 - scale * midX, viewport.clientHeight / 2 - scale * midY).scale(scale);',
+    '    d3.select(viewport).call(zoom.transform, fit);',
+    '  }',
     '});'
   ].join('\n');
 
