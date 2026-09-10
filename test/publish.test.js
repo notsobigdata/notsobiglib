@@ -122,9 +122,9 @@ function testPublishBoardDuplicateCrossTypeIdRejected() {
 
 // Regression for the finding where validateBoardRelations skipped the
 // cross-array uniqueness check entirely whenever no block declared
-// relatesTo, even though computeBoardLayout/renderBoardCanvas key a single
-// id-keyed map across charts[]+tables[] unconditionally once layout.type
-// is "board" - silently dropping one block's markup on a collision. Same
+// relatesTo, even though renderBoardCanvas keys a single id-keyed map
+// across charts[]+tables[] unconditionally once layout.type is "board" -
+// silently dropping one block's markup on a collision. Same
 // error as testPublishBoardDuplicateCrossTypeIdRejected above, just with
 // no relatesTo anywhere on either block.
 function testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo() {

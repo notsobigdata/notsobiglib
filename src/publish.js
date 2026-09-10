@@ -107,9 +107,9 @@ function validateDetail(blockType, blockId, detail) {
 // every per-block loop in validatePublishConfig has already confirmed
 // ids are present and duplicate-free *within* charts[] and *within*
 // tables[] separately; this function additionally requires ids to be
-// unique *across* charts[] and tables[] combined, since computeBoardLayout/
-// renderBoardCanvas key a single positionById/sectionById map by id across
-// both arrays unconditionally whenever layout.type is 'board' - not only
+// unique *across* charts[] and tables[] combined, since renderBoardCanvas
+// keys a single sectionById map by id across both arrays unconditionally
+// whenever layout.type is 'board' - not only
 // when a block happens to declare relatesTo. So the cross-array check
 // below (and the self-ref/unknown-id/cycle checks that build on the same
 // parentOf map) run for every board-layout report; only the "relatesTo
