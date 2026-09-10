@@ -1464,40 +1464,25 @@ var BOARD_LAYOUT_CLIENT_JS = [
   '});'
 ].join('\n');
 
-// Pan (mouse/touch drag) + zoom (wheel), vanilla JS/CSS transform, no
-// library - see the design spec's §5. Self-contained: its own
-// DOMContentLoaded listener, independent of TABLE_CLIENT_JS/
-// CHART_CLIENT_JS's own listeners, only emitted when layout:'board' is
-// used (see renderReportHtml's isBoardLayout branch).
+// Pan (drag) + zoom (wheel/pinch/double-click) via d3-zoom - reuses the
+// D3 bundle already loaded for charts[]/BOARD_LAYOUT_CLIENT_JS, see
+// docs/superpowers/specs/2026-09-09-publish-board-d3-layout-design.md §5.
+// Registered right after BOARD_LAYOUT_CLIENT_JS in the same script (see
+// renderReportHtml), so #board-canvas already holds positioned content
+// by the time this runs. Self-contained: its own DOMContentLoaded
+// listener, independent of TABLE_CLIENT_JS/CHART_CLIENT_JS's own
+// listeners, only emitted when layout:'board' is used (see
+// renderReportHtml's isBoardLayout branch).
 var BOARD_CLIENT_JS = [
   'document.addEventListener("DOMContentLoaded", function () {',
   '  var viewport = document.querySelector(".board-viewport");',
   '  var canvas = document.getElementById("board-canvas");',
   '  if (!viewport || !canvas) { return; }',
-  '  var panX = 0, panY = 0, zoom = 1;',
-  '  var dragging = false, lastX = 0, lastY = 0;',
-  '  function applyTransform() {',
-  '    canvas.style.transform = "translate(" + panX + "px," + panY + "px) scale(" + zoom + ")";',
-  '  }',
-  '  function startDrag(x, y) { dragging = true; lastX = x; lastY = y; viewport.classList.add("board-panning"); }',
-  '  function moveDrag(x, y) {',
-  '    if (!dragging) { return; }',
-  '    panX += x - lastX; panY += y - lastY; lastX = x; lastY = y;',
-  '    applyTransform();',
-  '  }',
-  '  function endDrag() { dragging = false; viewport.classList.remove("board-panning"); }',
-  '  viewport.addEventListener("mousedown", function (e) { startDrag(e.clientX, e.clientY); });',
-  '  window.addEventListener("mousemove", function (e) { moveDrag(e.clientX, e.clientY); });',
-  '  window.addEventListener("mouseup", endDrag);',
-  '  viewport.addEventListener("touchstart", function (e) { var t = e.touches[0]; startDrag(t.clientX, t.clientY); });',
-  '  viewport.addEventListener("touchmove", function (e) { var t = e.touches[0]; moveDrag(t.clientX, t.clientY); e.preventDefault(); }, { passive: false });',
-  '  viewport.addEventListener("touchend", endDrag);',
-  '  viewport.addEventListener("wheel", function (e) {',
-  '    e.preventDefault();',
-  '    var delta = e.deltaY > 0 ? -0.1 : 0.1;',
-  '    zoom = Math.min(2, Math.max(0.25, zoom + delta));',
-  '    applyTransform();',
-  '  }, { passive: false });',
+  '  var zoom = d3.zoom().scaleExtent([0.25, 2])',
+  '    .on("start", function () { viewport.classList.add("board-panning"); })',
+  '    .on("end", function () { viewport.classList.remove("board-panning"); })',
+  '    .on("zoom", function (event) { canvas.style.transform = event.transform.toString(); });',
+  '  d3.select(viewport).call(zoom);',
   '});'
 ].join('\n');
 

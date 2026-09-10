@@ -150,14 +150,14 @@ function testPublishBoardClientJsEmittedOnlyForBoardLayout() {
   var boardResult = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
   assert.strictEqual(boardResult.status, 'success', 'expected the shimmed board run to succeed, got: ' + boardResult.error);
   var boardHtml = getHtml();
-  assert.ok(/viewport\.addEventListener\("wheel"/.test(boardHtml), 'expected the board wheel-zoom listener, got: ' + boardHtml);
-  assert.ok(/viewport\.addEventListener\("mousedown"/.test(boardHtml), 'expected the board pan listener, got: ' + boardHtml);
+  assert.ok(/d3\.zoom\(\)\.scaleExtent\(\[0\.25, 2\]\)/.test(boardHtml), 'expected the d3.zoom() pan/zoom setup, got: ' + boardHtml);
+  assert.ok(/d3\.select\(viewport\)\.call\(zoom\)/.test(boardHtml), 'expected the zoom behavior attached to the viewport, got: ' + boardHtml);
 
   var linearResult = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
   assert.strictEqual(linearResult.status, 'success', 'expected the shimmed linear run to succeed, got: ' + linearResult.error);
   var linearHtml = getHtml();
   assert.ok(!/board-viewport/.test(linearHtml), 'expected no board markup on a layout:"linear" report, got: ' + linearHtml);
-  assert.ok(!/viewport\.addEventListener\("wheel"/.test(linearHtml), 'expected no board client JS on a layout:"linear" report, got: ' + linearHtml);
+  assert.ok(!/d3\.zoom\(\)/.test(linearHtml), 'expected no board pan/zoom client JS on a layout:"linear" report, got: ' + linearHtml);
 }
 
 function testPublishBoardClientJsClampsZoomAndAppliesTransform() {
@@ -166,8 +166,8 @@ function testPublishBoardClientJsClampsZoomAndAppliesTransform() {
   var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
-  assert.ok(/Math\.min\(2, Math\.max\(0\.25, zoom \+ delta\)\)/.test(html), 'expected zoom clamped to [0.25, 2], got: ' + html);
-  assert.ok(/canvas\.style\.transform = "translate\("/.test(html), 'expected the pan\/zoom transform application, got: ' + html);
+  assert.ok(/scaleExtent\(\[0\.25, 2\]\)/.test(html), 'expected zoom clamped to [0.25, 2] via d3.zoom().scaleExtent, got: ' + html);
+  assert.ok(/canvas\.style\.transform = event\.transform\.toString\(\)/.test(html), 'expected the pan\/zoom transform application via d3-zoom\'s event.transform, got: ' + html);
 }
 
 // Native CSS resize (the same browser-drawn grip a <textarea> has), not
