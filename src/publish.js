@@ -757,123 +757,6 @@ var BOARD_BOX_HEIGHT = 340;
 var BOARD_H_GAP = 40;
 var BOARD_V_GAP = 60;
 
-// Contour-based tidy-tree layout for layout:'board' (a simplified
-// Reingold-Tilford/Walker walk, not the full Buchheim O(n) apportionment
-// pass - see the ponytail note on shiftPastSiblingContour below for why
-// that's the right stopping point). blocks with no relatesTo are roots,
-// treated as siblings of an implicit super-root so multiple trees land
-// side by side through the exact same clearance mechanism as any other
-// sibling group - no separate "offset past the previous tree" special
-// case. Trusts validateBoardRelations already ran (acyclic, every
-// id/relatesTo resolves) - does no error-checking of its own.
-//
-// layoutSubtree(id) returns the subtree rooted at `id` laid out in its
-// own *local* coordinates (its own root at relative x=0): `positions`
-// (id/x/depth-from-this-root, depth 0 = the root itself), and
-// `leftContour`/`rightContour` (index d = the min/max x reached by any
-// node at depth d within this subtree, in these same local coordinates).
-// A subtree with no children is the base case: itself, alone, at x=0.
-function layoutSubtree(id, children) {
-  var kids = children[id] || [];
-  if (!kids.length) {
-    return { x: 0, positions: [{ id: id, x: 0, depth: 0 }], leftContour: [0], rightContour: [BOARD_BOX_WIDTH] };
-  }
-
-  var combinedLeft = [];
-  var combinedRight = [];
-  var offsets = kids.map(function (childId, i) {
-    var child = layoutSubtree(childId, children);
-    var offset = i === 0 ? 0 : shiftPastSiblingContour(child, combinedLeft, combinedRight);
-    mergeContour(combinedLeft, combinedRight, child, offset);
-    return { child: child, offset: offset };
-  });
-
-  var positions = [];
-  var childXs = [];
-  offsets.forEach(function (o) {
-    o.child.positions.forEach(function (p) {
-      positions.push({ id: p.id, x: p.x + o.offset, depth: p.depth + 1 });
-    });
-    childXs.push(o.child.x + o.offset);
-  });
-  var myX = (Math.min.apply(null, childXs) + Math.max.apply(null, childXs)) / 2;
-  positions.push({ id: id, x: myX, depth: 0 });
-
-  return {
-    x: myX,
-    positions: positions,
-    leftContour: [myX].concat(combinedLeft),
-    rightContour: [myX + BOARD_BOX_WIDTH].concat(combinedRight)
-  };
-}
-
-// Minimum rightward shift so `child`'s own left contour clears
-// `siblingLeft`/`siblingRight` (the contour merged from every sibling
-// already placed) by at least BOARD_H_GAP at every depth both reach -
-// this is the actual fix over the old nextSlot counter: clearance is
-// checked against siblings' real per-depth shape, not a fixed leaf-slot
-// width, so a subtree that's narrow at a shallow depth but wide deeper
-// down only pushes its neighbor as far as its worst *single* depth
-// requires, not its total leaf count.
-//
-// ponytail: this is a greedy left-to-right contour merge, not a full
-// Buchheim/Walker apportionment pass - it never shifts an *earlier*
-// sibling back left to tighten the result once a later one turns out
-// narrower than it. That means a very bushy, uneven board can end up
-// slightly wider than the true minimum. The design spec already notes
-// board box counts are small in realistic dashboards, so exact-minimum
-// packing isn't worth the extra pass; upgrade to full apportionment if a
-// real board ever has enough boxes for the slack to visibly matter.
-function shiftPastSiblingContour(child, siblingLeft, siblingRight) {
-  var shift = 0;
-  for (var d = 0; d < child.leftContour.length && d < siblingRight.length; d++) {
-    var need = siblingRight[d] + BOARD_H_GAP - child.leftContour[d];
-    if (need > shift) { shift = need; }
-  }
-  return shift;
-}
-
-// Folds `child`'s contour (shifted by `offset`) into the running
-// `combinedLeft`/`combinedRight` arrays, in place.
-function mergeContour(combinedLeft, combinedRight, child, offset) {
-  for (var d = 0; d < child.leftContour.length; d++) {
-    var l = child.leftContour[d] + offset;
-    var r = child.rightContour[d] + offset;
-    combinedLeft[d] = (combinedLeft[d] === undefined) ? l : Math.min(combinedLeft[d], l);
-    combinedRight[d] = (combinedRight[d] === undefined) ? r : Math.max(combinedRight[d], r);
-  }
-}
-
-function computeBoardLayout(charts, tables) {
-  var blocks = (charts || []).concat(tables || []);
-  var children = emptyMap();
-  var roots = [];
-  var edges = [];
-  blocks.forEach(function (block) {
-    if (block.relatesTo) {
-      children[block.relatesTo] = children[block.relatesTo] || [];
-      children[block.relatesTo].push(block.id);
-      edges.push({ from: block.relatesTo, to: block.id });
-    } else {
-      roots.push(block.id);
-    }
-  });
-
-  var positions = [];
-  var combinedLeft = [];
-  var combinedRight = [];
-  roots.forEach(function (rootId, i) {
-    var root = layoutSubtree(rootId, children);
-    var offset = i === 0 ? 0 : shiftPastSiblingContour(root, combinedLeft, combinedRight);
-    root.positions.forEach(function (p) {
-      positions.push({ id: p.id, x: p.x + offset, y: p.depth * (BOARD_BOX_HEIGHT + BOARD_V_GAP) });
-    });
-    mergeContour(combinedLeft, combinedRight, root, offset);
-  });
-
-  return { positions: positions, edges: edges };
-}
-
 // Fixed design tokens - see the design spec's "Design tokens" section.
 // No per-report customization in v1: every published dashboard looks the
 // same on purpose, the same way every model's compiled SQL follows one
@@ -952,7 +835,7 @@ var BOARD_CSS = [
   '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); border-radius: var(--radius); cursor: grab; }',
   '.board-viewport.board-panning { cursor: grabbing; }',
   '.board-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }',
-  '.board-node { position: absolute; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 12px; box-sizing: border-box; overflow: auto; resize: both; min-width: 160px; min-height: 100px; }',
+  '.board-node { position: absolute; width: ' + BOARD_BOX_WIDTH + 'px; height: ' + BOARD_BOX_HEIGHT + 'px; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 12px; box-sizing: border-box; overflow: auto; resize: both; min-width: 160px; min-height: 100px; }',
   '.board-node .chart, .board-node .table-block { border: none; box-shadow: none; margin-top: 0; padding: 0; }',
   '.board-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }',
   '.board-edge { fill: none; stroke: var(--paper-line); stroke-width: 2; }'
@@ -1611,42 +1494,26 @@ var THEME_TOGGLE_HTML = '<button id="theme-toggle" class="theme-toggle" type="bu
   + '<svg class="theme-toggle-icon theme-toggle-icon-moon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"></path></svg>'
   + '</button>';
 
-// Wraps the exact same per-block markup renderReportHtml's linear
-// branch already produces (chartSectionsList[i]/tableSectionsList[i],
-// unchanged) into positioned .board-node divs, plus an SVG layer
-// drawing one <path> per computeBoardLayout edge. sectionById maps a
-// block's id to its already-rendered markup - charts and tables are
-// zipped by array index since chartSectionsList/tableSectionsList are
-// built with .map() over config.charts/config.tables in the same order.
+// Wraps each block's already-rendered markup (chartSectionsList[i]/
+// tableSectionsList[i], unchanged) into an unpositioned .board-node div -
+// actual x/y positioning now happens client-side, via d3-hierarchy, once
+// the page has loaded (BOARD_LAYOUT_CLIENT_JS, below). The emitted
+// #board-edges svg starts empty for the same reason: edges are drawn
+// client-side too, once real positions exist. See docs/superpowers/specs/
+// 2026-09-09-publish-board-d3-layout-design.md §3.
 function renderBoardCanvas(config, chartSectionsList, tableSectionsList) {
   var charts = config.charts || [];
   var tables = config.tables || [];
-  var layout = computeBoardLayout(charts, tables);
-  var positionById = emptyMap();
-  layout.positions.forEach(function (p) { positionById[p.id] = p; });
   var sectionById = emptyMap();
   charts.forEach(function (chart, index) { sectionById[chart.id] = chartSectionsList[index]; });
   tables.forEach(function (table, index) { sectionById[table.id] = tableSectionsList[index]; });
 
-  var nodesHtml = layout.positions.map(function (p) {
-    return '<div class="board-node" style="left:' + p.x + 'px;top:' + p.y + 'px;width:' + BOARD_BOX_WIDTH + 'px;height:' + BOARD_BOX_HEIGHT + 'px">' + sectionById[p.id] + '</div>';
-  }).join('');
-
-  var maxX = layout.positions.reduce(function (m, p) { return Math.max(m, p.x + BOARD_BOX_WIDTH); }, 0);
-  var maxY = layout.positions.reduce(function (m, p) { return Math.max(m, p.y + BOARD_BOX_HEIGHT); }, 0);
-
-  var edgesHtml = layout.edges.map(function (edge) {
-    var from = positionById[edge.from];
-    var to = positionById[edge.to];
-    var x1 = from.x + BOARD_BOX_WIDTH / 2;
-    var y1 = from.y + BOARD_BOX_HEIGHT;
-    var x2 = to.x + BOARD_BOX_WIDTH / 2;
-    var y2 = to.y;
-    return '<path class="board-edge" d="M' + x1 + ' ' + y1 + ' L' + x2 + ' ' + y2 + '"></path>';
+  var nodesHtml = charts.concat(tables).map(function (block) {
+    return '<div class="board-node" data-block-id="' + escapeHtml(block.id) + '">' + sectionById[block.id] + '</div>';
   }).join('');
 
   return '<div class="board-viewport"><div class="board-canvas" id="board-canvas">'
-    + '<svg class="board-edges" width="' + maxX + '" height="' + maxY + '">' + edgesHtml + '</svg>'
+    + '<svg class="board-edges" id="board-edges"></svg>'
     + nodesHtml
     + '</div></div>';
 }

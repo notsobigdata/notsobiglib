@@ -143,49 +143,6 @@ function testPublishBoardValidRelationsProceedPastValidation() {
   assert.ok(/BigQuery/.test(result.error), 'expected validation to pass and fail only at the BigQuery call, got: ' + result.error);
 }
 
-// boardValidPublish: root "r" with two children "c1" (chart) and "c2"
-// (table). Hand-computed with BOARD_BOX_WIDTH=520, BOARD_BOX_HEIGHT=340,
-// BOARD_H_GAP=40, BOARD_V_GAP=60: leaves land at x=0 and x=560 (0 and 1
-// slots * (520+40)px-with-gap), y=400 (depth 1 * (340+60)px-with-gap); the
-// root centers over its children at x=(0+560)/2=280, y=0.
-function testPublishBoardLayoutPositionsSingleRootTwoChildren() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
-  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
-  var html = getHtml();
-  assert.ok(html.indexOf('left:280px;top:0px') !== -1, 'expected the root positioned at (280,0), got: ' + html);
-  assert.ok(html.indexOf('left:0px;top:400px') !== -1, 'expected the first child positioned at (0,400), got: ' + html);
-  assert.ok(html.indexOf('left:560px;top:400px') !== -1, 'expected the second child positioned at (560,400), got: ' + html);
-  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
-  assert.strictEqual(edgeCount, 2, 'expected 2 edges (r->c1, r->c2), got ' + edgeCount + ' in: ' + html);
-}
-
-function testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select boardChainPublish').nodes[0];
-  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
-  var html = getHtml();
-  assert.ok(html.indexOf('left:0px;top:0px') !== -1, 'expected "g" at (0,0), got: ' + html);
-  assert.ok(html.indexOf('left:0px;top:400px') !== -1, 'expected "p" at (0,400), got: ' + html);
-  assert.ok(html.indexOf('left:0px;top:800px') !== -1, 'expected "c" at (0,800), got: ' + html);
-  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
-  assert.strictEqual(edgeCount, 2, 'expected 2 edges (g->p, p->c), got ' + edgeCount + ' in: ' + html);
-}
-
-function testPublishBoardLayoutPlacesMultipleRootsSideBySide() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select boardMultiRootPublish').nodes[0];
-  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
-  var html = getHtml();
-  assert.ok(html.indexOf('left:0px;top:0px') !== -1, 'expected root "a" at (0,0), got: ' + html);
-  assert.ok(html.indexOf('left:560px;top:0px') !== -1, 'expected root "b" at (560,0), got: ' + html);
-  var edgeCount = (html.match(/class="board-edge"/g) || []).length;
-  assert.strictEqual(edgeCount, 0, 'expected 0 edges (two unrelated roots), got ' + edgeCount + ' in: ' + html);
-}
-
 function testPublishBoardClientJsEmittedOnlyForBoardLayout() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
@@ -229,6 +186,32 @@ function testPublishBoardNodesAreNativelyResizable() {
   assert.ok(boardNodeRule, 'expected a .board-node CSS rule, got: ' + html);
   assert.ok(/resize:\s*both/.test(boardNodeRule[0]), 'expected resize: both on .board-node, got: ' + boardNodeRule[0]);
   assert.ok(/min-width:/.test(boardNodeRule[0]) && /min-height:/.test(boardNodeRule[0]), 'expected a min-width/min-height floor on .board-node, got: ' + boardNodeRule[0]);
+}
+
+// Task 2: renderBoardCanvas no longer computes positions - it wraps each
+// block's markup in an unpositioned .board-node (data-block-id is the
+// only thing Task 3's client script needs to find it), and #board-edges
+// starts empty. The fixed box size moves from a per-node inline style
+// into .board-node's own CSS rule instead - one declaration instead of
+// N identical inline ones.
+function testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+
+  ['r', 'c1', 'c2'].forEach(function (id) {
+    var needle = '<div class="board-node" data-block-id="' + id + '">';
+    assert.ok(html.indexOf(needle) !== -1, 'expected an unpositioned board-node for "' + id + '", got: ' + html);
+  });
+  assert.ok(!/board-node[^>]*style=/.test(html), 'expected no inline style on any board-node (positioning moved client-side), got: ' + html);
+  assert.ok(html.indexOf('<svg class="board-edges" id="board-edges"></svg>') !== -1, 'expected an empty board-edges svg with no width/height/paths baked in, got: ' + html);
+  assert.strictEqual((html.match(/class="board-edge"/g) || []).length, 0, 'expected zero server-rendered edges (drawn client-side now), got: ' + html);
+
+  var boardNodeRule = html.match(/\.board-node\s*\{[^}]*\}/);
+  assert.ok(boardNodeRule, 'expected a .board-node CSS rule, got: ' + html);
+  assert.ok(/width:\s*520px/.test(boardNodeRule[0]) && /height:\s*340px/.test(boardNodeRule[0]), 'expected the fixed box size baked into .board-node CSS instead of per-node inline style, got: ' + boardNodeRule[0]);
 }
 
 // Shims BigQuery.Tables.get/Tabledata.list and DriveApp.getFolderById
@@ -2041,63 +2024,6 @@ function testPublishButtonsAndSelectsInheritThemedTextColor() {
   assert.ok(/\.table-csv-export\s*\{[^}]*background:\s*var\(--paper\)/.test(html), 'expected .table-csv-export to have its own themed background (not bare native chrome), got: ' + html);
 }
 
-// computeBoardLayout task: the naive placement gave every leaf a slot
-// from one global counter, so a subtree that fans out wide at a *deeper*
-// level than its sibling's own immediate children still pushed that
-// sibling as far right as the fanned-out subtree's total leaf count,
-// even though at no single depth do all those leaves actually compete
-// for space. The contour-based rewrite clears each sibling only as far
-// as the real per-depth overlap requires.
-//
-// Fixture "boardLopsidedPublish": root r -> {bushy, narrow} (bushy first).
-// bushy -> {b1 (leaf), b2 (-> b2x, b2y, both leaves)}. narrow is a lone
-// leaf. Hand-traced against the contour algorithm (BOARD_BOX_WIDTH=520,
-// BOARD_H_GAP=40, BOARD_BOX_HEIGHT=340, BOARD_V_GAP=60):
-//   r=(560,0) bushy=(280,400) narrow=(840,400)
-//   b1=(0,800) b2=(560,800) b2x=(280,1200) b2y=(840,1200)
-// The old leaf-slot algorithm would have placed narrow at x=1680 (one
-// slot past all 3 of bushy's leaves, counted globally) instead of x=840
-// (one slot past bushy's own worst-case per-depth width, which is 2, not
-// 3, since b1 and b2 share a depth but b1 doesn't coexist with b2x/b2y) -
-// asserting narrow's exact x is the concrete proof the rewrite is doing
-// real contour clearance, not just a relabeled leaf count.
-function testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select boardLopsidedPublish').nodes[0];
-  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
-  var html = getHtml();
-
-  var expected = {
-    r: [560, 0], bushy: [280, 400], narrow: [840, 400],
-    b1: [0, 800], b2: [560, 800], b2x: [280, 1200], b2y: [840, 1200]
-  };
-  Object.keys(expected).forEach(function (id) {
-    var xy = expected[id];
-    var needle = 'left:' + xy[0] + 'px;top:' + xy[1] + 'px';
-    assert.ok(html.indexOf(needle) !== -1, 'expected "' + id + '" at (' + xy[0] + ',' + xy[1] + '), got: ' + html);
-  });
-  assert.ok(html.indexOf('left:1680px;top:400px') === -1, 'expected narrow NOT to land at the old leaf-slot-counted x=1680, got: ' + html);
-
-  // General safety net, independent of the hand-traced numbers above: no
-  // two rendered board-node rectangles may overlap, for any tree shape.
-  var boxes = [];
-  var re = /left:(-?\d+)px;top:(-?\d+)px;width:(\d+)px;height:(\d+)px/g;
-  var m;
-  while ((m = re.exec(html))) {
-    boxes.push({ x: +m[1], y: +m[2], w: +m[3], h: +m[4] });
-  }
-  assert.strictEqual(boxes.length, 7, 'expected 7 positioned board nodes, got ' + boxes.length + ' in: ' + html);
-  for (var i = 0; i < boxes.length; i++) {
-    for (var j = i + 1; j < boxes.length; j++) {
-      var a = boxes[i], b = boxes[j];
-      var overlapX = a.x < b.x + b.w && b.x < a.x + a.w;
-      var overlapY = a.y < b.y + b.h && b.y < a.y + a.h;
-      assert.ok(!(overlapX && overlapY), 'expected no overlap between board nodes ' + JSON.stringify(a) + ' and ' + JSON.stringify(b));
-    }
-  }
-}
-
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -2117,12 +2043,10 @@ module.exports = {
   testPublishBoardDuplicateCrossTypeIdRejected: testPublishBoardDuplicateCrossTypeIdRejected,
   testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo: testPublishBoardDuplicateCrossTypeIdRejectedWithoutRelatesTo,
   testPublishBoardValidRelationsProceedPastValidation: testPublishBoardValidRelationsProceedPastValidation,
-  testPublishBoardLayoutPositionsSingleRootTwoChildren: testPublishBoardLayoutPositionsSingleRootTwoChildren,
-  testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine: testPublishBoardLayoutPositionsThreeLevelChainInAStraightLine,
-  testPublishBoardLayoutPlacesMultipleRootsSideBySide: testPublishBoardLayoutPlacesMultipleRootsSideBySide,
   testPublishBoardClientJsEmittedOnlyForBoardLayout: testPublishBoardClientJsEmittedOnlyForBoardLayout,
   testPublishBoardClientJsClampsZoomAndAppliesTransform: testPublishBoardClientJsClampsZoomAndAppliesTransform,
   testPublishBoardNodesAreNativelyResizable: testPublishBoardNodesAreNativelyResizable,
+  testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout: testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
   testPublishAggregatesKpisAndChartsCorrectly: testPublishAggregatesKpisAndChartsCorrectly,
   testPublishDebugOnlyProbesDriveTarget: testPublishDebugOnlyProbesDriveTarget,
@@ -2223,6 +2147,5 @@ module.exports = {
   testPublishThemeToggleClickHandlerPersistsChoice: testPublishThemeToggleClickHandlerPersistsChoice,
   testPublishLineChartUsesVarTealNotHardcodedHex: testPublishLineChartUsesVarTealNotHardcodedHex,
   testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard: testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard,
-  testPublishButtonsAndSelectsInheritThemedTextColor: testPublishButtonsAndSelectsInheritThemedTextColor,
-  testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth: testPublishBoardLayoutPacksLopsidedTreeByRealPerDepthWidth
+  testPublishButtonsAndSelectsInheritThemedTextColor: testPublishButtonsAndSelectsInheritThemedTextColor
 };
