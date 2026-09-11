@@ -5443,8 +5443,7 @@ var NotSoBigData = (function () {
   // a closure, so this is the hand-off point.
   var BOARD_LAYOUT_CLIENT_JS = [
     'document.addEventListener("DOMContentLoaded", function () {',
-    '  var payload = window.__PUBLISH_PAYLOAD__;',
-    '  var blocks = payload.charts.concat(payload.tables);',
+    '  var blocks = window.__BOARD_NODES__;',
     '  var rootId = "__board_root__";',
     '  var nodesData = blocks.map(function (b) { return { id: b.id, relatesTo: b.relatesTo }; });',
     '  nodesData.push({ id: rootId, relatesTo: null });',
@@ -5464,7 +5463,7 @@ var NotSoBigData = (function () {
     '    var el = document.querySelector("[data-block-id=\\"" + n.id + "\\"]");',
     '    if (el) { el.style.left = x + "px"; el.style.top = n.y + "px"; }',
     '  });',
-    '  var edges = blocks.filter(function (b) { return b.relatesTo; }).map(function (b) { return { from: b.relatesTo, to: b.id }; });',
+    '  var edges = window.__BOARD_EDGES__ || blocks.filter(function (b) { return b.relatesTo; }).map(function (b) { return { from: b.relatesTo, to: b.id }; });',
     '  var maxX = 0, maxY = 0;',
     '  realNodes.forEach(function (n) {',
     '    var p = positionById[n.id];',
@@ -5651,6 +5650,7 @@ var NotSoBigData = (function () {
       script += CHART_CLIENT_JS;
     }
     if (isBoardLayout) {
+      script += 'window.__BOARD_NODES__ = window.__PUBLISH_PAYLOAD__.charts.concat(window.__PUBLISH_PAYLOAD__.tables).map(function (b) { return { id: b.id, relatesTo: b.relatesTo }; });';
       script += BOARD_LAYOUT_CLIENT_JS;
       script += BOARD_CLIENT_JS;
     }
