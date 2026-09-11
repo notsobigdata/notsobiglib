@@ -215,16 +215,19 @@ human-run Apps Script layer for everything that does.
 
 ### Layer 1 — Node, headless, `list`/`compile`/`hello`/`help`
 
-`cli()` is the library's one public entrypoint (`return { cli: cli }`,
-the footer `build.sh` writes), and four of its seven commands are
-dry-run by construction: `list` resolves and orders nodes without
-executing anything, `compile` renders a model's SQL without touching
-BigQuery, `hello` and `help` touch nothing at all. Between them they
-exercise discovery, `--select`/`--exclude`, dependency ordering, the
-`model` registry's expansion into nodes, and the `{{ ref() }}`/
-`{% for %}`/`{% set %}`/`{{ config() }}` macro parser — most of the
-logic that actually has bugs worth catching before a human ever opens
-the Apps Script editor.
+`cli()` is the library's one public entrypoint (the footer `build.sh`
+writes returns `{ cli: cli, __test: {...} }` — `__test` is a Node-test-
+only back door onto a handful of pure functions for `test/docs.test.js`
+to call directly, never called by `cli()` itself and not part of the
+documented public API — see `src/docs.md`'s "The `__test` back door"),
+and four of its eight commands are dry-run by construction:
+`list` resolves and orders nodes without executing anything, `compile`
+renders a model's SQL without touching BigQuery, `hello` and `help`
+touch nothing at all. Between them they exercise discovery,
+`--select`/`--exclude`, dependency ordering, the `model` registry's
+expansion into nodes, and the `{{ ref() }}`/`{% for %}`/`{% set %}`/
+`{{ config() }}` macro parser — most of the logic that actually has
+bugs worth catching before a human ever opens the Apps Script editor.
 
 `test/harness.js` loads `src.js` into a Node `vm` context alongside a
 ~15-line shim (`Logger.log` as a no-op, `HtmlService.createHtmlOutputFromFile`
@@ -248,12 +251,14 @@ passes. `./build.sh` must run before the test does if the change
 touched `src/*.js` — the harness loads the committed `src.js`, not the
 `src/` modules directly.
 
-### Layer 2 — Apps Script, human-run, `run`/`debug`/`sources`
+### Layer 2 — Apps Script, human-run, `run`/`debug`/`sources`/`docs`
 
-The other three commands need a live resource: `run` actually reads/
+The other four commands need a live resource: `run` actually reads/
 writes Sheets/Drive/BigQuery, `debug` probes real connector
-permissions, `sources` checks freshness against real data. None of that
-is fakeable in Node without faking the thing under test, so this layer
+permissions, `sources` checks freshness against real data, and `docs`
+— though its own data-gathering is dry-run-shaped, just reading already-
+discovered node config — writes the generated doc site to Drive. None
+of that is fakeable in Node without faking the thing under test, so this layer
 stays what it already was: a companion example Apps Script project in
 its own sibling repo, [`notsobigtests`](https://github.com/notsobigdata/notsobigtests),
 managed with `clasp`, that pulls in `src.js` and exercises every

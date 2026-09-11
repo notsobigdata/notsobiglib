@@ -5997,11 +5997,12 @@ var NotSoBigData = (function () {
     ].join('\n');
   }
 
-  // Turns a command string into { command, select, exclude, target }. Deliberately
-  // a tiny hand-rolled parser rather than anything clever: the whole
-  // grammar is one verb plus four optional flags (--select, --exclude, --target,
-  // --full-refresh), and both "--select a,b" and "--select=a,b" are accepted
-  // because both spellings are muscle memory for anyone who has used a real CLI.
+  // Turns a command string into { command, select, exclude, target, fullRefresh,
+  // folderId }. Deliberately a tiny hand-rolled parser rather than anything
+  // clever: the whole grammar is one verb plus five optional flags (--select,
+  // --exclude, --target, --full-refresh, --folder-id), and both "--select a,b"
+  // and "--select=a,b" are accepted because both spellings are muscle memory
+  // for anyone who has used a real CLI.
   // --full-refresh is a value-less boolean flag, only legal on run/compile.
   function parseCommand(input) {
     var text = typeof input === 'string' ? input.trim() : '';

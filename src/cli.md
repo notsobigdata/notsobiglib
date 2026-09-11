@@ -154,7 +154,7 @@ Design constraints that matter if you touch this:
   changes those signatures, this is a caller to update too.
 - **Auto-detected default folder is unverified for container-bound
   scripts** (bound to a Sheet/Doc/Form rather than standalone) —
-  `resolveManifestFolderId()`'s `ScriptApp.getScriptId()` +
+  `resolveDefaultDriveFolderId()`'s `ScriptApp.getScriptId()` +
   `DriveApp.getFileById(...).getParents()` chain has only been reasoned
   through, not run, against that case. Verify by hand before relying on it.
 
@@ -248,7 +248,7 @@ Right after resolving `config`'s own folder (already a required step),
 `otherConfig`'s folder is resolved too - but only if `otherConfig.enabled`
 is true, since a disabled manifest can never actually be overwritten, so
 there's nothing to guard against and no reason to spend the extra
-`resolveManifestFolderId()` Drive lookup checking it. If both resolved
+`resolveDefaultDriveFolderId()` Drive lookup checking it. If both resolved
 folders and both fileNames match, the write is refused - same
 `{written: false, reason: '...', error: '...'}` shape every other
 best-effort failure here already returns, not a thrown error, matching

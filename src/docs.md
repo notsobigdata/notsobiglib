@@ -3,7 +3,7 @@
 > Working notes, not user documentation. docs/cli.md's `cli('docs')`
 > section is the public reference for what the doc site shows; this file
 > is about the code's internals and the rules you have to keep if you
-> change it. Gitignored.
+> change it.
 
 ## What this module owns
 
