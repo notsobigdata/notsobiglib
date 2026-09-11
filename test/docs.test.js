@@ -101,6 +101,59 @@ function testDocsHtmlLoadsD3AndThemeToggle() {
   assert.ok(/id="theme-toggle"/.test(html), 'expected the theme toggle button, got: ' + html);
 }
 
+// Shims exactly what cli('docs') touches on Drive: getFolderById(...).
+// createFile(...) (create path) and .getFilesByName(...) (upsertByName's
+// find-by-name check, always "not found" here so every test exercises
+// the create path), plus ScriptApp.getScriptId()/DriveApp.getFileById(...)
+// .getParents() (the default-folder path, see resolveDefaultDriveFolderId).
+function shimDriveForDocs(ctx) {
+  var createdFiles = [];
+  ctx.MimeType = { HTML: 'text/html' };
+  ctx.ScriptApp = { getScriptId: function () { return 'script-1'; } };
+  ctx.DriveApp = {
+    getFileById: function (id) {
+      return { getParents: function () { return { hasNext: function () { return true; }, next: function () { return { getId: function () { return 'parent-folder-1'; } }; } }; } };
+    },
+    getFolderById: function (folderId) {
+      return {
+        getFilesByName: function () { return { hasNext: function () { return false; } }; },
+        createFile: function (name, content, mimeType) {
+          createdFiles.push({ folderId: folderId, name: name, content: content, mimeType: mimeType });
+          return { getId: function () { return 'docs-file-' + createdFiles.length; } };
+        }
+      };
+    }
+  };
+  return function () { return createdFiles; };
+}
+
+function testDocsCommandWritesToScriptsParentFolderByDefault() {
+  var ctx = harness.loadContext([fixture('docs-nodes.js')]);
+  var getCreatedFiles = shimDriveForDocs(ctx);
+  var report = ctx.NotSoBigData.cli('docs');
+  assert.strictEqual(report.ok, true, 'expected cli("docs") to report ok, got: ' + JSON.stringify(report));
+  assert.strictEqual(report.command, 'docs');
+  var files = getCreatedFiles();
+  assert.strictEqual(files.length, 1, 'expected exactly one file written, got: ' + JSON.stringify(files));
+  assert.strictEqual(files[0].folderId, 'parent-folder-1', 'expected the default folder (the script\'s own parent) to be used, got: ' + JSON.stringify(files[0]));
+  assert.strictEqual(files[0].name, 'notsobigdata-docs.html');
+  assert.ok(/board-node/.test(files[0].content), 'expected the written content to be the rendered docs HTML, got: ' + files[0].content);
+}
+
+function testDocsCommandFolderIdFlagOverridesDefault() {
+  var ctx = harness.loadContext([fixture('docs-nodes.js')]);
+  var getCreatedFiles = shimDriveForDocs(ctx);
+  var report = ctx.NotSoBigData.cli('docs --folder-id explicit-folder');
+  assert.strictEqual(report.ok, true, 'expected cli("docs --folder-id ...") to report ok, got: ' + JSON.stringify(report));
+  var files = getCreatedFiles();
+  assert.strictEqual(files[0].folderId, 'explicit-folder', 'expected --folder-id to override the default, got: ' + JSON.stringify(files[0]));
+}
+
+function testDocsCommandFolderIdRejectedOnOtherCommands() {
+  var ctx = harness.loadContext([fixture('docs-nodes.js')]);
+  assert.throws(function () { ctx.NotSoBigData.cli('list --folder-id x'); }, /--folder-id.*only valid for "docs"|unknown option/, 'expected --folder-id to be rejected on a non-docs command');
+}
+
 module.exports = {
   testDocsPayloadCarriesMoveConnectorTypes: testDocsPayloadCarriesMoveConnectorTypes,
   testDocsPayloadCompilesModelSqlAndCapturesMultipleDependsOn: testDocsPayloadCompilesModelSqlAndCapturesMultipleDependsOn,
@@ -109,5 +162,8 @@ module.exports = {
   testDocsHtmlRendersOneBoardNodePerDiscoveredNode: testDocsHtmlRendersOneBoardNodePerDiscoveredNode,
   testDocsHtmlBoardEdgesCoverEveryRealDependsOnPair: testDocsHtmlBoardEdgesCoverEveryRealDependsOnPair,
   testDocsHtmlShowsCompiledSqlAndConnectorTypes: testDocsHtmlShowsCompiledSqlAndConnectorTypes,
-  testDocsHtmlLoadsD3AndThemeToggle: testDocsHtmlLoadsD3AndThemeToggle
+  testDocsHtmlLoadsD3AndThemeToggle: testDocsHtmlLoadsD3AndThemeToggle,
+  testDocsCommandWritesToScriptsParentFolderByDefault: testDocsCommandWritesToScriptsParentFolderByDefault,
+  testDocsCommandFolderIdFlagOverridesDefault: testDocsCommandFolderIdFlagOverridesDefault,
+  testDocsCommandFolderIdRejectedOnOtherCommands: testDocsCommandFolderIdRejectedOnOtherCommands
 };

@@ -139,3 +139,19 @@ function renderDocsHtml(payload) {
     + '<script>' + script + '</script>'
     + '</body></html>';
 }
+
+// Drive-writing glue: reuses move.js's resolveDriveWriteTarget/writeDriveText
+// (the same primitive writeManifestFile already crosses the move/cli
+// module boundary for) rather than a second Drive-write implementation.
+// Fixed fileName, upsertByName: true - every cli('docs') overwrites the
+// same file, the same "regenerate in place" behavior dbt docs generate
+// has for its index.html.
+function runDocsCommand(nodes, folderId) {
+  var payload = buildDocsPayload(nodes);
+  var html = renderDocsHtml(payload);
+  var target = { folderId: folderId || resolveDefaultDriveFolderId(null), fileName: 'notsobigdata-docs.html', upsertByName: true };
+  var fileId = resolveDriveWriteTarget(target);
+  fileId = writeDriveText(fileId, target, html, MimeType.HTML);
+  Logger.log('cli("docs") written to ' + fileId);
+  return { ok: true, command: 'docs', fileId: fileId, nodes: payload };
+}

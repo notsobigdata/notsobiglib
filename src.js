@@ -5823,6 +5823,22 @@ var NotSoBigData = (function () {
       + '</body></html>';
   }
 
+  // Drive-writing glue: reuses move.js's resolveDriveWriteTarget/writeDriveText
+  // (the same primitive writeManifestFile already crosses the move/cli
+  // module boundary for) rather than a second Drive-write implementation.
+  // Fixed fileName, upsertByName: true - every cli('docs') overwrites the
+  // same file, the same "regenerate in place" behavior dbt docs generate
+  // has for its index.html.
+  function runDocsCommand(nodes, folderId) {
+    var payload = buildDocsPayload(nodes);
+    var html = renderDocsHtml(payload);
+    var target = { folderId: folderId || resolveDefaultDriveFolderId(null), fileName: 'notsobigdata-docs.html', upsertByName: true };
+    var fileId = resolveDriveWriteTarget(target);
+    fileId = writeDriveText(fileId, target, html, MimeType.HTML);
+    Logger.log('cli("docs") written to ' + fileId);
+    return { ok: true, command: 'docs', fileId: fileId, nodes: payload };
+  }
+
   // ==================================================================
   //   src/cli.js
   // ==================================================================
@@ -5950,7 +5966,7 @@ var NotSoBigData = (function () {
     return node.name + ' (' + node.kind + ')';
   }
 
-  var COMMANDS = ['run', 'list', 'compile', 'debug', 'sources', 'hello', 'help'];
+  var COMMANDS = ['run', 'list', 'compile', 'debug', 'sources', 'docs', 'hello', 'help'];
 
   function usage() {
     return [
@@ -5966,6 +5982,8 @@ var NotSoBigData = (function () {
       '  cli("debug")                   check OAuth scopes/services for each node\'s connector, without writing anything',
       '  cli("sources")                 check freshness + tests for every source declared in notsobigdataModels.sources',
       '  cli("sources --select stripe")     ... just one source ("stripe.payments" selects one table)',
+      '  cli("docs")                    write a project doc site (DAG + per-node detail) to Drive',
+      '  cli("docs --folder-id x")          ... into a specific Drive folder instead of the script\'s own parent folder',
       '  cli("hello")                   check the library loaded and see which nodes it can find',
       '  cli("help")                    this message',
       '',
@@ -6000,7 +6018,7 @@ var NotSoBigData = (function () {
     if (COMMANDS.indexOf(command) === -1) {
       throw new Error('cli(): unknown command "' + command + '".\n\n' + usage());
     }
-    var parsed = { command: command, select: [], exclude: [], target: null, fullRefresh: false };
+    var parsed = { command: command, select: [], exclude: [], target: null, fullRefresh: false, folderId: null };
     while (tokens.length) {
       var token = tokens.shift();
       var flag = token;
@@ -6010,8 +6028,8 @@ var NotSoBigData = (function () {
         flag = token.slice(0, equalsAt);
         value = token.slice(equalsAt + 1);
       }
-      if (flag !== '--select' && flag !== '--exclude' && flag !== '--target' && flag !== '--full-refresh') {
-        throw new Error('cli(): unknown option "' + flag + '". Expected "--select", "--exclude", "--target", or "--full-refresh".\n\n' + usage());
+      if (flag !== '--select' && flag !== '--exclude' && flag !== '--target' && flag !== '--full-refresh' && flag !== '--folder-id') {
+        throw new Error('cli(): unknown option "' + flag + '". Expected "--select", "--exclude", "--target", "--full-refresh", or "--folder-id".\n\n' + usage());
       }
       if (flag === '--full-refresh') {
         // --full-refresh is a value-less boolean flag
@@ -6034,6 +6052,17 @@ var NotSoBigData = (function () {
             throw new Error('cli(): "--target" can only be specified once.');
           }
           parsed.target = value;
+        } else if (flag === '--folder-id') {
+          if (!value) {
+            throw new Error('cli(): "--folder-id" needs a value, e.g. --folder-id 1AbCdEf...');
+          }
+          if (command !== 'docs') {
+            throw new Error('cli(): "--folder-id" is only valid for "docs", not for "' + command + '".');
+          }
+          if (parsed.folderId !== null) {
+            throw new Error('cli(): "--folder-id" can only be specified once.');
+          }
+          parsed.folderId = value;
         } else {
           var list = value.split(',')
             .map(function (item) { return item.trim(); })
@@ -7302,6 +7331,11 @@ var NotSoBigData = (function () {
       throw new Error('cli(): found no declared nodes. Config objects must be declared as top-level "var"s marked with a "kind" - one declared inside a function is invisible to cli(). Run cli("hello") to see what the library can find.');
     }
     assertDependenciesExist(discovered.nodes);
+    if (parsed.command === 'docs') {
+      var docsReport = runDocsCommand(discovered.nodes, parsed.folderId);
+      Logger.log('DONE  cli("' + input + '") - docs written to ' + docsReport.fileId);
+      return docsReport;
+    }
     applyTargetOverlay(discovered.nodes, parsed.target);
     applyFullRefresh(discovered.nodes, parsed.fullRefresh);
     var selected = applySelection(discovered.nodes, parsed.select, parsed.exclude);
