@@ -6563,7 +6563,7 @@ var NotSoBigData = (function () {
   // already uses, not new drive-writing logic.
   //
   // otherConfig is only consulted (and only ever costs a Drive lookup, via
-  // resolveManifestFolderId(), when its own folderId is unset) if it's
+  // resolveDefaultDriveFolderId(), when its own folderId is unset) if it's
   // enabled - a disabled manifest can never actually be overwritten, so
   // there is nothing to guard against. When both configs resolve to the
   // same folderId + fileName, refusing to write (rather than writing
