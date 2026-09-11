@@ -480,6 +480,7 @@ Builds on Task 2's payload and Task 3's board-script hooks to produce the full `
 
 **Files:**
 - Modify: `src/docs.js` (add `renderDocsHtml`, `renderDocsNodeSection`, `renderDocsDetailHtml`, `DOCS_CSS`)
+- Modify: `build.sh` (the `build()` function's footer `echo` lines — extends the `__test` back door Task 2 added with `renderDocsHtml`)
 - Modify: `test/docs.test.js` (append)
 
 **Interfaces:**
@@ -641,7 +642,7 @@ Expected: all four new tests `PASS`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/docs.js src/cli.js test/docs.test.js src.js
+git add src/docs.js build.sh test/docs.test.js src.js
 git commit -m "$(cat <<'EOF'
 feat: add renderDocsHtml, the docs command's board-based HTML template
 
