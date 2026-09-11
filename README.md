@@ -134,6 +134,7 @@ NotSoBigData.cli('list')                    // show what would run, in order —
 NotSoBigData.cli('compile')                 // resolve model SQL, without running anything
 NotSoBigData.cli('debug')                   // check OAuth scopes/services per connector, without writing anything
 NotSoBigData.cli('sources')                 // check freshness + tests for every declared source table
+NotSoBigData.cli('docs')                    // write a project doc site (DAG + per-node detail) to Drive
 NotSoBigData.cli('hello')                   // check the library loaded and see what it can find
 NotSoBigData.cli('help')                    // the command list
 ```

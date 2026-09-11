@@ -471,3 +471,23 @@ regardless of layout - rather than re-deriving chart/table HTML a
 second time for board mode. Both layout modes read from the same two
 arrays; only how they're assembled into the page (and, now, how
 positions are computed) differs.
+
+`BOARD_LAYOUT_CLIENT_JS` also reads two globals as a second, generic
+entry point, not just from `renderReportHtml`'s own `__BOARD_NODES__`
+assembly line (`charts.concat(tables).map(...)`, above):
+`window.__BOARD_NODES__` (`{id, relatesTo}[]`, position-only, fed
+straight to `d3.stratify()`/`d3.tree()`) and `window.__BOARD_EDGES__`
+(`{from, to}[]`, the real edges drawn - `blocks.filter(...).map(...)`'s
+`relatesTo`-only computation is only a fallback for when this global is
+absent). `cli('docs')` (`src/docs.js`) is that second caller: a node's
+real `dependsOn` can be a multi-parent DAG, which `relatesTo`'s
+single-parent shape can't express, so `docs.js` sets `__BOARD_NODES__`
+from a synthetic single-parent link (`dependsOn[0]`) for positioning
+only, and `__BOARD_EDGES__` from every real `dependsOn` pair for what's
+actually drawn. This is safe for `publish()`'s own board output because
+`publish()` never sets `__BOARD_EDGES__` itself, so its generated HTML
+still falls through to the original `relatesTo`-only edge computation,
+byte-identical to before. See `src/docs.md` for the fuller rationale on
+the `docs` side of this split. Whoever next changes
+`BOARD_LAYOUT_CLIENT_JS` should assume `renderReportHtml` is not its
+only caller.
