@@ -62,9 +62,52 @@ function testDocsPayloadCarriesPublishStructureOnly() {
   assert.deepStrictEqual(dashboard.detail.tables, []);
 }
 
+function renderDocsHtmlFor(nodeNames) {
+  var ctx = harness.loadContext([fixture('docs-nodes.js')]);
+  var nodes = ctx.NotSoBigData.__test.discoverNodesForTest().filter(function (n) {
+    return !nodeNames || nodeNames.indexOf(n.name) !== -1;
+  });
+  var payload = ctx.NotSoBigData.__test.buildDocsPayload(nodes);
+  return ctx.NotSoBigData.__test.renderDocsHtml(payload);
+}
+
+function testDocsHtmlRendersOneBoardNodePerDiscoveredNode() {
+  var html = renderDocsHtmlFor(['rawOrders', 'rawCustomers', 'orders']);
+  ['rawOrders', 'rawCustomers', 'orders'].forEach(function (name) {
+    assert.ok(html.indexOf('<div class="board-node" data-block-id="' + name + '">') !== -1, 'expected a board-node for "' + name + '", got: ' + html);
+  });
+}
+
+function testDocsHtmlBoardEdgesCoverEveryRealDependsOnPair() {
+  var html = renderDocsHtmlFor(['rawOrders', 'rawCustomers', 'orders']);
+  var match = html.match(/window\.__BOARD_EDGES__ = (.+?);/);
+  assert.ok(match, 'expected an embedded __BOARD_EDGES__, got: ' + html);
+  var edges = JSON.parse(match[1]);
+  assert.strictEqual(edges.length, 2, 'expected both of orders\' real dependsOn edges, got: ' + JSON.stringify(edges));
+  var froms = edges.map(function (e) { return e.from; }).sort();
+  assert.deepStrictEqual(froms, ['rawCustomers', 'rawOrders']);
+  edges.forEach(function (e) { assert.strictEqual(e.to, 'orders'); });
+}
+
+function testDocsHtmlShowsCompiledSqlAndConnectorTypes() {
+  var html = renderDocsHtmlFor(['rawOrders', 'orders']);
+  assert.ok(/sheets/.test(html), 'expected rawOrders\' source type in the detail markup, got: ' + html);
+  assert.ok(/join/.test(html), 'expected orders\' compiled SQL in the detail markup, got: ' + html);
+}
+
+function testDocsHtmlLoadsD3AndThemeToggle() {
+  var html = renderDocsHtmlFor(['rawOrders']);
+  assert.ok(html.indexOf('https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js') !== -1, 'expected the pinned D3 CDN script tag, got: ' + html);
+  assert.ok(/id="theme-toggle"/.test(html), 'expected the theme toggle button, got: ' + html);
+}
+
 module.exports = {
   testDocsPayloadCarriesMoveConnectorTypes: testDocsPayloadCarriesMoveConnectorTypes,
   testDocsPayloadCompilesModelSqlAndCapturesMultipleDependsOn: testDocsPayloadCompilesModelSqlAndCapturesMultipleDependsOn,
   testDocsPayloadSurfacesDiscoveryErrorWithoutCrashing: testDocsPayloadSurfacesDiscoveryErrorWithoutCrashing,
-  testDocsPayloadCarriesPublishStructureOnly: testDocsPayloadCarriesPublishStructureOnly
+  testDocsPayloadCarriesPublishStructureOnly: testDocsPayloadCarriesPublishStructureOnly,
+  testDocsHtmlRendersOneBoardNodePerDiscoveredNode: testDocsHtmlRendersOneBoardNodePerDiscoveredNode,
+  testDocsHtmlBoardEdgesCoverEveryRealDependsOnPair: testDocsHtmlBoardEdgesCoverEveryRealDependsOnPair,
+  testDocsHtmlShowsCompiledSqlAndConnectorTypes: testDocsHtmlShowsCompiledSqlAndConnectorTypes,
+  testDocsHtmlLoadsD3AndThemeToggle: testDocsHtmlLoadsD3AndThemeToggle
 };

@@ -5751,6 +5751,78 @@ var NotSoBigData = (function () {
     return {};
   }
 
+  // Minimal styling for the docs-specific bits publish.js's REPORT_CSS/
+  // BOARD_CSS don't already cover (a kind badge, a compile-error callout).
+  // Everything else - colors, dark mode, .board-node/.board-edge - is
+  // reused as-is from publish.js.
+  var DOCS_CSS = '.docs-kind-badge { font-family: var(--mono); font-size: 11px; color: var(--ink-soft); border: 1px solid var(--paper-line); border-radius: var(--radius-sm); padding: 1px 6px; margin-left: 6px; }'
+    + '.docs-error { color: var(--coral); font-family: var(--mono); font-size: 12px; }'
+    + 'pre { white-space: pre-wrap; font-family: var(--mono); font-size: 12px; }';
+
+  function renderDocsDetailHtml(kind, detail) {
+    // A discoveryError (see buildDocsPayload) can happen to any kind in
+    // principle (src/cli.js:568's check is kind-agnostic), even though only
+    // model.js's expandModelNodes() sets one today - render it the same way
+    // regardless of kind, before any kind-specific branch below.
+    if (detail.discoveryError) {
+      return '<div class="docs-error">discovery error: ' + escapeHtml(detail.discoveryError) + '</div>';
+    }
+    if (kind === 'model') {
+      var html = '<div>materialized: ' + escapeHtml(detail.materialized) + '</div>'
+        + '<div>' + escapeHtml(detail.projectId + '.' + detail.dataset) + '</div>';
+      if (detail.compiledSqlError) {
+        html += '<div class="docs-error">compile error: ' + escapeHtml(detail.compiledSqlError) + '</div>';
+      } else {
+        html += '<pre>' + escapeHtml(detail.compiledSql) + '</pre>';
+      }
+      return html;
+    }
+    if (kind === 'move') {
+      return '<div>' + escapeHtml(detail.sourceType) + ' &rarr; ' + escapeHtml(detail.targetType) + '</div>';
+    }
+    if (kind === 'publish') {
+      var parts = detail.charts.map(function (c) { return c.title + ' (' + c.type + ')'; })
+        .concat(detail.tables.map(function (t) { return t.title + ' (' + t.mode + ')'; }));
+      return '<div>' + escapeHtml(parts.join(', ')) + '</div>';
+    }
+    return '';
+  }
+
+  function renderDocsNodeSection(node) {
+    return '<div class="board-node" data-block-id="' + escapeHtml(node.name) + '">'
+      + '<h2>' + escapeHtml(node.name) + '<span class="docs-kind-badge">' + escapeHtml(node.kind) + '</span></h2>'
+      + renderDocsDetailHtml(node.kind, node.detail)
+      + '</div>';
+  }
+
+  function renderDocsHtml(payload) {
+    var boardNodes = payload.map(function (node) {
+      return { id: node.name, relatesTo: node.dependsOn[0] || null };
+    });
+    var boardEdges = [];
+    payload.forEach(function (node) {
+      node.dependsOn.forEach(function (dep) { boardEdges.push({ from: dep, to: node.name }); });
+    });
+    var nodesHtml = payload.map(renderDocsNodeSection).join('');
+    var blocks = '<div class="board-viewport"><div class="board-canvas" id="board-canvas">'
+      + '<svg class="board-edges" id="board-edges"></svg>'
+      + nodesHtml
+      + '</div></div>';
+    var script = 'window.__BOARD_NODES__ = ' + JSON.stringify(boardNodes).replace(/</g, '\\u003c') + ';'
+      + 'window.__BOARD_EDGES__ = ' + JSON.stringify(boardEdges).replace(/</g, '\\u003c') + ';'
+      + THEME_TOGGLE_JS + BOARD_LAYOUT_CLIENT_JS + BOARD_CLIENT_JS;
+    var d3Script = '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>';
+    var themeInitScript = '<script>' + THEME_INIT_JS + '</script>';
+    var css = REPORT_CSS + BOARD_CSS + DOCS_CSS;
+    return '<!doctype html><html><head><meta charset="utf-8">'
+      + '<title>notsobigdata docs</title>'
+      + '<style>' + css + '</style>' + themeInitScript + d3Script + '</head><body>'
+      + THEME_TOGGLE_HTML
+      + '<main>' + blocks + '</main>'
+      + '<script>' + script + '</script>'
+      + '</body></html>';
+  }
+
   // ==================================================================
   //   src/cli.js
   // ==================================================================
@@ -7283,6 +7355,6 @@ var NotSoBigData = (function () {
 
   return {
     cli: cli,
-    __test: { buildDocsPayload: buildDocsPayload, discoverNodesForTest: function () { return discoverNodes().nodes; } }
+    __test: { buildDocsPayload: buildDocsPayload, discoverNodesForTest: function () { return discoverNodes().nodes; }, renderDocsHtml: renderDocsHtml }
   };
 })();
