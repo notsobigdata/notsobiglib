@@ -1,0 +1,4 @@
+<!-- test/fixtures/docs-orders.html -->
+<script type="text/sql">
+select * from {{ ref("rawOrders") }} join {{ ref("rawCustomers") }} using (customer_id)
+</script>
