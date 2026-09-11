@@ -780,7 +780,7 @@ function resolveLoggingConfig() {
 // Drive file entry, even standalone ones, so its parent folder is the
 // project's folder. Falls back to Drive's root when that file has no
 // parent (e.g. it sits directly in "My Drive").
-function resolveManifestFolderId(folderId) {
+function resolveDefaultDriveFolderId(folderId) {
   if (folderId) {
     return folderId;
   }
@@ -894,9 +894,9 @@ function writeManifestFile(logPrefix, config, otherConfig, commandText, ok, resu
     return { written: false, reason: 'disabled' };
   }
   try {
-    var folderId = resolveManifestFolderId(config.folderId);
+    var folderId = resolveDefaultDriveFolderId(config.folderId);
     if (otherConfig.enabled && config.fileName === otherConfig.fileName) {
-      var otherFolderId = resolveManifestFolderId(otherConfig.folderId);
+      var otherFolderId = resolveDefaultDriveFolderId(otherConfig.folderId);
       if (folderId === otherFolderId) {
         var message = 'notsobigdataManifest and notsobigdataCompileManifest resolve to the same Drive file (folderId "'
           + folderId + '", fileName "' + config.fileName + '") - refusing to write, since cli(\'run\') and cli(\'compile\') '
