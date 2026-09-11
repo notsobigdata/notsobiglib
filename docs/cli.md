@@ -239,13 +239,15 @@ an interactive board — the same pannable/zoomable, dark-mode-capable
 layout `publish()`'s `layout: 'board'` charts already use (see
 [docs/publish.md](publish.md)) — with one box per node and an edge for
 every real `dependsOn` pair. Each node's own section then shows detail
-specific to its kind:
+specific to its kind — and the JSON `cli('docs')` itself returns (see
+below) carries a couple of fields beyond what's actually drawn on the
+page:
 
-| Kind | Detail shown |
-| --- | --- |
-| `move` | its `source`/`target` connector types |
-| `model` | `materialized`, `projectId`/`dataset`, declared `tests`, and its fully compiled SQL — the same `{{ ref() }}`/`{{ var() }}`/macro resolution `cli('compile')` already does, not a second implementation of it |
-| `publish` | its declared `charts`/`tables` — id, title, and chart type (charts) or table mode (tables) only; no live data is fetched, `docs` never touches BigQuery |
+| Kind | Shown on the page | Also in the returned `detail`, but not rendered |
+| --- | --- | --- |
+| `move` | its `source`/`target` connector types | — |
+| `model` | `materialized`, `projectId`/`dataset`, and its fully compiled SQL (or a compile-error message in its place) — the same `{{ ref() }}`/`{{ var() }}`/macro resolution `cli('compile')` already does, not a second implementation of it | declared `tests` |
+| `publish` | its declared `charts`/`tables`, as title + chart type (charts) or title + table mode (tables); no live data is fetched, `docs` never touches BigQuery | each chart's/table's `id`, and the node's `layoutType` |
 
 A `model` node whose `{{ ref() }}`/`{{ var() }}` couldn't be resolved at
 discovery shows a discovery-error message in place of the fields above —
