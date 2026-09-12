@@ -86,6 +86,32 @@ report's generated HTML is byte-identical to before this change; the new
 global is dead code from `publish()`'s point of view, not a
 behind-the-scenes change to its output.
 
+## Sidebar + detail drawer replaced the inline detail dump
+
+Each board node used to have `renderDocsDetailHtml`'s output dumped
+straight into its box in the graph itself — cramped, and unreadable once
+metric-card-sized nodes (see `src/publish.md`'s "Board layout") replaced
+the old fixed 520x340 boxes. `renderDocsHtml` now renders a
+`.docs-sidebar` alongside the graph: a search input plus one
+`.docs-kind-group` per kind (`Object.keys(DOCS_KIND_TOKEN)`, so a new
+kind picks up its own group for free — no hand-maintained kind list to
+keep in sync), each with a `(count)` and one `.docs-node-row` per node,
+colored by the same `DOCS_KIND_TOKEN` var a node's kind-bar already
+uses. A node's detail no longer lives in the graph at all — clicking
+either a sidebar row or the node itself slides in `#docs-drawer`
+(`position: fixed`, right edge of the viewport) showing that node's name
+and detail HTML, dismissed by its own close button, Escape, or a click
+outside the drawer/graph (mirrors `publish.js`'s expand-overlay dismissal
+— see `src/publish.md`).
+
+This is additive, not a rework: `buildDocsPayload`/`buildDocsDetail` are
+untouched, still just building the same plain-object payload they always
+did. `renderDocsHtml` embeds that detail as one new global,
+`window.__DOCS_DETAIL_BY_NAME__` (`{ [node.name]: { html: ... } }`), which
+`DOCS_DRAWER_CLIENT_JS` reads by name when a row/node is clicked — the
+drawer is a client-side view onto data the server already had, not a new
+per-node fetch.
+
 ## The `__test` back door
 
 `buildDocsPayload`/`discoverNodesForTest`/`renderDocsHtml` are pure
