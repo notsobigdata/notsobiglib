@@ -248,8 +248,8 @@ function testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize() {
   var boardHtml = getHtml();
   assert.ok(/d3\.stratify\(\)/.test(boardHtml), 'expected d3.stratify() in the board client script, got: ' + boardHtml);
   assert.ok(/__board_root__/.test(boardHtml), 'expected the synthetic-root sentinel id, got: ' + boardHtml);
-  assert.ok(/var spreadSize = 560;/.test(boardHtml) && /var depthSize = 400;/.test(boardHtml), 'expected spreadSize/depthSize computed from BOARD_BOX_WIDTH/HEIGHT+H_GAP/V_GAP (560, 400), got: ' + boardHtml);
-  assert.ok(/d3\.tree\(\)\.nodeSize\(isHorizontal \? \[400, 560\] : \[spreadSize, depthSize\]\)/.test(boardHtml), 'expected direction-aware nodeSize swapping to [400, 560] for horizontal directions, got: ' + boardHtml);
+  assert.ok(/var spreadSize = 280;/.test(boardHtml) && /var depthSize = 220;/.test(boardHtml), 'expected spreadSize/depthSize computed from BOARD_BOX_WIDTH/HEIGHT+H_GAP/V_GAP (280, 220), got: ' + boardHtml);
+  assert.ok(/d3\.tree\(\)\.nodeSize\(isHorizontal \? \[220, 280\] : \[spreadSize, depthSize\]\)/.test(boardHtml), 'expected direction-aware nodeSize swapping to [220, 280] for horizontal directions, got: ' + boardHtml);
 
   var linearResult = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
   assert.strictEqual(linearResult.status, 'success', 'expected the shimmed linear run to succeed, got: ' + linearResult.error);
