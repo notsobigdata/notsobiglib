@@ -4661,8 +4661,7 @@ var NotSoBigData = (function () {
     if (block.mode === 'raw') {
       return { headline: block.rows.length, points: [] };
     }
-    var format = block.columns[1] ? block.columns[1].format : 'string';
-    var values = block.rows.map(function (row) { return sortableValue(row[1], format); });
+    var values = block.rows.map(function (row) { return sortableValue(row[1], 'number'); });
     return { headline: values.reduce(function (sum, v) { return sum + (typeof v === 'number' ? v : 0); }, 0), points: values };
   }
 
