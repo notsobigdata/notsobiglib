@@ -5010,6 +5010,7 @@ var NotSoBigData = (function () {
     'function applyFilterToTable(tableConfig) {',
     '  var filteredRows = filteredRowsFor(tableConfig.reactsTo);',
     '  var newTable = withDetail(tableConfig.mode === "raw" ? buildRawTablePayload(tableConfig, filteredRows) : buildAggregatedTablePayload(tableConfig, filteredRows), tableConfig, filteredRows);',
+    '  newTable.mode = tableConfig.mode === "raw" ? "raw" : "aggregated";',
     '  if (typeof updateMetricCardById === "function") { updateMetricCardById(tableConfig.id, newTable); }',
     '  var replace = window.__PUBLISH_TABLE_REPLACERS__ && window.__PUBLISH_TABLE_REPLACERS__[tableConfig.id];',
     '  if (replace) { replace(newTable); }',
