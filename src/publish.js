@@ -771,6 +771,43 @@ var BOARD_BOX_HEIGHT = 340;
 var BOARD_H_GAP = 40;
 var BOARD_V_GAP = 60;
 
+// Pure, D3-free position math for layout: 'board'. d3.stratify()/d3.tree()
+// (client-only - see BOARD_LAYOUT_CLIENT_JS, Task 4) produce each real
+// node's {id, x, y}: x is always the sibling-spread offset, y is always
+// the depth offset, regardless of visual orientation - which is exactly
+// why this function can stay D3-free and Node-testable. All this does is
+// decide which of x/y becomes CSS left/top for a given `direction`, and
+// whether the depth axis runs forward or reversed. The caller (Task 4)
+// is responsible for calling d3.tree().nodeSize() with boxWidth/boxHeight
+// swapped for the two horizontal directions *before* this ever runs -
+// this function only consumes the resulting x/y, it never computes them.
+function computeBoardPositions(treeNodes, direction, boxWidth, boxHeight) {
+  var isHorizontal = direction === 'left-right' || direction === 'right-left';
+  var isReversed = direction === 'bottom-top' || direction === 'right-left';
+  var spreadValues = treeNodes.map(function (n) { return n.x; });
+  var depthValues = treeNodes.map(function (n) { return n.y; });
+  var minSpread = Math.min.apply(null, spreadValues);
+  var maxDepth = Math.max.apply(null, depthValues);
+  var positions = {};
+  treeNodes.forEach(function (n) {
+    var spread = n.x - minSpread;
+    var depth = isReversed ? (maxDepth - n.y) : n.y;
+    positions[n.id] = isHorizontal ? { left: depth, top: spread } : { left: spread, top: depth };
+  });
+  var maxLeft = 0, maxTop = 0;
+  Object.keys(positions).forEach(function (id) {
+    maxLeft = Math.max(maxLeft, positions[id].left + boxWidth);
+    maxTop = Math.max(maxTop, positions[id].top + boxHeight);
+  });
+  var anchorByDirection = {
+    'top-bottom': { from: 'bottom', to: 'top' },
+    'bottom-top': { from: 'top', to: 'bottom' },
+    'left-right': { from: 'right', to: 'left' },
+    'right-left': { from: 'left', to: 'right' }
+  };
+  return { positions: positions, bounds: { width: maxLeft, height: maxTop }, anchor: anchorByDirection[direction] };
+}
+
 // Fixed design tokens - see the design spec's "Design tokens" section.
 // No per-report customization in v1: every published dashboard looks the
 // same on purpose, the same way every model's compiled SQL follows one
