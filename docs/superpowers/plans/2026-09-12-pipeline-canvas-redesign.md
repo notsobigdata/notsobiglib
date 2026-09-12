@@ -1090,8 +1090,19 @@ In `src/publish.js`, right after `BOARD_LAYOUT_CLIENT_JS` (Task 4), add:
 // down drawBarChart/drawLineChart/drawPieChart call - those assume a
 // full-size container with axes/labels, see the design spec's Task 3
 // rationale) and moves a node's hidden .board-node-full section into the
-// expand overlay on click.
+// expand overlay on click. Declares sortableValue.toString() alongside
+// computeMetricCardData.toString() - computeMetricCardData's aggregated-
+// table branch calls sortableValue, so both must ship together here
+// (same "declare what a reused function itself calls, in the same list"
+// rule DETAIL_REUSED_FUNCTIONS_JS's own [formatValue, buildRawTablePayload]
+// pair already follows, since buildRawTablePayload calls formatValue). A
+// report whose tables[] also triggers TABLE_CLIENT_JS ends up with
+// sortableValue declared twice (harmless - a plain function declaration
+// redeclared in the same non-strict scope is legal and both bodies are
+// identical) - accepted here rather than adding another hasX branch to
+// dedupe a 5-line function.
 var MINI_CHART_CLIENT_JS = [
+  sortableValue.toString(),
   computeMetricCardData.toString(),
   'function drawMiniChart(container, points) {',
   '  if (!points.length) { return; }',
@@ -1211,6 +1222,7 @@ function testPublishBoardNodesRenderAsCompactMetricCardsWithHiddenFullSection() 
   assert.ok(/class="board-metric-card" data-metric-card="/.test(html), 'expected a compact metric card slot per node, got: ' + html);
   assert.ok(/class="board-node-full" data-full-section="/.test(html), 'expected the full chart/table section to still be emitted, hidden, got: ' + html);
   assert.ok(/function computeMetricCardData\(blockType, block\)/.test(html), 'expected computeMetricCardData to be reused verbatim in the emitted script, got: ' + html);
+  assert.ok(/function sortableValue\(cell, format\)/.test(html), 'expected sortableValue to be declared alongside computeMetricCardData, which calls it, got: ' + html);
   assert.ok(/function openExpandModal\(title, contentEl\)/.test(html), 'expected the expand overlay function, got: ' + html);
 }
 ```
