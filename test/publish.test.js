@@ -2099,6 +2099,22 @@ function testPublishButtonsAndSelectsInheritThemedTextColor() {
   assert.ok(/\.table-csv-export\s*\{[^}]*background:\s*var\(--paper\)/.test(html), 'expected .table-csv-export to have its own themed background (not bare native chrome), got: ' + html);
 }
 
+// Task 3 (docs command): BOARD_LAYOUT_CLIENT_JS now reads window.__BOARD_NODES__
+// instead of deriving blocks from window.__PUBLISH_PAYLOAD__ inline, and
+// falls back to relatesTo-derived edges only when window.__BOARD_EDGES__
+// isn't set - additive changes that must leave publish's own board output
+// unchanged. See docs/superpowers/specs/2026-09-11-docs-command-design.md §4.
+function testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed board run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/window\.__BOARD_NODES__ = window\.__PUBLISH_PAYLOAD__\.charts\.concat\(window\.__PUBLISH_PAYLOAD__\.tables\)\.map\(/.test(html), 'expected the new __BOARD_NODES__ global to be derived from the existing payload, got: ' + html);
+  assert.ok(/var blocks = window\.__BOARD_NODES__;/.test(html), 'expected the layout script to read window.__BOARD_NODES__, got: ' + html);
+  assert.ok(/var edges = window\.__BOARD_EDGES__ \|\| blocks\.filter\(function \(b\) \{ return b\.relatesTo; \}\)/.test(html), 'expected the relatesTo-derived edge fallback to remain byte-identical, got: ' + html);
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -2225,5 +2241,6 @@ module.exports = {
   testPublishThemeToggleClickHandlerPersistsChoice: testPublishThemeToggleClickHandlerPersistsChoice,
   testPublishLineChartUsesVarTealNotHardcodedHex: testPublishLineChartUsesVarTealNotHardcodedHex,
   testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard: testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard,
-  testPublishButtonsAndSelectsInheritThemedTextColor: testPublishButtonsAndSelectsInheritThemedTextColor
+  testPublishButtonsAndSelectsInheritThemedTextColor: testPublishButtonsAndSelectsInheritThemedTextColor,
+  testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault: testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault
 };

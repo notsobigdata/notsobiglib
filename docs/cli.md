@@ -24,6 +24,7 @@ NotSoBigData.cli('debug')                   // check OAuth scopes/services per c
 NotSoBigData.cli('debug --select orders')   // check just that node's connector(s)
 NotSoBigData.cli('sources')                 // check freshness + tests for every declared source table
 NotSoBigData.cli('sources --select stripe') // just one source ("stripe.payments" selects one table)
+NotSoBigData.cli('docs')                    // write a project doc site (DAG + per-node detail) to Drive
 NotSoBigData.cli('hello')                   // check the library loaded and see what it can find
 NotSoBigData.cli('help')                    // the command list
 ```
@@ -219,11 +220,83 @@ worth seeing, not as a run-blocking failure. Like `debug`, this returns
 its own report shape (no `nodes[]`, no `manifest` — a diagnostic check,
 not a record of pipeline output) and writes no manifest.
 
+### cli('docs') — a project doc site
+
+Writes one self-contained `.html` file to Drive documenting the whole
+project: every declared node, drawn as a dependency graph, plus per-node
+detail — the closest thing this library has to `dbt docs generate`.
+Unlike every other command, `docs` takes no `--select`/`--exclude` —
+there's no "just this node" mode, since the point is to see the whole
+project's shape in one place.
+
+```javascript
+NotSoBigData.cli('docs')                        // write the doc site to the script's own parent Drive folder
+NotSoBigData.cli('docs --folder-id 1AbCdEf...')  // write it into a specific Drive folder instead
+```
+
+The page shows the same dependency graph `cli('list')` resolves, drawn on
+an interactive board — the same pannable/zoomable, dark-mode-capable
+layout `publish()`'s `layout: 'board'` charts already use (see
+[docs/publish.md](publish.md)) — with one box per node and an edge for
+every real `dependsOn` pair. Each node's own section then shows detail
+specific to its kind — and the JSON `cli('docs')` itself returns (see
+below) carries a couple of fields beyond what's actually drawn on the
+page:
+
+| Kind | Shown on the page | Also in the returned `detail`, but not rendered |
+| --- | --- | --- |
+| `move` | its `source`/`target` connector types | — |
+| `model` | `materialized`, `projectId`/`dataset`, and its fully compiled SQL (or a compile-error message in its place) — the same `{{ ref() }}`/`{{ var() }}`/macro resolution `cli('compile')` already does, not a second implementation of it | declared `tests` |
+| `publish` | its declared `charts`/`tables`, as title + chart type (charts) or title + table mode (tables); no live data is fetched, `docs` never touches BigQuery | each chart's/table's `id`, and the node's `layoutType` |
+
+A `model` node whose `{{ ref() }}`/`{{ var() }}` couldn't be resolved at
+discovery shows a discovery-error message in place of the fields above —
+the same `discoveryError` `cli('list')`/`cli('compile')` already surface
+for that node. That's distinct from the rarer case where a model passes
+discovery but `compileModel()` itself still throws while `docs` is
+resolving its SQL for display: that node shows a compile-error message
+alongside its other fields instead of the SQL, rather than hiding the
+whole node the way a discovery error does.
+
+`docs` declares no new config and adds no new node kind. It only ever
+reports what a node's own `source`/`target`/`materialized`/`tests`/
+`charts`/`tables` config already carries — there's nothing new to add to
+a node just so `docs` has something to show.
+
+The output is always one fixed file, `notsobigdata-docs.html`, upserted
+by name — every `cli('docs')` overwrites the same file in place, the same
+"regenerate in place" behavior `dbt docs generate` has for its own
+`index.html`, rather than piling up one dated copy per run. `--folder-id`
+(or `--folder-id=<id>`) picks which Drive folder it's written into;
+without it, `docs` writes to the same folder `cli('run')`'s manifest
+already defaults to — the Apps Script project's own parent Drive folder,
+falling back to Drive's root folder if the script has no parent.
+`--folder-id` is specific to `docs`; passing it to any other command is
+an error.
+
+```javascript
+{
+  ok: true,
+  command: 'docs',
+  fileId: '...',
+  nodes: [
+    { name: 'rawOrders', kind: 'move',  dependsOn: [], detail: { sourceType: 'sheets', targetType: 'bigquery' } },
+    { name: 'orders',    kind: 'model', dependsOn: ['rawOrders'], detail: { materialized: 'view', projectId: '...', dataset: '...', tests: [], compiledSql: 'SELECT * FROM ...' } }
+  ]
+}
+```
+
+Like `debug`/`sources`, this is its own report shape, not the `nodes[]`
+shape `run`/`list`/`compile` share, and it writes no manifest — a doc
+site is a rendering of the project's own declared config, not a record
+of pipeline output.
+
 ### What cli() returns
 
 `hello` and `help` return their message as a string. `debug` returns its
 own report shape — see [above](#clidebug-check-your-oauth-scopesservices-before-clirun-does).
 `sources` also returns its own shape — see [above](#clisources--check-declared-sources).
+`docs` returns its own shape too — see [above](#clidocs--a-project-doc-site).
 `run`, `list` and `compile` share this one:
 
 ```javascript

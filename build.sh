@@ -21,7 +21,7 @@ cd "$(dirname "$0")"
 # is a list of hoisted function declarations sharing one closure - but an
 # explicit list keeps the built file's reading order stable and makes
 # "what is this library made of" a one-line answer.
-MODULES="move.js model.js publish.js cli.js"
+MODULES="move.js model.js publish.js docs.js cli.js"
 
 OUTPUT="src.js"
 
@@ -87,7 +87,8 @@ build() {
     # The wrapper lives here rather than in the modules because a bare
     # top-level "return" would make cli.js an invalid file on its own.
     echo "  return {"
-    echo "    cli: cli"
+    echo "    cli: cli,"
+    echo "    __test: { buildDocsPayload: buildDocsPayload, discoverNodesForTest: function () { return discoverNodes().nodes; }, renderDocsHtml: renderDocsHtml }"
     echo "  };"
     echo "})();"
   } > "$dest"

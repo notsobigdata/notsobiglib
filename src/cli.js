@@ -122,7 +122,7 @@ function nodeLabel(node) {
   return node.name + ' (' + node.kind + ')';
 }
 
-var COMMANDS = ['run', 'list', 'compile', 'debug', 'sources', 'hello', 'help'];
+var COMMANDS = ['run', 'list', 'compile', 'debug', 'sources', 'docs', 'hello', 'help'];
 
 function usage() {
   return [
@@ -138,6 +138,8 @@ function usage() {
     '  cli("debug")                   check OAuth scopes/services for each node\'s connector, without writing anything',
     '  cli("sources")                 check freshness + tests for every source declared in notsobigdataModels.sources',
     '  cli("sources --select stripe")     ... just one source ("stripe.payments" selects one table)',
+    '  cli("docs")                    write a project doc site (DAG + per-node detail) to Drive',
+    '  cli("docs --folder-id x")          ... into a specific Drive folder instead of the script\'s own parent folder',
     '  cli("hello")                   check the library loaded and see which nodes it can find',
     '  cli("help")                    this message',
     '',
@@ -151,11 +153,12 @@ function usage() {
   ].join('\n');
 }
 
-// Turns a command string into { command, select, exclude, target }. Deliberately
-// a tiny hand-rolled parser rather than anything clever: the whole
-// grammar is one verb plus four optional flags (--select, --exclude, --target,
-// --full-refresh), and both "--select a,b" and "--select=a,b" are accepted
-// because both spellings are muscle memory for anyone who has used a real CLI.
+// Turns a command string into { command, select, exclude, target, fullRefresh,
+// folderId }. Deliberately a tiny hand-rolled parser rather than anything
+// clever: the whole grammar is one verb plus five optional flags (--select,
+// --exclude, --target, --full-refresh, --folder-id), and both "--select a,b"
+// and "--select=a,b" are accepted because both spellings are muscle memory
+// for anyone who has used a real CLI.
 // --full-refresh is a value-less boolean flag, only legal on run/compile.
 function parseCommand(input) {
   var text = typeof input === 'string' ? input.trim() : '';
@@ -172,7 +175,7 @@ function parseCommand(input) {
   if (COMMANDS.indexOf(command) === -1) {
     throw new Error('cli(): unknown command "' + command + '".\n\n' + usage());
   }
-  var parsed = { command: command, select: [], exclude: [], target: null, fullRefresh: false };
+  var parsed = { command: command, select: [], exclude: [], target: null, fullRefresh: false, folderId: null };
   while (tokens.length) {
     var token = tokens.shift();
     var flag = token;
@@ -182,8 +185,8 @@ function parseCommand(input) {
       flag = token.slice(0, equalsAt);
       value = token.slice(equalsAt + 1);
     }
-    if (flag !== '--select' && flag !== '--exclude' && flag !== '--target' && flag !== '--full-refresh') {
-      throw new Error('cli(): unknown option "' + flag + '". Expected "--select", "--exclude", "--target", or "--full-refresh".\n\n' + usage());
+    if (flag !== '--select' && flag !== '--exclude' && flag !== '--target' && flag !== '--full-refresh' && flag !== '--folder-id') {
+      throw new Error('cli(): unknown option "' + flag + '". Expected "--select", "--exclude", "--target", "--full-refresh", or "--folder-id".\n\n' + usage());
     }
     if (flag === '--full-refresh') {
       // --full-refresh is a value-less boolean flag
@@ -206,6 +209,17 @@ function parseCommand(input) {
           throw new Error('cli(): "--target" can only be specified once.');
         }
         parsed.target = value;
+      } else if (flag === '--folder-id') {
+        if (!value) {
+          throw new Error('cli(): "--folder-id" needs a value, e.g. --folder-id 1AbCdEf...');
+        }
+        if (command !== 'docs') {
+          throw new Error('cli(): "--folder-id" is only valid for "docs", not for "' + command + '".');
+        }
+        if (parsed.folderId !== null) {
+          throw new Error('cli(): "--folder-id" can only be specified once.');
+        }
+        parsed.folderId = value;
       } else {
         var list = value.split(',')
           .map(function (item) { return item.trim(); })
@@ -780,7 +794,7 @@ function resolveLoggingConfig() {
 // Drive file entry, even standalone ones, so its parent folder is the
 // project's folder. Falls back to Drive's root when that file has no
 // parent (e.g. it sits directly in "My Drive").
-function resolveManifestFolderId(folderId) {
+function resolveDefaultDriveFolderId(folderId) {
   if (folderId) {
     return folderId;
   }
@@ -880,7 +894,7 @@ function buildManifest(commandText, ok, results, ignored) {
 // already uses, not new drive-writing logic.
 //
 // otherConfig is only consulted (and only ever costs a Drive lookup, via
-// resolveManifestFolderId(), when its own folderId is unset) if it's
+// resolveDefaultDriveFolderId(), when its own folderId is unset) if it's
 // enabled - a disabled manifest can never actually be overwritten, so
 // there is nothing to guard against. When both configs resolve to the
 // same folderId + fileName, refusing to write (rather than writing
@@ -894,9 +908,9 @@ function writeManifestFile(logPrefix, config, otherConfig, commandText, ok, resu
     return { written: false, reason: 'disabled' };
   }
   try {
-    var folderId = resolveManifestFolderId(config.folderId);
+    var folderId = resolveDefaultDriveFolderId(config.folderId);
     if (otherConfig.enabled && config.fileName === otherConfig.fileName) {
-      var otherFolderId = resolveManifestFolderId(otherConfig.folderId);
+      var otherFolderId = resolveDefaultDriveFolderId(otherConfig.folderId);
       if (folderId === otherFolderId) {
         var message = 'notsobigdataManifest and notsobigdataCompileManifest resolve to the same Drive file (folderId "'
           + folderId + '", fileName "' + config.fileName + '") - refusing to write, since cli(\'run\') and cli(\'compile\') '
@@ -1474,6 +1488,11 @@ function cli(input) {
     throw new Error('cli(): found no declared nodes. Config objects must be declared as top-level "var"s marked with a "kind" - one declared inside a function is invisible to cli(). Run cli("hello") to see what the library can find.');
   }
   assertDependenciesExist(discovered.nodes);
+  if (parsed.command === 'docs') {
+    var docsReport = runDocsCommand(discovered.nodes, parsed.folderId);
+    Logger.log('DONE  cli("' + input + '") - docs written to ' + docsReport.fileId);
+    return docsReport;
+  }
   applyTargetOverlay(discovered.nodes, parsed.target);
   applyFullRefresh(discovered.nodes, parsed.fullRefresh);
   var selected = applySelection(discovered.nodes, parsed.select, parsed.exclude);
