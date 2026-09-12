@@ -994,6 +994,7 @@ var FILTER_CLIENT_JS = [
   'function applyFilterToChart(chartConfig) {',
   '  var filteredRows = filteredRowsFor(chartConfig.reactsTo);',
   '  var newChart = withDetail(buildChartPayload(chartConfig, filteredRows), chartConfig, filteredRows);',
+  '  if (typeof updateMetricCardById === "function") { updateMetricCardById(chartConfig.id, newChart); }',
   '  var container = document.getElementById("chart-" + chartConfig.id);',
   '  if (!container) { return; }',
   '  while (container.firstChild) { container.removeChild(container.firstChild); }',
@@ -1005,6 +1006,7 @@ var FILTER_CLIENT_JS = [
   'function applyFilterToTable(tableConfig) {',
   '  var filteredRows = filteredRowsFor(tableConfig.reactsTo);',
   '  var newTable = withDetail(tableConfig.mode === "raw" ? buildRawTablePayload(tableConfig, filteredRows) : buildAggregatedTablePayload(tableConfig, filteredRows), tableConfig, filteredRows);',
+  '  if (typeof updateMetricCardById === "function") { updateMetricCardById(tableConfig.id, newTable); }',
   '  var replace = window.__PUBLISH_TABLE_REPLACERS__ && window.__PUBLISH_TABLE_REPLACERS__[tableConfig.id];',
   '  if (replace) { replace(newTable); }',
   '}',
@@ -1714,6 +1716,13 @@ var MINI_CHART_CLIENT_JS = [
   '  });',
   '  container.innerHTML = "<svg viewBox=\\"0 0 " + w + " " + h + "\\" preserveAspectRatio=\\"none\\" width=\\"100%\\" height=\\"" + h + "\\"><polyline points=\\"" + pts.join(" ") + "\\" fill=\\"none\\" stroke=\\"var(--accent)\\" stroke-width=\\"1.8\\"></polyline></svg>";',
   '}',
+  'function renderMetricCard(card, blockType, block) {',
+  '  var metric = computeMetricCardData(blockType, block);',
+  '  card.innerHTML = "<div class=\\"board-metric-label\\"></div><div class=\\"board-metric-value\\"></div><div class=\\"board-metric-mini\\"></div>";',
+  '  card.querySelector(".board-metric-label").textContent = block.title;',
+  '  card.querySelector(".board-metric-value").textContent = metric.headline.toLocaleString("en-US");',
+  '  drawMiniChart(card.querySelector(".board-metric-mini"), metric.points);',
+  '}',
   'function renderMetricCards() {',
   '  var payload = window.__PUBLISH_PAYLOAD__;',
   '  Array.prototype.forEach.call(document.querySelectorAll("[data-metric-card]"), function (card) {',
@@ -1722,12 +1731,21 @@ var MINI_CHART_CLIENT_JS = [
   '    var blockType = node.getAttribute("data-block-type");',
   '    var block = (blockType === "chart" ? payload.charts : payload.tables).filter(function (b) { return b.id === id; })[0];',
   '    if (!block) { return; }',
-  '    var metric = computeMetricCardData(blockType, block);',
-  '    card.innerHTML = "<div class=\\"board-metric-label\\"></div><div class=\\"board-metric-value\\"></div><div class=\\"board-metric-mini\\"></div>";',
-  '    card.querySelector(".board-metric-label").textContent = block.title;',
-  '    card.querySelector(".board-metric-value").textContent = metric.headline.toLocaleString("en-US");',
-  '    drawMiniChart(card.querySelector(".board-metric-mini"), metric.points);',
+  '    renderMetricCard(card, blockType, block);',
   '  });',
+  '}',
+  // Board-only counterpart to applyHighlight - FILTER_CLIENT_JS's
+  // applyFilterToChart/applyFilterToTable build a fresh newChart/newTable
+  // on every filter change but never write it back to
+  // window.__PUBLISH_PAYLOAD__, so renderMetricCards() alone would just
+  // redraw the same stale block. This redraws one card in place from the
+  // caller's own up-to-date object, keyed by data-metric-card="<id>" (set
+  // server-side, one per board node) rather than block-type lookup.
+  'function updateMetricCardById(id, block) {',
+  '  var card = document.querySelector("[data-metric-card=\\"" + id + "\\"]");',
+  '  if (!card) { return; }',
+  '  var blockType = card.closest(".board-node").getAttribute("data-block-type");',
+  '  renderMetricCard(card, blockType, block);',
   '}',
   'function openExpandModal(title, contentEl) {',
   '  closeExpandModal();',
