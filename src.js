@@ -4769,9 +4769,8 @@ var NotSoBigData = (function () {
   // two fixed token sets (light default + dark), switched by the
   // report-agnostic toggle in THEME_TOGGLE_HTML/THEME_INIT_JS/
   // THEME_TOGGLE_JS below - still nothing a report author can configure.
-  // Colors follow Google's own Material palette (Workspace/Cloud Console
-  // grays, the rgba(60,64,67,...) elevation-shadow tint, Google's actual
-  // light/dark accent blues and reds) rather than an invented brand.
+  // Custom light/dark palette per the pipeline-canvas-redesign spec for
+  // visual consistency across all published reports.
   var DARK_TOKENS_CSS = '--paper: #10141B; --surface: #171C25; --paper-line: #2A313D; --ink: #E6E9EE; --ink-soft: #98A2B3; --accent: #7C97FF; --accent-soft: #223055; --bad: #F87171; --good: #4ADE80; --good-soft: #16321F; --warn: #F2B355; --warn-soft: #3A2A10; --move: #7C97FF; --model: #C09BFF; --publish: #F0A868; --shadow-sm: 0 1px 2px 0 rgba(0,0,0,.45), 0 2px 6px 2px rgba(0,0,0,.3); --shadow: 0 1px 3px 0 rgba(0,0,0,.5), 0 4px 8px 3px rgba(0,0,0,.35);';
   var REPORT_CSS = [
     ':root {',
