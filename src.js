@@ -4930,7 +4930,17 @@ var NotSoBigData = (function () {
     '.board-toolbar { position: absolute; right: 14px; bottom: 14px; z-index: 60; display: flex; gap: 2px; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 4px; }',
     '.board-toolbar button { width: 28px; height: 28px; border: none; background: none; border-radius: 6px; cursor: pointer; color: var(--ink-soft); font-size: 13px; }',
     '.board-toolbar button:hover { background: var(--paper); color: var(--ink); }',
-    '.board-toolbar .board-toolbar-divider { width: 1px; background: var(--paper-line); margin: 4px 2px; }'
+    '.board-toolbar .board-toolbar-divider { width: 1px; background: var(--paper-line); margin: 4px 2px; }',
+    '.board-metric-card { padding: 11px 13px; height: 100%; box-sizing: border-box; overflow: hidden; }',
+    '.board-metric-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-soft); font-weight: 600; }',
+    '.board-metric-value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 600; margin-top: 2px; }',
+    '.board-metric-mini { display: block; margin-top: 6px; }',
+    '.board-node-full { display: none; }',
+    '.board-expand-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 1000; }',
+    '.board-expand-box { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; max-width: 90vw; max-height: 85vh; overflow: auto; min-width: 360px; }',
+    '.board-expand-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }',
+    '.board-expand-header h3 { margin: 0; font-size: 14px; }',
+    '.board-expand-close { font-family: var(--mono); font-size: 16px; background: none; border: none; cursor: pointer; }'
   ].join('\n');
 
   // One <select> per filters[] entry: an "All" option plus every distinct
@@ -5633,7 +5643,7 @@ var NotSoBigData = (function () {
     '      if (!dragging) { return; }',
     '      dragging = false;',
     '      el.classList.remove("board-node-dragging");',
-    '      if (moved) { persistPositions(); }',
+    '      if (moved) { persistPositions(); el.dataset.justDragged = "true"; }',
     '    }',
     '    el.addEventListener("pointerup", endDrag);',
     '    el.addEventListener("pointercancel", endDrag);',
@@ -5661,6 +5671,118 @@ var NotSoBigData = (function () {
     '    blocks.forEach(function (b) { var el = nodeEl(b.id); if (el) { resizeObserver.observe(el); } });',
     '  }',
     '  window.__notsobigBoardApi__ = { redraw: redrawEdges, setHighlight: setHighlight, resetPositions: resetPositions };',
+    '});'
+  ].join('\n');
+
+  // Draws every board node's compact metric card from the already-embedded
+  // payload (window.__PUBLISH_PAYLOAD__) and wires the click-to-expand
+  // overlay. computeMetricCardData (Task 6) decides the numbers; this only
+  // draws them (a small hand-rolled SVG sparkline/mini-bars, not a scaled-
+  // down drawBarChart/drawLineChart/drawPieChart call - those assume a
+  // full-size container with axes/labels, see the design spec's Task 3
+  // rationale) and moves a node's hidden .board-node-full section into the
+  // expand overlay on click. Declares sortableValue.toString() alongside
+  // computeMetricCardData.toString() - computeMetricCardData's aggregated-
+  // table branch calls sortableValue, so both must ship together here
+  // (same "declare what a reused function itself calls, in the same list"
+  // rule DETAIL_REUSED_FUNCTIONS_JS's own [formatValue, buildRawTablePayload]
+  // pair already follows, since buildRawTablePayload calls formatValue). A
+  // report whose tables[] also triggers TABLE_CLIENT_JS ends up with
+  // sortableValue declared twice (harmless - a plain function declaration
+  // redeclared in the same non-strict scope is legal and both bodies are
+  // identical) - accepted here rather than adding another hasX branch to
+  // dedupe a 5-line function.
+  //
+  // A drag-then-release on a .board-node still fires a native click on most
+  // browsers regardless of pointer distance moved - BOARD_LAYOUT_CLIENT_JS's
+  // own endDrag() only uses its "moved" flag to decide whether to persist
+  // the new position, it never suppresses the click. So endDrag() (above)
+  // sets el.dataset.justDragged = "true" right after a real drag, and this
+  // module's own .board-node click listener checks and clears that flag
+  // first, before anything else, bailing out if it was set - a plain DOM
+  // attribute has no registration-order dependency, unlike
+  // event.stopPropagation() (which only helps if the suppressing listener
+  // runs before this one - it doesn't, since this listener is registered at
+  // page load and endDrag() only runs later, after an actual drag).
+  var MINI_CHART_CLIENT_JS = [
+    sortableValue.toString(),
+    computeMetricCardData.toString(),
+    'function drawMiniChart(container, points) {',
+    '  if (!points.length) { return; }',
+    '  var w = 190, h = 40;',
+    '  var max = Math.max.apply(null, points), min = Math.min.apply(null, points);',
+    '  var span = (max - min) || 1;',
+    '  var pts = points.map(function (v, i) {',
+    '    var x = points.length > 1 ? (i / (points.length - 1)) * w : w / 2;',
+    '    var y = h - ((v - min) / span) * (h - 6) - 3;',
+    '    return x.toFixed(1) + "," + y.toFixed(1);',
+    '  });',
+    '  container.innerHTML = "<svg viewBox=\\"0 0 " + w + " " + h + "\\" preserveAspectRatio=\\"none\\" width=\\"100%\\" height=\\"" + h + "\\"><polyline points=\\"" + pts.join(" ") + "\\" fill=\\"none\\" stroke=\\"var(--accent)\\" stroke-width=\\"1.8\\"></polyline></svg>";',
+    '}',
+    'function renderMetricCards() {',
+    '  var payload = window.__PUBLISH_PAYLOAD__;',
+    '  Array.prototype.forEach.call(document.querySelectorAll("[data-metric-card]"), function (card) {',
+    '    var id = card.getAttribute("data-metric-card");',
+    '    var node = card.closest(".board-node");',
+    '    var blockType = node.getAttribute("data-block-type");',
+    '    var block = (blockType === "chart" ? payload.charts : payload.tables).filter(function (b) { return b.id === id; })[0];',
+    '    if (!block) { return; }',
+    '    var metric = computeMetricCardData(blockType, block);',
+    '    card.innerHTML = "<div class=\\"board-metric-label\\">" + block.title + "</div><div class=\\"board-metric-value\\"></div><div class=\\"board-metric-mini\\"></div>";',
+    '    card.querySelector(".board-metric-value").textContent = metric.headline.toLocaleString("en-US");',
+    '    drawMiniChart(card.querySelector(".board-metric-mini"), metric.points);',
+    '  });',
+    '}',
+    'function openExpandModal(title, contentEl) {',
+    '  closeExpandModal();',
+    '  var backdrop = document.createElement("div");',
+    '  backdrop.id = "publish-expand-modal";',
+    '  backdrop.className = "board-expand-backdrop";',
+    '  backdrop.addEventListener("click", function (event) { if (event.target === backdrop) { closeExpandModal(); } });',
+    '  var box = document.createElement("div");',
+    '  box.className = "board-expand-box";',
+    '  var header = document.createElement("div");',
+    '  header.className = "board-expand-header";',
+    '  var heading = document.createElement("h3");',
+    '  heading.textContent = title;',
+    '  var closeBtn = document.createElement("button");',
+    '  closeBtn.type = "button";',
+    '  closeBtn.className = "board-expand-close";',
+    '  closeBtn.textContent = "\\u00d7";',
+    '  closeBtn.addEventListener("click", closeExpandModal);',
+    '  header.appendChild(heading);',
+    '  header.appendChild(closeBtn);',
+    '  box.appendChild(header);',
+    '  box.setAttribute("data-return-target", contentEl.getAttribute("data-full-section"));',
+    '  contentEl.style.display = "block";',
+    '  box.appendChild(contentEl);',
+    '  backdrop.appendChild(box);',
+    '  document.body.appendChild(backdrop);',
+    '}',
+    'function closeExpandModal() {',
+    '  var modal = document.getElementById("publish-expand-modal");',
+    '  if (!modal) { return; }',
+    '  var box = modal.querySelector(".board-expand-box");',
+    '  var id = box.getAttribute("data-return-target");',
+    '  var contentEl = box.querySelector("[data-full-section=\\"" + id + "\\"]");',
+    '  var originalParent = document.querySelector(".board-node[data-block-id=\\"" + id + "\\"]");',
+    '  if (contentEl && originalParent) { contentEl.style.display = "none"; originalParent.appendChild(contentEl); }',
+    '  modal.parentNode.removeChild(modal);',
+    '}',
+    'document.addEventListener("DOMContentLoaded", function () {',
+    '  renderMetricCards();',
+    '  Array.prototype.forEach.call(document.querySelectorAll(".board-node"), function (node) {',
+    '    node.addEventListener("click", function (event) {',
+    '      if (node.dataset.justDragged) { delete node.dataset.justDragged; return; }',
+    '      if (event.target.closest(".board-metric-card") === null) { return; }',
+    '      var id = node.getAttribute("data-block-id");',
+    '      var full = node.querySelector("[data-full-section=\\"" + id + "\\"]");',
+    '      if (!full) { return; }',
+    '      var titleEl = full.querySelector("h2");',
+    '      openExpandModal(titleEl ? titleEl.textContent : id, full);',
+    '    });',
+    '  });',
+    '  document.addEventListener("keydown", function (event) { if (event.key === "Escape") { closeExpandModal(); } });',
     '});'
   ].join('\n');
 
@@ -5795,7 +5917,11 @@ var NotSoBigData = (function () {
     tables.forEach(function (table, index) { sectionById[table.id] = tableSectionsList[index]; });
 
     var nodesHtml = charts.concat(tables).map(function (block) {
-      return '<div class="board-node" data-block-id="' + escapeHtml(block.id) + '">' + sectionById[block.id] + '</div>';
+      var blockType = charts.indexOf(block) !== -1 ? 'chart' : 'table';
+      return '<div class="board-node" data-block-id="' + escapeHtml(block.id) + '" data-block-type="' + blockType + '">'
+        + '<div class="board-metric-card" data-metric-card="' + escapeHtml(block.id) + '"></div>'
+        + '<div class="board-node-full" data-full-section="' + escapeHtml(block.id) + '">' + sectionById[block.id] + '</div>'
+        + '</div>';
     }).join('');
 
     var toolbarHtml = '<div class="board-toolbar">'
@@ -5841,6 +5967,7 @@ var NotSoBigData = (function () {
       script += 'window.__BOARD_NODES__ = window.__PUBLISH_PAYLOAD__.charts.concat(window.__PUBLISH_PAYLOAD__.tables).map(function (b) { return { id: b.id, relatesTo: b.relatesTo }; });';
       script += BOARD_LAYOUT_CLIENT_JS;
       script += BOARD_CLIENT_JS;
+      script += MINI_CHART_CLIENT_JS;
     }
     if (hasFilters) {
       script += FILTER_REUSED_FUNCTIONS_JS + FILTER_CLIENT_JS;

@@ -218,9 +218,9 @@ function testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout() {
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
 
-  ['r', 'c1', 'c2'].forEach(function (id) {
-    var needle = '<div class="board-node" data-block-id="' + id + '">';
-    assert.ok(html.indexOf(needle) !== -1, 'expected an unpositioned board-node for "' + id + '", got: ' + html);
+  [['r', 'chart'], ['c1', 'chart'], ['c2', 'table']].forEach(function (pair) {
+    var needle = '<div class="board-node" data-block-id="' + pair[0] + '" data-block-type="' + pair[1] + '">';
+    assert.ok(html.indexOf(needle) !== -1, 'expected an unpositioned board-node for "' + pair[0] + '", got: ' + html);
   });
   assert.ok(!/board-node[^>]*style=/.test(html), 'expected no inline style on any board-node (positioning moved client-side), got: ' + html);
   assert.ok(html.indexOf('<svg class="board-edges" id="board-edges"></svg>') !== -1, 'expected an empty board-edges svg with no width/height/paths baked in, got: ' + html);
@@ -2118,6 +2118,26 @@ function testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault() 
   assert.ok(html.indexOf('data-board-action="direction"') !== -1, 'expected the direction toolbar button, got: ' + html);
 }
 
+// Task 7: each board node now shows a compact metric card (headline +
+// mini-chart, via computeMetricCardData/Task 6) with the full chart/table
+// section still rendered but hidden (.board-node-full), moved into an
+// expand overlay (openExpandModal) on click. sortableValue must ship
+// alongside computeMetricCardData since its aggregated-table branch
+// calls it (same pairing rule DETAIL_REUSED_FUNCTIONS_JS's own
+// [formatValue, buildRawTablePayload] follows).
+function testPublishBoardNodesRenderAsCompactMetricCardsWithHiddenFullSection() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed board run to succeed, got: ' + result.error);
+  var html = getHtml();
+  assert.ok(/class="board-metric-card" data-metric-card="/.test(html), 'expected a compact metric card slot per node, got: ' + html);
+  assert.ok(/class="board-node-full" data-full-section="/.test(html), 'expected the full chart/table section to still be emitted, hidden, got: ' + html);
+  assert.ok(/function computeMetricCardData\(blockType, block\)/.test(html), 'expected computeMetricCardData to be reused verbatim in the emitted script, got: ' + html);
+  assert.ok(/function sortableValue\(cell, format\)/.test(html), 'expected sortableValue to be declared alongside computeMetricCardData, which calls it, got: ' + html);
+  assert.ok(/function openExpandModal\(title, contentEl\)/.test(html), 'expected the expand overlay function, got: ' + html);
+}
+
 module.exports = {
   testPublishNodeDiscoverableByKind: testPublishNodeDiscoverableByKind,
   testPublishSourceRefMustBeInDependsOn: testPublishSourceRefMustBeInDependsOn,
@@ -2244,5 +2264,6 @@ module.exports = {
   testPublishLineChartUsesVarAccentNotHardcodedHex: testPublishLineChartUsesVarAccentNotHardcodedHex,
   testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard: testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard,
   testPublishButtonsAndSelectsInheritThemedTextColor: testPublishButtonsAndSelectsInheritThemedTextColor,
-  testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault: testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault
+  testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault: testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault,
+  testPublishBoardNodesRenderAsCompactMetricCardsWithHiddenFullSection: testPublishBoardNodesRenderAsCompactMetricCardsWithHiddenFullSection
 };
