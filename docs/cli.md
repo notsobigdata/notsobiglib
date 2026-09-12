@@ -238,7 +238,18 @@ The page shows the same dependency graph `cli('list')` resolves, drawn on
 an interactive board — the same pannable/zoomable, dark-mode-capable
 layout `publish()`'s `layout: 'board'` charts already use (see
 [docs/publish.md](publish.md)) — with one box per node and an edge for
-every real `dependsOn` pair. Each node's own section then shows detail
+every real `dependsOn` pair. A left sidebar lists every discovered node
+under a MOVE/MODEL/PUBLISH heading, each with a count; a search box at
+the top filters that index live as you type. Nodes are colored on the
+canvas by their `kind`, matching the sidebar's section colors. Clicking
+a node — either in the sidebar or on the canvas itself — opens a detail
+panel on the right, showing what was historically dumped into the graph
+box: compiled SQL (for a `model`), connector types (for a `move`), chart/
+table titles and configuration (for a `publish`), or a discovery/compile
+error if the node couldn't be resolved. Hovering a sidebar row highlights
+the matching node on the canvas.
+
+Each node's own section in the detail panel shows information
 specific to its kind — and the JSON `cli('docs')` itself returns (see
 below) carries a couple of fields beyond what's actually drawn on the
 page:
