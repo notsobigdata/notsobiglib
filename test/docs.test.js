@@ -74,7 +74,7 @@ function renderDocsHtmlFor(nodeNames) {
 function testDocsHtmlRendersOneBoardNodePerDiscoveredNode() {
   var html = renderDocsHtmlFor(['rawOrders', 'rawCustomers', 'orders']);
   ['rawOrders', 'rawCustomers', 'orders'].forEach(function (name) {
-    assert.ok(html.indexOf('<div class="board-node" data-block-id="' + name + '">') !== -1, 'expected a board-node for "' + name + '", got: ' + html);
+    assert.ok(html.indexOf('<div class="board-node" data-block-id="' + name + '" data-kind="') !== -1, 'expected a board-node for "' + name + '", got: ' + html);
   });
 }
 
@@ -99,6 +99,17 @@ function testDocsHtmlLoadsD3AndThemeToggle() {
   var html = renderDocsHtmlFor(['rawOrders']);
   assert.ok(html.indexOf('https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js') !== -1, 'expected the pinned D3 CDN script tag, got: ' + html);
   assert.ok(/id="theme-toggle"/.test(html), 'expected the theme toggle button, got: ' + html);
+}
+
+function testDocsHtmlRendersSidebarGroupedByKindWithSearchInput() {
+  var payload = loadPayload();
+  var ctx = harness.loadContext([fixture('docs-nodes.js')]);
+  var html = ctx.NotSoBigData.__test.renderDocsHtml(payload);
+  assert.ok(html.indexOf('class="docs-sidebar"') !== -1, 'expected a docs sidebar, got: ' + html);
+  assert.ok(html.indexOf('id="docs-filter"') !== -1, 'expected a filter input, got: ' + html);
+  assert.ok(/class="docs-kind-group-head">[^<]*<span class="docs-kind-dot"[^>]*><\/span>move<span>\(2\)<\/span>/.test(html) || html.indexOf('>move<span>(2)</span>') !== -1, 'expected a "move" group with a count of 2, got: ' + html);
+  assert.ok(html.indexOf('id="docs-drawer"') !== -1, 'expected the detail drawer container, got: ' + html);
+  assert.ok(html.indexOf('__DOCS_DETAIL_BY_NAME__') !== -1, 'expected per-node detail to be embedded for the drawer, got: ' + html);
 }
 
 // Shims exactly what cli('docs') touches on Drive: getFolderById(...).
@@ -163,6 +174,7 @@ module.exports = {
   testDocsHtmlBoardEdgesCoverEveryRealDependsOnPair: testDocsHtmlBoardEdgesCoverEveryRealDependsOnPair,
   testDocsHtmlShowsCompiledSqlAndConnectorTypes: testDocsHtmlShowsCompiledSqlAndConnectorTypes,
   testDocsHtmlLoadsD3AndThemeToggle: testDocsHtmlLoadsD3AndThemeToggle,
+  testDocsHtmlRendersSidebarGroupedByKindWithSearchInput: testDocsHtmlRendersSidebarGroupedByKindWithSearchInput,
   testDocsCommandWritesToScriptsParentFolderByDefault: testDocsCommandWritesToScriptsParentFolderByDefault,
   testDocsCommandFolderIdFlagOverridesDefault: testDocsCommandFolderIdFlagOverridesDefault,
   testDocsCommandFolderIdRejectedOnOtherCommands: testDocsCommandFolderIdRejectedOnOtherCommands
