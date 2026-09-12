@@ -4518,6 +4518,20 @@ var NotSoBigData = (function () {
     return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
+  // Extracted so TABLE_CLIENT_JS's inline script and, from Task 6 on, the
+  // board's metric-card headline computation can both reuse the exact
+  // same "recover a number from an already-formatted cell" logic via
+  // .toString() (see FILTER_REUSED_FUNCTIONS_JS's own reuse pattern) -
+  // previously this only existed as hand-written text inside
+  // TABLE_CLIENT_JS's own array, unreachable from anywhere else.
+  function sortableValue(cell, format) {
+    if (format === 'string') {
+      return String(cell).toLowerCase();
+    }
+    var num = Number(String(cell).replace(/[^0-9.-]/g, ''));
+    return isNaN(num) ? String(cell).toLowerCase() : num;
+  }
+
   // mode: 'raw' - one output row per source row, column order/labels exactly
   // as configured. Non-'string' formats coerce through Number() first (row
   // values from fetchTableRows are always strings, same as
@@ -5092,11 +5106,7 @@ var NotSoBigData = (function () {
     // digits/dot/minus recovers the underlying number; "string" columns (and
     // the aggregated groupBy column, which is always "string") sort
     // case-insensitively as text instead.
-    'function sortableValue(cell, format) {',
-    '  if (format === "string") { return String(cell).toLowerCase(); }',
-    '  var num = Number(String(cell).replace(/[^0-9.-]/g, ""));',
-    '  return isNaN(num) ? String(cell).toLowerCase() : num;',
-    '}',
+    sortableValue.toString(),
     'document.addEventListener("DOMContentLoaded", function () {',
     '  var payload = window.__PUBLISH_PAYLOAD__;',
     '  Array.prototype.forEach.call(document.querySelectorAll(".table-block"), function (section) {',
