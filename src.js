@@ -4747,6 +4747,7 @@ var NotSoBigData = (function () {
       var built = table.mode === 'raw' ? buildRawTablePayload(table, tableRows) : buildAggregatedTablePayload(table, tableRows);
       built = withDetail(built, table, tableRows);
       built.relatesTo = table.relatesTo || null;
+      built.mode = table.mode === 'raw' ? 'raw' : 'aggregated';
       return built;
     });
     var payload = { kpis: kpis, charts: charts, tables: tables };
@@ -4771,8 +4772,8 @@ var NotSoBigData = (function () {
 
   // Fixed box/gap sizing for layout:'board' - no per-report customization
   // in v1, same posture the REPORT_CSS design tokens already have.
-  var BOARD_BOX_WIDTH = 520;
-  var BOARD_BOX_HEIGHT = 340;
+  var BOARD_BOX_WIDTH = 240;
+  var BOARD_BOX_HEIGHT = 160;
   var BOARD_H_GAP = 40;
   var BOARD_V_GAP = 60;
 
