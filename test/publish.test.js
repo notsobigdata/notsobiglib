@@ -193,30 +193,21 @@ function testPublishBoardLoadsD3EvenWithoutCharts() {
   assert.ok(/<script src="https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/d3\//.test(html), 'expected the D3 CDN script tag on a chart-less board layout report, got: ' + html);
 }
 
-// Native CSS resize (the same browser-drawn grip a <textarea> has), not
-// custom JS - .board-node already has overflow:auto, the one
-// precondition `resize` needs. min-width/min-height keep a node from
-// being shrunk below readability. Resizing can overlap a neighbor since
-// positions are computed once for the fixed default size - deliberately
-// not auto-reflowed, see the CSS comment.
-function testPublishBoardNodesAreNativelyResizable() {
-  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
-  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
-  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
-  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
-  var html = getHtml();
-  var boardNodeRule = html.match(/\.board-node\s*\{[^}]*\}/);
-  assert.ok(boardNodeRule, 'expected a .board-node CSS rule, got: ' + html);
-  assert.ok(/resize:\s*both/.test(boardNodeRule[0]), 'expected resize: both on .board-node, got: ' + boardNodeRule[0]);
-  assert.ok(/min-width:/.test(boardNodeRule[0]) && /min-height:/.test(boardNodeRule[0]), 'expected a min-width/min-height floor on .board-node, got: ' + boardNodeRule[0]);
-}
+// Task 4 removed native CSS resize (resize:both/min-width/min-height) from
+// .board-node entirely - nodes are now direction-aware, JS-dragged boxes
+// (see BOARD_LAYOUT_CLIENT_JS's pointerdown/pointermove wiring) rather
+// than browser-resizable ones, so the CSS assertion this test used to pin
+// no longer applies to anything the design still does. No replacement
+// test needed here: drag itself is Layer-2-only (no DOM/pointer events in
+// this Node harness), same ceiling already documented for tree geometry.
 
 // Task 2: renderBoardCanvas no longer computes positions - it wraps each
 // block's markup in an unpositioned .board-node (data-block-id is the
 // only thing Task 3's client script needs to find it), and #board-edges
-// starts empty. The fixed box size moves from a per-node inline style
-// into .board-node's own CSS rule instead - one declaration instead of
-// N identical inline ones.
+// starts empty. Task 4 dropped the fixed width/height off .board-node's
+// own CSS rule too (nodes are absolute-positioned and drag-sized now,
+// not baked to BOARD_BOX_WIDTH/HEIGHT), so this no longer asserts a fixed
+// box size in the CSS - only that positioning stays entirely client-side.
 function testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
@@ -231,10 +222,6 @@ function testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout() {
   assert.ok(!/board-node[^>]*style=/.test(html), 'expected no inline style on any board-node (positioning moved client-side), got: ' + html);
   assert.ok(html.indexOf('<svg class="board-edges" id="board-edges"></svg>') !== -1, 'expected an empty board-edges svg with no width/height/paths baked in, got: ' + html);
   assert.strictEqual((html.match(/class="board-edge"/g) || []).length, 0, 'expected zero server-rendered edges (drawn client-side now), got: ' + html);
-
-  var boardNodeRule = html.match(/\.board-node\s*\{[^}]*\}/);
-  assert.ok(boardNodeRule, 'expected a .board-node CSS rule, got: ' + html);
-  assert.ok(/width:\s*520px/.test(boardNodeRule[0]) && /height:\s*340px/.test(boardNodeRule[0]), 'expected the fixed box size baked into .board-node CSS instead of per-node inline style, got: ' + boardNodeRule[0]);
 }
 
 // Task 3: BOARD_LAYOUT_CLIENT_JS computes positions in the browser via
@@ -244,7 +231,11 @@ function testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout() {
 // is emitted with the right shape: the synthetic-root sentinel (needed
 // because relatesTo is a forest and d3.stratify() requires exactly one
 // root), and nodeSize computed from BOARD_BOX_WIDTH/HEIGHT/H_GAP/V_GAP
-// (520+40=560, 340+60=400).
+// (520+40=560, 340+60=400). Task 4 made nodeSize direction-aware - the
+// vertical directions (top-bottom/bottom-top, the default) still use
+// [spreadSize, depthSize] = [560, 400], but left-right/right-left swap to
+// [400, 560] via a ternary on isHorizontal, so this now asserts the
+// ternary shape rather than one fixed array.
 function testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
@@ -254,7 +245,8 @@ function testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize() {
   var boardHtml = getHtml();
   assert.ok(/d3\.stratify\(\)/.test(boardHtml), 'expected d3.stratify() in the board client script, got: ' + boardHtml);
   assert.ok(/__board_root__/.test(boardHtml), 'expected the synthetic-root sentinel id, got: ' + boardHtml);
-  assert.ok(/d3\.tree\(\)\.nodeSize\(\[560, 400\]\)/.test(boardHtml), 'expected nodeSize([BOARD_BOX_WIDTH+BOARD_H_GAP, BOARD_BOX_HEIGHT+BOARD_V_GAP]) = [560, 400], got: ' + boardHtml);
+  assert.ok(/var spreadSize = 560;/.test(boardHtml) && /var depthSize = 400;/.test(boardHtml), 'expected spreadSize/depthSize computed from BOARD_BOX_WIDTH/HEIGHT+H_GAP/V_GAP (560, 400), got: ' + boardHtml);
+  assert.ok(/d3\.tree\(\)\.nodeSize\(isHorizontal \? \[400, 560\] : \[spreadSize, depthSize\]\)/.test(boardHtml), 'expected direction-aware nodeSize swapping to [400, 560] for horizontal directions, got: ' + boardHtml);
 
   var linearResult = ctx.NotSoBigData.cli('run --select aggregationPublish').nodes[0];
   assert.strictEqual(linearResult.status, 'success', 'expected the shimmed linear run to succeed, got: ' + linearResult.error);
@@ -262,15 +254,17 @@ function testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize() {
   assert.ok(!/d3\.stratify\(\)/.test(linearHtml), 'expected no board layout client JS on a layout:"linear" report, got: ' + linearHtml);
 }
 
-// Two follow-ups from Layer 2 verification: (1) the board used to open at
-// identity transform, leaving nodes below/beside the viewport invisible
-// with no hint they existed - BOARD_LAYOUT_CLIENT_JS now exposes the
-// tree's bounding box for BOARD_CLIENT_JS to fit/center on load; (2) a
-// node's edge used to be computed once from the fixed BOARD_BOX_WIDTH/
-// HEIGHT, so resizing a node (native CSS resize:both) visually detached
-// its edge from the new box - redrawEdges() now reads live offsetLeft/
-// offsetTop/offsetWidth/offsetHeight instead, and a ResizeObserver calls
-// it again whenever any node's size changes.
+// Two follow-ups from Layer 2 verification, both still true after Task 4's
+// rewrite: (1) the board used to open at identity transform, leaving nodes
+// below/beside the viewport invisible with no hint they existed -
+// BOARD_LAYOUT_CLIENT_JS still exposes the tree's bounding box (now fixed
+// at { 0, 0, maxLeft, maxTop } since computeBoardPositions always returns
+// non-negative positions, rather than a separately-tracked minY) for
+// BOARD_CLIENT_JS to fit/center on load; (2) an edge's endpoints are still
+// computed from live offsetLeft/offsetWidth/etc rather than the fixed
+// BOARD_BOX_WIDTH/HEIGHT - now via the anchorPoint(el, side) helper Task 4
+// added for direction-aware edge anchoring - and a ResizeObserver still
+// calls redrawEdges() whenever any node's size changes.
 function testPublishBoardExposesBoundsAndRedrawsEdgesOnResize() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
@@ -278,9 +272,9 @@ function testPublishBoardExposesBoundsAndRedrawsEdgesOnResize() {
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
 
-  assert.ok(/window\.__BOARD_BOUNDS__ = \{ minX: 0, minY: minY, maxX: maxX, maxY: maxY \}/.test(html), 'expected the layout script to expose its bounding box for fit-to-view, got: ' + html);
+  assert.ok(/window\.__BOARD_BOUNDS__ = \{ minX: 0, minY: 0, maxX: maxLeft, maxY: maxTop \};/.test(html), 'expected the layout script to expose its bounding box for fit-to-view, got: ' + html);
   assert.ok(/function redrawEdges\(\)/.test(html), 'expected a reusable redrawEdges() function, got: ' + html);
-  assert.ok(/fromEl\.offsetLeft \+ fromEl\.offsetWidth \/ 2/.test(html), 'expected edge endpoints computed from live offsetLeft\/offsetWidth, not the fixed box size, got: ' + html);
+  assert.ok(/el\.offsetLeft \+ el\.offsetWidth \/ 2/.test(html), 'expected edge anchor points computed from live offsetLeft\/offsetWidth, not the fixed box size, got: ' + html);
   assert.ok(/new ResizeObserver\(redrawEdges\)/.test(html), 'expected a ResizeObserver wired to redrawEdges, got: ' + html);
   assert.ok(/resizeObserver\.observe\(el\)/.test(html), 'expected every real node to be observed, got: ' + html);
 
@@ -2099,20 +2093,26 @@ function testPublishButtonsAndSelectsInheritThemedTextColor() {
   assert.ok(/\.table-csv-export\s*\{[^}]*background:\s*var\(--paper\)/.test(html), 'expected .table-csv-export to have its own themed background (not bare native chrome), got: ' + html);
 }
 
-// Task 3 (docs command): BOARD_LAYOUT_CLIENT_JS now reads window.__BOARD_NODES__
+// Task 3 (docs command): BOARD_LAYOUT_CLIENT_JS reads window.__BOARD_NODES__
 // instead of deriving blocks from window.__PUBLISH_PAYLOAD__ inline, and
 // falls back to relatesTo-derived edges only when window.__BOARD_EDGES__
-// isn't set - additive changes that must leave publish's own board output
-// unchanged. See docs/superpowers/specs/2026-09-11-docs-command-design.md §4.
+// isn't set. Task 4 (direction/drag/persistence/hover) rewrote the rest of
+// BOARD_LAYOUT_CLIENT_JS around that same __BOARD_NODES__/edges contract -
+// this test now also pins that computeBoardPositions (Task 3) is reused
+// verbatim via .toString() and that the direction toolbar button is
+// emitted. See docs/superpowers/specs/2026-09-11-docs-command-design.md §4
+// and 2026-09-12-pipeline-canvas-redesign's task 4.
 function testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
   var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
   assert.strictEqual(result.status, 'success', 'expected the shimmed board run to succeed, got: ' + result.error);
   var html = getHtml();
-  assert.ok(/window\.__BOARD_NODES__ = window\.__PUBLISH_PAYLOAD__\.charts\.concat\(window\.__PUBLISH_PAYLOAD__\.tables\)\.map\(/.test(html), 'expected the new __BOARD_NODES__ global to be derived from the existing payload, got: ' + html);
+  assert.ok(/window\.__BOARD_NODES__ = window\.__PUBLISH_PAYLOAD__\.charts\.concat\(window\.__PUBLISH_PAYLOAD__\.tables\)\.map\(/.test(html), 'expected the __BOARD_NODES__ global to be derived from the existing payload, got: ' + html);
   assert.ok(/var blocks = window\.__BOARD_NODES__;/.test(html), 'expected the layout script to read window.__BOARD_NODES__, got: ' + html);
   assert.ok(/var edges = window\.__BOARD_EDGES__ \|\| blocks\.filter\(function \(b\) \{ return b\.relatesTo; \}\)/.test(html), 'expected the relatesTo-derived edge fallback to remain byte-identical, got: ' + html);
+  assert.ok(/function computeBoardPositions\(treeNodes, direction, boxWidth, boxHeight\)/.test(html), 'expected computeBoardPositions to be reused verbatim in the emitted script, got: ' + html);
+  assert.ok(html.indexOf('data-board-action="direction"') !== -1, 'expected the direction toolbar button, got: ' + html);
 }
 
 module.exports = {
@@ -2137,7 +2137,6 @@ module.exports = {
   testPublishBoardClientJsEmittedOnlyForBoardLayout: testPublishBoardClientJsEmittedOnlyForBoardLayout,
   testPublishBoardClientJsClampsZoomAndAppliesTransform: testPublishBoardClientJsClampsZoomAndAppliesTransform,
   testPublishBoardLoadsD3EvenWithoutCharts: testPublishBoardLoadsD3EvenWithoutCharts,
-  testPublishBoardNodesAreNativelyResizable: testPublishBoardNodesAreNativelyResizable,
   testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout: testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout,
   testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize: testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize,
   testPublishBoardExposesBoundsAndRedrawsEdgesOnResize: testPublishBoardExposesBoundsAndRedrawsEdgesOnResize,

@@ -4892,10 +4892,19 @@ var NotSoBigData = (function () {
     '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); border-radius: var(--radius); cursor: grab; }',
     '.board-viewport.board-panning { cursor: grabbing; }',
     '.board-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }',
-    '.board-node { position: absolute; width: ' + BOARD_BOX_WIDTH + 'px; height: ' + BOARD_BOX_HEIGHT + 'px; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 12px; box-sizing: border-box; overflow: auto; resize: both; min-width: 160px; min-height: 100px; }',
+    '.board-node { position: absolute; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); box-sizing: border-box; cursor: grab; touch-action: none; user-select: none; transition: box-shadow .12s ease, border-color .12s ease, opacity .12s ease; }',
+    '.board-node.board-node-dragging { cursor: grabbing; box-shadow: var(--shadow); z-index: 50; }',
+    '.board-node.board-node-hi { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); }',
+    '.board-node.board-node-dim { opacity: .35; }',
     '.board-node .chart, .board-node .table-block { border: none; box-shadow: none; margin-top: 0; padding: 0; }',
     '.board-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }',
-    '.board-edge { fill: none; stroke: var(--paper-line); stroke-width: 2; }'
+    '.board-edge { fill: none; stroke: var(--paper-line); stroke-width: 2; transition: opacity .12s ease, stroke .12s ease, stroke-width .12s ease; }',
+    '.board-edge.board-edge-hi { stroke: var(--accent); stroke-width: 2.6; opacity: 1; }',
+    '.board-edge.board-edge-dim { opacity: .15; }',
+    '.board-toolbar { position: absolute; right: 14px; bottom: 14px; z-index: 60; display: flex; gap: 2px; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 4px; }',
+    '.board-toolbar button { width: 28px; height: 28px; border: none; background: none; border-radius: 6px; cursor: pointer; color: var(--ink-soft); font-size: 13px; }',
+    '.board-toolbar button:hover { background: var(--paper); color: var(--ink); }',
+    '.board-toolbar .board-toolbar-divider { width: 1px; background: var(--paper-line); margin: 4px 2px; }'
   ].join('\n');
 
   // One <select> per filters[] entry: an "All" option plus every distinct
@@ -5464,83 +5473,163 @@ var NotSoBigData = (function () {
     '});'
   ].join('\n');
 
-  // Client-side board layout via d3-hierarchy - runs on DOMContentLoaded,
-  // before BOARD_CLIENT_JS's pan/zoom setup (registered right after it in
-  // the same script, so it always executes first - see renderReportHtml).
-  // Rebuilds the relatesTo graph from window.__PUBLISH_PAYLOAD__ (server
-  // no longer computes positions, see renderBoardCanvas), wraps it in one
-  // synthetic root (d3.stratify() requires exactly one; relatesTo is a
-  // forest - zero or more independent roots), runs d3.tree(), then shifts
-  // every x by -minX so no real node lands at a negative style.left (d3.tree()
-  // centers the root at x=0 and spreads children on both sides, unlike the
-  // deleted contour algorithm which always started at 0). See
-  // docs/superpowers/specs/2026-09-09-publish-board-d3-layout-design.md §4.
-  //
-  // Edge <path>s are recomputed from each node element's *live* offsetLeft/
-  // offsetTop/offsetWidth/offsetHeight, not the fixed BOARD_BOX_WIDTH/HEIGHT
-  // used only for the tree's initial spacing - a node's native CSS `resize`
-  // grip (BOARD_CSS's .board-node rule) lets a human grow/shrink it after
-  // load, and an edge computed from the nominal box size would stay visually
-  // anchored to where the box *used to* end. A ResizeObserver on every real
-  // node calls the same redraw function whenever any of them changes size,
-  // so a resized node's edges track it continuously, not just once at load.
-  //
-  // window.__BOARD_BOUNDS__ exposes the tree's nominal bounding box (the
-  // four extremes actually reached by a positioned node) for BOARD_CLIENT_JS
-  // to fit/center the initial pan/zoom against - the two scripts don't share
-  // a closure, so this is the hand-off point.
+  // Direction-aware, draggable, hover-highlighting board layout. Reuses
+  // computeBoardPositions (Task 3) via .toString() for the pure axis math;
+  // everything else here - d3.stratify()/d3.tree() itself, drag, hover,
+  // localStorage persistence, the toolbar - needs a real DOM/D3 and can't
+  // run in the Node test harness (same ceiling publish.md's "Board layout"
+  // section already documents for tree geometry in general). Exposes
+  // window.__notsobigBoardApi__ so docs.js's own sidebar (Task 8) can call
+  // setHighlight/resetPositions the same way this module's own toolbar does.
   var BOARD_LAYOUT_CLIENT_JS = [
+    computeBoardPositions.toString(),
     'document.addEventListener("DOMContentLoaded", function () {',
     '  var blocks = window.__BOARD_NODES__;',
     '  var rootId = "__board_root__";',
-    '  var nodesData = blocks.map(function (b) { return { id: b.id, relatesTo: b.relatesTo }; });',
-    '  nodesData.push({ id: rootId, relatesTo: null });',
-    '  nodesData.forEach(function (n) { if (n.id !== rootId && !n.relatesTo) { n.relatesTo = rootId; } });',
-    '  var stratify = d3.stratify().id(function (n) { return n.id; }).parentId(function (n) { return n.relatesTo; });',
-    '  var root = stratify(nodesData);',
-    '  var treeLayout = d3.tree().nodeSize([' + (BOARD_BOX_WIDTH + BOARD_H_GAP) + ', ' + (BOARD_BOX_HEIGHT + BOARD_V_GAP) + ']);',
-    '  treeLayout(root);',
-    '  var realNodes = root.descendants().filter(function (n) { return n.id !== rootId; });',
-    '  if (!realNodes.length) { return; }',
-    '  var minX = Math.min.apply(null, realNodes.map(function (n) { return n.x; }));',
-    '  var minY = Math.min.apply(null, realNodes.map(function (n) { return n.y; }));',
-    '  var positionById = {};',
-    '  realNodes.forEach(function (n) {',
-    '    var x = n.x - minX;',
-    '    positionById[n.id] = { x: x, y: n.y };',
-    '    var el = document.querySelector("[data-block-id=\\"" + n.id + "\\"]");',
-    '    if (el) { el.style.left = x + "px"; el.style.top = n.y + "px"; }',
-    '  });',
+    '  var storageKey = "notsobigdata-board:" + location.pathname;',
+    '  var direction = "top-bottom";',
+    '  try {',
+    '    var storedDirection = localStorage.getItem(storageKey + ":direction");',
+    '    if (storedDirection) { direction = storedDirection; }',
+    '  } catch (e) {}',
+    '  var directions = ["top-bottom", "right-left", "bottom-top", "left-right"];',
+    '  var overrides = {};',
+    '  try {',
+    '    var stored = localStorage.getItem(storageKey + ":positions");',
+    '    if (stored) { overrides = JSON.parse(stored); }',
+    '  } catch (e) {}',
+    '  function persistPositions() {',
+    '    try { localStorage.setItem(storageKey + ":positions", JSON.stringify(overrides)); } catch (e) {}',
+    '  }',
+    '  function persistDirection() {',
+    '    try { localStorage.setItem(storageKey + ":direction", direction); } catch (e) {}',
+    '  }',
     '  var edges = window.__BOARD_EDGES__ || blocks.filter(function (b) { return b.relatesTo; }).map(function (b) { return { from: b.relatesTo, to: b.id }; });',
-    '  var maxX = 0, maxY = 0;',
-    '  realNodes.forEach(function (n) {',
-    '    var p = positionById[n.id];',
-    '    maxX = Math.max(maxX, p.x + ' + BOARD_BOX_WIDTH + ');',
-    '    maxY = Math.max(maxY, p.y + ' + BOARD_BOX_HEIGHT + ');',
-    '  });',
     '  var svg = document.getElementById("board-edges");',
-    '  svg.setAttribute("width", maxX);',
-    '  svg.setAttribute("height", maxY);',
-    '  window.__BOARD_BOUNDS__ = { minX: 0, minY: minY, maxX: maxX, maxY: maxY };',
+    '  var canvas = document.getElementById("board-canvas");',
+    '  function nodeEl(id) { return document.querySelector("[data-block-id=\\"" + id + "\\"]"); }',
+    '  function layout() {',
+    '    var nodesData = blocks.map(function (b) { return { id: b.id, relatesTo: b.relatesTo }; });',
+    '    nodesData.push({ id: rootId, relatesTo: null });',
+    '    nodesData.forEach(function (n) { if (n.id !== rootId && !n.relatesTo) { n.relatesTo = rootId; } });',
+    '    var stratify = d3.stratify().id(function (n) { return n.id; }).parentId(function (n) { return n.relatesTo; });',
+    '    var root = stratify(nodesData);',
+    '    var isHorizontal = direction === "left-right" || direction === "right-left";',
+    '    var spreadSize = ' + (BOARD_BOX_WIDTH + BOARD_H_GAP) + ';',
+    '    var depthSize = ' + (BOARD_BOX_HEIGHT + BOARD_V_GAP) + ';',
+    '    var treeLayout = d3.tree().nodeSize(isHorizontal ? [' + (BOARD_BOX_HEIGHT + BOARD_V_GAP) + ', ' + (BOARD_BOX_WIDTH + BOARD_H_GAP) + '] : [spreadSize, depthSize]);',
+    '    treeLayout(root);',
+    '    var realNodes = root.descendants().filter(function (n) { return n.id !== rootId; });',
+    '    if (!realNodes.length) { return; }',
+    '    var computed = computeBoardPositions(realNodes, direction, ' + BOARD_BOX_WIDTH + ', ' + BOARD_BOX_HEIGHT + ');',
+    '    realNodes.forEach(function (n) {',
+    '      var pos = overrides[n.id] || computed.positions[n.id];',
+    '      var el = nodeEl(n.id);',
+    '      if (el) { el.style.left = pos.left + "px"; el.style.top = pos.top + "px"; }',
+    '    });',
+    '    var maxLeft = 0, maxTop = 0;',
+    '    realNodes.forEach(function (n) {',
+    '      var pos = overrides[n.id] || computed.positions[n.id];',
+    '      maxLeft = Math.max(maxLeft, pos.left + ' + BOARD_BOX_WIDTH + ');',
+    '      maxTop = Math.max(maxTop, pos.top + ' + BOARD_BOX_HEIGHT + ');',
+    '    });',
+    '    svg.setAttribute("width", maxLeft);',
+    '    svg.setAttribute("height", maxTop);',
+    '    window.__BOARD_BOUNDS__ = { minX: 0, minY: 0, maxX: maxLeft, maxY: maxTop };',
+    '    window.__notsobigBoardAnchor__ = computed.anchor;',
+    '    redrawEdges();',
+    '  }',
+    '  function anchorPoint(el, side) {',
+    '    if (side === "top") { return { x: el.offsetLeft + el.offsetWidth / 2, y: el.offsetTop }; }',
+    '    if (side === "bottom") { return { x: el.offsetLeft + el.offsetWidth / 2, y: el.offsetTop + el.offsetHeight }; }',
+    '    if (side === "left") { return { x: el.offsetLeft, y: el.offsetTop + el.offsetHeight / 2 }; }',
+    '    return { x: el.offsetLeft + el.offsetWidth, y: el.offsetTop + el.offsetHeight / 2 };',
+    '  }',
     '  function redrawEdges() {',
+    '    var anchor = window.__notsobigBoardAnchor__ || { from: "bottom", to: "top" };',
     '    var edgePaths = edges.map(function (e) {',
-    '      var fromEl = document.querySelector("[data-block-id=\\"" + e.from + "\\"]");',
-    '      var toEl = document.querySelector("[data-block-id=\\"" + e.to + "\\"]");',
+    '      var fromEl = nodeEl(e.from), toEl = nodeEl(e.to);',
     '      if (!fromEl || !toEl) { return ""; }',
-    '      var x1 = fromEl.offsetLeft + fromEl.offsetWidth / 2, y1 = fromEl.offsetTop + fromEl.offsetHeight;',
-    '      var x2 = toEl.offsetLeft + toEl.offsetWidth / 2, y2 = toEl.offsetTop;',
-    '      return "<path class=\\"board-edge\\" d=\\"M" + x1 + " " + y1 + " L" + x2 + " " + y2 + "\\"></path>";',
+    '      var p1 = anchorPoint(fromEl, anchor.from), p2 = anchorPoint(toEl, anchor.to);',
+    '      return "<path class=\\"board-edge\\" data-from=\\"" + e.from + "\\" data-to=\\"" + e.to + "\\" d=\\"M" + p1.x + " " + p1.y + " L" + p2.x + " " + p2.y + "\\"></path>";',
     '    });',
     '    svg.innerHTML = edgePaths.join("");',
     '  }',
-    '  redrawEdges();',
-    '  if (window.ResizeObserver) {',
-    '    var resizeObserver = new ResizeObserver(redrawEdges);',
-    '    realNodes.forEach(function (n) {',
-    '      var el = document.querySelector("[data-block-id=\\"" + n.id + "\\"]");',
-    '      if (el) { resizeObserver.observe(el); }',
+    '  function neighborsOf(id) {',
+    '    var out = edges.filter(function (e) { return e.from === id; }).map(function (e) { return e.to; });',
+    '    var into = edges.filter(function (e) { return e.to === id; }).map(function (e) { return e.from; });',
+    '    return out.concat(into);',
+    '  }',
+    '  function setHighlight(id) {',
+    '    var related = id ? [id].concat(neighborsOf(id)) : null;',
+    '    blocks.forEach(function (b) {',
+    '      var el = nodeEl(b.id);',
+    '      if (!el) { return; }',
+    '      var keep = !related || related.indexOf(b.id) !== -1;',
+    '      el.classList.toggle("board-node-dim", !!related && !keep);',
+    '      el.classList.toggle("board-node-hi", !!related && keep && b.id !== id);',
+    '    });',
+    '    Array.prototype.forEach.call(svg.querySelectorAll(".board-edge"), function (p) {',
+    '      var isRel = !!id && (p.getAttribute("data-from") === id || p.getAttribute("data-to") === id);',
+    '      p.classList.toggle("board-edge-hi", isRel);',
+    '      p.classList.toggle("board-edge-dim", !!id && !isRel);',
     '    });',
     '  }',
+    '  blocks.forEach(function (b) {',
+    '    var el = nodeEl(b.id);',
+    '    if (!el) { return; }',
+    '    var startX, startY, origLeft, origTop, dragging = false, moved = false;',
+    '    el.addEventListener("pointerdown", function (event) {',
+    '      dragging = true; moved = false;',
+    '      startX = event.clientX; startY = event.clientY;',
+    '      origLeft = el.offsetLeft; origTop = el.offsetTop;',
+    '      el.setPointerCapture(event.pointerId);',
+    '      el.classList.add("board-node-dragging");',
+    '    });',
+    '    el.addEventListener("pointermove", function (event) {',
+    '      if (!dragging) { return; }',
+    '      var dx = event.clientX - startX, dy = event.clientY - startY;',
+    '      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) { moved = true; }',
+    '      if (!moved) { return; }',
+    '      var left = origLeft + dx, top = origTop + dy;',
+    '      el.style.left = left + "px"; el.style.top = top + "px";',
+    '      overrides[b.id] = { left: left, top: top };',
+    '      redrawEdges();',
+    '    });',
+    '    function endDrag() {',
+    '      if (!dragging) { return; }',
+    '      dragging = false;',
+    '      el.classList.remove("board-node-dragging");',
+    '      if (moved) { persistPositions(); }',
+    '    }',
+    '    el.addEventListener("pointerup", endDrag);',
+    '    el.addEventListener("pointercancel", endDrag);',
+    '    el.addEventListener("mouseenter", function () { if (!dragging) { setHighlight(b.id); } });',
+    '    el.addEventListener("mouseleave", function () { if (!dragging) { setHighlight(null); } });',
+    '  });',
+    '  var toolbar = document.querySelector(".board-toolbar");',
+    '  if (toolbar) {',
+    '    toolbar.addEventListener("click", function (event) {',
+    '      var action = event.target.getAttribute("data-board-action");',
+    '      if (action === "direction") {',
+    '        direction = directions[(directions.indexOf(direction) + 1) % directions.length];',
+    '        persistDirection();',
+    '        layout();',
+    '      } else if (action === "reset") {',
+    '        overrides = {};',
+    '        try { localStorage.removeItem(storageKey + ":positions"); } catch (e) {}',
+    '        layout();',
+    '      } else if (action === "fit" && window.__notsobigFitBoard__) {',
+    '        window.__notsobigFitBoard__();',
+    '      }',
+    '    });',
+    '  }',
+    '  layout();',
+    '  if (window.ResizeObserver) {',
+    '    var resizeObserver = new ResizeObserver(redrawEdges);',
+    '    blocks.forEach(function (b) { var el = nodeEl(b.id); if (el) { resizeObserver.observe(el); } });',
+    '  }',
+    '  window.__notsobigBoardApi__ = { redraw: redrawEdges, setHighlight: setHighlight, resetPositions: function () { overrides = {}; layout(); } };',
     '});'
   ].join('\n');
 
@@ -5597,6 +5686,7 @@ var NotSoBigData = (function () {
     '    var scale = Math.min(2, Math.max(0.25, 0.9 / Math.max(boundsWidth / viewport.clientWidth, boundsHeight / viewport.clientHeight)));',
     '    var fit = d3.zoomIdentity.translate(viewport.clientWidth / 2 - scale * midX, viewport.clientHeight / 2 - scale * midY).scale(scale);',
     '    d3.select(viewport).call(zoom.transform, fit);',
+    '    window.__notsobigFitBoard__ = function () { d3.select(viewport).call(zoom.transform, fit); };',
     '  }',
     '});'
   ].join('\n');
@@ -5665,10 +5755,17 @@ var NotSoBigData = (function () {
       return '<div class="board-node" data-block-id="' + escapeHtml(block.id) + '">' + sectionById[block.id] + '</div>';
     }).join('');
 
+    var toolbarHtml = '<div class="board-toolbar">'
+      + '<button type="button" data-board-action="direction" title="Change layout direction">&#8635;</button>'
+      + '<button type="button" data-board-action="reset" title="Reset to auto layout">&#8634;</button>'
+      + '<div class="board-toolbar-divider"></div>'
+      + '<button type="button" data-board-action="fit" title="Fit to screen">&#10021;</button>'
+      + '</div>';
+
     return '<div class="board-viewport"><div class="board-canvas" id="board-canvas">'
       + '<svg class="board-edges" id="board-edges"></svg>'
       + nodesHtml
-      + '</div></div>';
+      + '</div>' + toolbarHtml + '</div>';
   }
 
   function renderReportHtml(payload, config) {
