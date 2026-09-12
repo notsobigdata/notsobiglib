@@ -4847,12 +4847,12 @@ var NotSoBigData = (function () {
   // THEME_TOGGLE_JS below - still nothing a report author can configure.
   // Custom light/dark palette per the pipeline-canvas-redesign spec for
   // visual consistency across all published reports.
-  var DARK_TOKENS_CSS = '--paper: #10141B; --surface: #171C25; --paper-line: #2A313D; --ink: #E6E9EE; --ink-soft: #98A2B3; --accent: #7C97FF; --accent-soft: #223055; --bad: #F87171; --good: #4ADE80; --good-soft: #16321F; --warn: #F2B355; --warn-soft: #3A2A10; --move: #7C97FF; --model: #C09BFF; --publish: #F0A868; --shadow-sm: 0 1px 2px 0 rgba(0,0,0,.45), 0 2px 6px 2px rgba(0,0,0,.3); --shadow: 0 1px 3px 0 rgba(0,0,0,.5), 0 4px 8px 3px rgba(0,0,0,.35);';
+  var DARK_TOKENS_CSS = '--paper: #10141B; --surface: #171C25; --paper-line: #2A313D; --ink: #E6E9EE; --ink-soft: #98A2B3; --accent: #7C97FF; --accent-soft: #223055; --bad: #F87171; --good: #4ADE80; --warn: #F2B355; --move: #7C97FF; --model: #C09BFF; --publish: #F0A868; --shadow-sm: 0 1px 2px 0 rgba(0,0,0,.45), 0 2px 6px 2px rgba(0,0,0,.3); --shadow: 0 1px 3px 0 rgba(0,0,0,.5), 0 4px 8px 3px rgba(0,0,0,.35);';
   var REPORT_CSS = [
     ':root {',
     '  --paper: #F5F4F1; --surface: #FFFFFF; --paper-line: #E1DFD9; --ink: #1B2430; --ink-soft: #5B6472;',
     '  --accent: #2D5FE0; --accent-soft: #E7ECFE; --bad: #DC2626;',
-    '  --good: #1F9D55; --good-soft: #E4F6EB; --warn: #B45309; --warn-soft: #FDF1E0;',
+    '  --good: #1F9D55; --warn: #B45309;',
     '  --move: #2D5FE0; --model: #7C3AED; --publish: #C2560B;',
     '  --shadow-sm: 0 1px 2px 0 rgba(60,64,67,.30), 0 2px 6px 2px rgba(60,64,67,.15);',
     '  --shadow: 0 1px 3px 0 rgba(60,64,67,.30), 0 4px 8px 3px rgba(60,64,67,.15);',
@@ -5624,6 +5624,7 @@ var NotSoBigData = (function () {
     '    el.addEventListener("pointerdown", function (event) {',
     '      if (event.button) { return; }',
     '      dragging = true; moved = false;',
+    '      delete el.dataset.justDragged;',
     '      startX = event.clientX; startY = event.clientY;',
     '      origLeft = el.offsetLeft; origTop = el.offsetTop;',
     '      el.setPointerCapture(event.pointerId);',
@@ -5699,12 +5700,16 @@ var NotSoBigData = (function () {
   // own endDrag() only uses its "moved" flag to decide whether to persist
   // the new position, it never suppresses the click. So endDrag() (above)
   // sets el.dataset.justDragged = "true" right after a real drag, and this
-  // module's own .board-node click listener checks and clears that flag
-  // first, before anything else, bailing out if it was set - a plain DOM
-  // attribute has no registration-order dependency, unlike
-  // event.stopPropagation() (which only helps if the suppressing listener
-  // runs before this one - it doesn't, since this listener is registered at
-  // page load and endDrag() only runs later, after an actual drag).
+  // module's own .board-node click listener bails out if it's set, before
+  // anything else - a plain DOM attribute has no registration-order
+  // dependency, unlike event.stopPropagation() (which only helps if the
+  // suppressing listener runs before this one - it doesn't, since this
+  // listener is registered at page load and endDrag() only runs later,
+  // after an actual drag). The flag is cleared fresh on the *next*
+  // pointerdown (BOARD_LAYOUT_CLIENT_JS, not here or in DOCS_DRAWER_CLIENT_JS's
+  // identical guard) rather than by whichever click listener happens to
+  // read it, since both this module and docs.js's board consume the same
+  // flag off the same element.
   var MINI_CHART_CLIENT_JS = [
     sortableValue.toString(),
     computeMetricCardData.toString(),
@@ -5791,7 +5796,7 @@ var NotSoBigData = (function () {
     '  renderMetricCards();',
     '  Array.prototype.forEach.call(document.querySelectorAll(".board-node"), function (node) {',
     '    node.addEventListener("click", function (event) {',
-    '      if (node.dataset.justDragged) { delete node.dataset.justDragged; return; }',
+    '      if (node.dataset.justDragged) { return; }',
     '      if (event.target.closest(".board-metric-card") === null) { return; }',
     '      var id = node.getAttribute("data-block-id");',
     '      var full = node.querySelector("[data-full-section=\\"" + id + "\\"]");',
@@ -6161,7 +6166,7 @@ var NotSoBigData = (function () {
       node.dependsOn.forEach(function (dep) { boardEdges.push({ from: dep, to: node.name }); });
     });
     var nodesHtml = payload.map(renderDocsNodeSection).join('');
-    var kinds = ['move', 'model', 'publish'];
+    var kinds = Object.keys(DOCS_KIND_TOKEN);
     var sidebarHtml = '<div class="docs-search"><input type="text" id="docs-filter" placeholder="Filter nodes..."></div>'
       + kinds.map(function (kind) {
         var items = payload.filter(function (n) { return n.kind === kind; });
@@ -6211,12 +6216,25 @@ var NotSoBigData = (function () {
   // assembly), so hovering a sidebar row can reuse its setHighlight exactly
   // the way hovering a board node itself already does.
   //
-  // The node click listener below checks/clears node.dataset.justDragged
-  // first, before anything else - the same guard BOARD_LAYOUT_CLIENT_JS's
-  // own endDrag() (src/publish.js) already requires of MINI_CHART_CLIENT_JS's
+  // The node click listener below checks node.dataset.justDragged first,
+  // before anything else - the same guard BOARD_LAYOUT_CLIENT_JS's own
+  // endDrag() (src/publish.js) already requires of MINI_CHART_CLIENT_JS's
   // .board-node click listener on the publish board: a drag-then-release
   // still fires a native click on most browsers, so without this guard
-  // ending a drag on a docs node would also pop the drawer open.
+  // ending a drag on a docs node would also pop the drawer open. The flag
+  // itself is cleared on the next pointerdown, by BOARD_LAYOUT_CLIENT_JS -
+  // this listener only reads it.
+  //
+  // Dismissal mirrors MINI_CHART_CLIENT_JS's expand overlay (src/publish.js,
+  // openExpandModal/closeExpandModal): Escape closes the drawer, and a
+  // document-level click closes it when the click landed outside both the
+  // drawer and anything that opens it (a board node or a sidebar row) -
+  // otherwise this listener would fight the per-row/per-node "open" click
+  // also registered below, which needs to switch the drawer to a new node
+  // rather than have this one close it first. The drawer itself is a
+  // position:fixed panel, not a full-screen backdrop+box like the publish
+  // overlay, so "click-outside" is a targeted closest() check instead of a
+  // backdrop element.
   var DOCS_DRAWER_CLIENT_JS = [
     'document.addEventListener("DOMContentLoaded", function () {',
     '  var drawer = document.getElementById("docs-drawer");',
@@ -6232,12 +6250,19 @@ var NotSoBigData = (function () {
     '      row.classList.toggle("docs-node-row-selected", row.getAttribute("data-docs-row") === name);',
     '    });',
     '  }',
-    '  document.getElementById("docs-drawer-close").addEventListener("click", function () {',
+    '  function closeDrawer() {',
     '    drawer.classList.remove("docs-drawer-open");',
+    '  }',
+    '  document.getElementById("docs-drawer-close").addEventListener("click", closeDrawer);',
+    '  document.addEventListener("keydown", function (event) { if (event.key === "Escape") { closeDrawer(); } });',
+    '  document.addEventListener("click", function (event) {',
+    '    if (!drawer.classList.contains("docs-drawer-open")) { return; }',
+    '    if (event.target.closest("#docs-drawer") || event.target.closest(".board-node") || event.target.closest(".docs-node-row")) { return; }',
+    '    closeDrawer();',
     '  });',
     '  Array.prototype.forEach.call(document.querySelectorAll(".board-node[data-kind]"), function (node) {',
     '    node.addEventListener("click", function () {',
-    '      if (node.dataset.justDragged) { delete node.dataset.justDragged; return; }',
+    '      if (node.dataset.justDragged) { return; }',
     '      openDrawer(node.getAttribute("data-block-id"));',
     '    });',
     '  });',

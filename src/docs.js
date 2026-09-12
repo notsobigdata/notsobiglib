@@ -145,7 +145,7 @@ function renderDocsHtml(payload) {
     node.dependsOn.forEach(function (dep) { boardEdges.push({ from: dep, to: node.name }); });
   });
   var nodesHtml = payload.map(renderDocsNodeSection).join('');
-  var kinds = ['move', 'model', 'publish'];
+  var kinds = Object.keys(DOCS_KIND_TOKEN);
   var sidebarHtml = '<div class="docs-search"><input type="text" id="docs-filter" placeholder="Filter nodes..."></div>'
     + kinds.map(function (kind) {
       var items = payload.filter(function (n) { return n.kind === kind; });
@@ -195,12 +195,25 @@ function renderDocsHtml(payload) {
 // assembly), so hovering a sidebar row can reuse its setHighlight exactly
 // the way hovering a board node itself already does.
 //
-// The node click listener below checks/clears node.dataset.justDragged
-// first, before anything else - the same guard BOARD_LAYOUT_CLIENT_JS's
-// own endDrag() (src/publish.js) already requires of MINI_CHART_CLIENT_JS's
+// The node click listener below checks node.dataset.justDragged first,
+// before anything else - the same guard BOARD_LAYOUT_CLIENT_JS's own
+// endDrag() (src/publish.js) already requires of MINI_CHART_CLIENT_JS's
 // .board-node click listener on the publish board: a drag-then-release
 // still fires a native click on most browsers, so without this guard
-// ending a drag on a docs node would also pop the drawer open.
+// ending a drag on a docs node would also pop the drawer open. The flag
+// itself is cleared on the next pointerdown, by BOARD_LAYOUT_CLIENT_JS -
+// this listener only reads it.
+//
+// Dismissal mirrors MINI_CHART_CLIENT_JS's expand overlay (src/publish.js,
+// openExpandModal/closeExpandModal): Escape closes the drawer, and a
+// document-level click closes it when the click landed outside both the
+// drawer and anything that opens it (a board node or a sidebar row) -
+// otherwise this listener would fight the per-row/per-node "open" click
+// also registered below, which needs to switch the drawer to a new node
+// rather than have this one close it first. The drawer itself is a
+// position:fixed panel, not a full-screen backdrop+box like the publish
+// overlay, so "click-outside" is a targeted closest() check instead of a
+// backdrop element.
 var DOCS_DRAWER_CLIENT_JS = [
   'document.addEventListener("DOMContentLoaded", function () {',
   '  var drawer = document.getElementById("docs-drawer");',
@@ -216,12 +229,19 @@ var DOCS_DRAWER_CLIENT_JS = [
   '      row.classList.toggle("docs-node-row-selected", row.getAttribute("data-docs-row") === name);',
   '    });',
   '  }',
-  '  document.getElementById("docs-drawer-close").addEventListener("click", function () {',
+  '  function closeDrawer() {',
   '    drawer.classList.remove("docs-drawer-open");',
+  '  }',
+  '  document.getElementById("docs-drawer-close").addEventListener("click", closeDrawer);',
+  '  document.addEventListener("keydown", function (event) { if (event.key === "Escape") { closeDrawer(); } });',
+  '  document.addEventListener("click", function (event) {',
+  '    if (!drawer.classList.contains("docs-drawer-open")) { return; }',
+  '    if (event.target.closest("#docs-drawer") || event.target.closest(".board-node") || event.target.closest(".docs-node-row")) { return; }',
+  '    closeDrawer();',
   '  });',
   '  Array.prototype.forEach.call(document.querySelectorAll(".board-node[data-kind]"), function (node) {',
   '    node.addEventListener("click", function () {',
-  '      if (node.dataset.justDragged) { delete node.dataset.justDragged; return; }',
+  '      if (node.dataset.justDragged) { return; }',
   '      openDrawer(node.getAttribute("data-block-id"));',
   '    });',
   '  });',

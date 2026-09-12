@@ -78,6 +78,16 @@ function testDocsHtmlRendersOneBoardNodePerDiscoveredNode() {
   });
 }
 
+// Regression: DOCS_KIND_TOKEN's kind->CSS-var mapping (--move/--model/
+// --publish) had zero test coverage - this pins that a model-kind node's
+// board-node markup carries its data-kind="model" attribute right next to
+// a var(--model) color reference (the kind-bar), not just any kind's color.
+function testDocsHtmlColorsBoardNodeByKind() {
+  var html = renderDocsHtmlFor(['orders']);
+  var match = /<div class="board-node" data-block-id="orders" data-kind="model">.*?var\(--model\)/.exec(html);
+  assert.ok(match, 'expected the "orders" model node to be colored var(--model), got: ' + html);
+}
+
 function testDocsHtmlBoardEdgesCoverEveryRealDependsOnPair() {
   var html = renderDocsHtmlFor(['rawOrders', 'rawCustomers', 'orders']);
   var match = html.match(/window\.__BOARD_EDGES__ = (.+?);/);
@@ -171,6 +181,7 @@ module.exports = {
   testDocsPayloadSurfacesDiscoveryErrorWithoutCrashing: testDocsPayloadSurfacesDiscoveryErrorWithoutCrashing,
   testDocsPayloadCarriesPublishStructureOnly: testDocsPayloadCarriesPublishStructureOnly,
   testDocsHtmlRendersOneBoardNodePerDiscoveredNode: testDocsHtmlRendersOneBoardNodePerDiscoveredNode,
+  testDocsHtmlColorsBoardNodeByKind: testDocsHtmlColorsBoardNodeByKind,
   testDocsHtmlBoardEdgesCoverEveryRealDependsOnPair: testDocsHtmlBoardEdgesCoverEveryRealDependsOnPair,
   testDocsHtmlShowsCompiledSqlAndConnectorTypes: testDocsHtmlShowsCompiledSqlAndConnectorTypes,
   testDocsHtmlLoadsD3AndThemeToggle: testDocsHtmlLoadsD3AndThemeToggle,
