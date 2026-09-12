@@ -201,13 +201,19 @@ as it does today, nested inside the now-visible full section, since
 nothing about `TABLE_DETAIL_TOGGLE_HANDLER_JS`/`handleChartClick`'s
 `detail` branch changes.
 
-`isBoardLayout` now unconditionally ships `DETAIL_CLIENT_JS` (the
-`openDetailModal`/`closeDetailModal` pair) plus the new expand-overlay
-code, whether or not any block declares `detail` — the same "always-on,
-small, shared scaffolding" shape `publish.md` already documents for
-`TABLE_CLIENT_JS`'s table-replacer hook and `CHART_CLIENT_JS`'s selection
-module (both ship whenever their respective block type exists, not gated
-on the specific feature that needs them).
+`isBoardLayout` ships the new expand-overlay code (`openExpandModal`/
+`closeExpandModal`, self-contained — they never call `openDetailModal`)
+unconditionally, but this does *not* change `DETAIL_CLIENT_JS`'s own
+gating: `hasDetail` (`payload.tables.some(t => t.detail) ||
+payload.charts.some(c => c.detail)`) already reflects, correctly, whether
+*any* block needs `openDetailModal` regardless of layout mode, so board
+mode reuses that existing condition rather than forcing it on — forcing
+it on unconditionally would double-declare `formatValue`/
+`buildRawTablePayload` whenever a board report also has `filters[]`,
+since `FILTER_REUSED_FUNCTIONS_JS` already includes both as part of its
+own ten-function list (see `renderReportHtml`'s existing `hasFilters`/
+`hasDetail` branch, which already picks exactly one of the two supersets
+and must stay that way).
 
 ## 4. Docs board
 
