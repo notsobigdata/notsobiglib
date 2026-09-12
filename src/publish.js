@@ -913,7 +913,7 @@ var BOARD_CSS = [
   '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); border-radius: var(--radius); cursor: grab; }',
   '.board-viewport.board-panning { cursor: grabbing; }',
   '.board-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }',
-  '.board-node { position: absolute; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); box-sizing: border-box; cursor: grab; touch-action: none; user-select: none; transition: box-shadow .12s ease, border-color .12s ease, opacity .12s ease; }',
+  '.board-node { position: absolute; width: ' + BOARD_BOX_WIDTH + 'px; height: ' + BOARD_BOX_HEIGHT + 'px; overflow: hidden; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); box-sizing: border-box; cursor: grab; touch-action: none; user-select: none; transition: box-shadow .12s ease, border-color .12s ease, opacity .12s ease; }',
   '.board-node.board-node-dragging { cursor: grabbing; box-shadow: var(--shadow); z-index: 50; }',
   '.board-node.board-node-hi { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); }',
   '.board-node.board-node-dim { opacity: .35; }',

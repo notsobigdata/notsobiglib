@@ -204,6 +204,24 @@ function testPublishBoardLoadsD3EvenWithoutCharts() {
 // test needed here: drag itself is Layer-2-only (no DOM/pointer events in
 // this Node harness), same ceiling already documented for tree geometry.
 
+// Final-review fix: the rewrite above dropped the fixed box size off
+// .board-node's own CSS rule entirely (not just the native-resize bits),
+// which is a real regression - the layout math (nodeSize/computeBoardPositions/
+// fit-to-screen) all assume a fixed BOARD_BOX_WIDTH x BOARD_BOX_HEIGHT box,
+// and .board-metric-card's height:100% is inert without a sized parent. This
+// pins the box size (240x160) back onto the CSS rule.
+function testPublishBoardNodeCssHasFixedBoxSize() {
+  var ctx = harness.loadContext([fixture('publish-nodes.js')]);
+  var getHtml = shimBigQueryAndDrive(ctx, ['category', 'revenue'], [['A', '10']]);
+  var result = ctx.NotSoBigData.cli('run --select boardValidPublish').nodes[0];
+  assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
+  var html = getHtml();
+  var match = /\.board-node \{[^}]*\}/.exec(html);
+  assert.ok(match, 'expected a .board-node CSS rule, got: ' + html);
+  assert.ok(/width: 240px/.test(match[0]), 'expected .board-node to fix width: 240px, got: ' + match[0]);
+  assert.ok(/height: 160px/.test(match[0]), 'expected .board-node to fix height: 160px, got: ' + match[0]);
+}
+
 // Task 2: renderBoardCanvas no longer computes positions - it wraps each
 // block's markup in an unpositioned .board-node (data-block-id is the
 // only thing Task 3's client script needs to find it), and #board-edges
@@ -2161,6 +2179,7 @@ module.exports = {
   testPublishBoardClientJsClampsZoomAndAppliesTransform: testPublishBoardClientJsClampsZoomAndAppliesTransform,
   testPublishBoardLoadsD3EvenWithoutCharts: testPublishBoardLoadsD3EvenWithoutCharts,
   testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout: testPublishBoardCanvasEmitsUnpositionedNodesForClientSideLayout,
+  testPublishBoardNodeCssHasFixedBoxSize: testPublishBoardNodeCssHasFixedBoxSize,
   testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize: testPublishBoardLayoutClientJsEmittedWithCorrectNodeSize,
   testPublishBoardExposesBoundsAndRedrawsEdgesOnResize: testPublishBoardExposesBoundsAndRedrawsEdgesOnResize,
   testPublishEscapesScriptCloseInEmbeddedPayload: testPublishEscapesScriptCloseInEmbeddedPayload,
