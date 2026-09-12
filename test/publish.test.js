@@ -167,12 +167,15 @@ function testPublishBoardClientJsClampsZoomAndAppliesTransform() {
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
   assert.ok(/scaleExtent\(\[0\.25, 2\]\)/.test(html), 'expected zoom clamped to [0.25, 2] via d3.zoom().scaleExtent, got: ' + html);
-  // A mousedown/touchstart bubbling up from inside a .board-node (a
-  // resize-grip drag, a chart click, a table sort) must not also start a
-  // pan gesture - both would fight over the same pointer session.
-  // Confirmed via CDP: a resize drag felt like it kept tracking the
-  // cursor past mouseup before this filter existed.
-  assert.ok(/event\.target\.closest\(".board-node"\)/.test(html), 'expected zoom.filter() to exclude drags starting inside a .board-node, got: ' + html);
+  // A mousedown/touchstart bubbling up from inside a .board-node (a node
+  // drag, a chart click, a table sort) or the .board-toolbar (a direction/
+  // reset/fit click) must not also start a pan gesture - both would fight
+  // over the same pointer session. Confirmed via CDP: a resize drag felt
+  // like it kept tracking the cursor past mouseup before this filter
+  // existed; Task 4 (direction/drag/persistence/hover) added the toolbar
+  // as a second exclusion for the same reason - it's a sibling of
+  // .board-canvas, not nested inside any .board-node.
+  assert.ok(/event\.target\.closest\(".board-node, .board-toolbar"\)/.test(html), 'expected zoom.filter() to exclude drags starting inside a .board-node or .board-toolbar, got: ' + html);
   // event.transform.toString() produces SVG-style unitless "translate(x,y)"
   // - invalid CSS on an HTML element's style.transform (requires px units),
   // so the browser silently rejects the whole assignment and the canvas

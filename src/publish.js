@@ -1482,12 +1482,12 @@ var BOARD_LAYOUT_CLIENT_JS = [
   '  var blocks = window.__BOARD_NODES__;',
   '  var rootId = "__board_root__";',
   '  var storageKey = "notsobigdata-board:" + location.pathname;',
+  '  var directions = ["top-bottom", "right-left", "bottom-top", "left-right"];',
   '  var direction = "top-bottom";',
   '  try {',
   '    var storedDirection = localStorage.getItem(storageKey + ":direction");',
-  '    if (storedDirection) { direction = storedDirection; }',
+  '    if (storedDirection && directions.indexOf(storedDirection) !== -1) { direction = storedDirection; }',
   '  } catch (e) {}',
-  '  var directions = ["top-bottom", "right-left", "bottom-top", "left-right"];',
   '  var overrides = {};',
   '  try {',
   '    var stored = localStorage.getItem(storageKey + ":positions");',
@@ -1499,9 +1499,14 @@ var BOARD_LAYOUT_CLIENT_JS = [
   '  function persistDirection() {',
   '    try { localStorage.setItem(storageKey + ":direction", direction); } catch (e) {}',
   '  }',
+  '  function resetPositions() {',
+  '    overrides = {};',
+  '    try { localStorage.removeItem(storageKey + ":positions"); } catch (e) {}',
+  '    layout();',
+  '  }',
   '  var edges = window.__BOARD_EDGES__ || blocks.filter(function (b) { return b.relatesTo; }).map(function (b) { return { from: b.relatesTo, to: b.id }; });',
   '  var svg = document.getElementById("board-edges");',
-  '  var canvas = document.getElementById("board-canvas");',
+  '  var currentAnchor = null;',
   '  function nodeEl(id) { return document.querySelector("[data-block-id=\\"" + id + "\\"]"); }',
   '  function layout() {',
   '    var nodesData = blocks.map(function (b) { return { id: b.id, relatesTo: b.relatesTo }; });',
@@ -1531,7 +1536,7 @@ var BOARD_LAYOUT_CLIENT_JS = [
   '    svg.setAttribute("width", maxLeft);',
   '    svg.setAttribute("height", maxTop);',
   '    window.__BOARD_BOUNDS__ = { minX: 0, minY: 0, maxX: maxLeft, maxY: maxTop };',
-  '    window.__notsobigBoardAnchor__ = computed.anchor;',
+  '    currentAnchor = computed.anchor;',
   '    redrawEdges();',
   '  }',
   '  function anchorPoint(el, side) {',
@@ -1541,7 +1546,7 @@ var BOARD_LAYOUT_CLIENT_JS = [
   '    return { x: el.offsetLeft + el.offsetWidth, y: el.offsetTop + el.offsetHeight / 2 };',
   '  }',
   '  function redrawEdges() {',
-  '    var anchor = window.__notsobigBoardAnchor__ || { from: "bottom", to: "top" };',
+  '    var anchor = currentAnchor || { from: "bottom", to: "top" };',
   '    var edgePaths = edges.map(function (e) {',
   '      var fromEl = nodeEl(e.from), toEl = nodeEl(e.to);',
   '      if (!fromEl || !toEl) { return ""; }',
@@ -1562,7 +1567,7 @@ var BOARD_LAYOUT_CLIENT_JS = [
   '      if (!el) { return; }',
   '      var keep = !related || related.indexOf(b.id) !== -1;',
   '      el.classList.toggle("board-node-dim", !!related && !keep);',
-  '      el.classList.toggle("board-node-hi", !!related && keep && b.id !== id);',
+  '      el.classList.toggle("board-node-hi", !!related && keep);',
   '    });',
   '    Array.prototype.forEach.call(svg.querySelectorAll(".board-edge"), function (p) {',
   '      var isRel = !!id && (p.getAttribute("data-from") === id || p.getAttribute("data-to") === id);',
@@ -1575,6 +1580,7 @@ var BOARD_LAYOUT_CLIENT_JS = [
   '    if (!el) { return; }',
   '    var startX, startY, origLeft, origTop, dragging = false, moved = false;',
   '    el.addEventListener("pointerdown", function (event) {',
+  '      if (event.button) { return; }',
   '      dragging = true; moved = false;',
   '      startX = event.clientX; startY = event.clientY;',
   '      origLeft = el.offsetLeft; origTop = el.offsetTop;',
@@ -1586,7 +1592,8 @@ var BOARD_LAYOUT_CLIENT_JS = [
   '      var dx = event.clientX - startX, dy = event.clientY - startY;',
   '      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) { moved = true; }',
   '      if (!moved) { return; }',
-  '      var left = origLeft + dx, top = origTop + dy;',
+  '      var k = d3.zoomTransform(document.querySelector(".board-viewport")).k || 1;',
+  '      var left = origLeft + dx / k, top = origTop + dy / k;',
   '      el.style.left = left + "px"; el.style.top = top + "px";',
   '      overrides[b.id] = { left: left, top: top };',
   '      redrawEdges();',
@@ -1611,9 +1618,7 @@ var BOARD_LAYOUT_CLIENT_JS = [
   '        persistDirection();',
   '        layout();',
   '      } else if (action === "reset") {',
-  '        overrides = {};',
-  '        try { localStorage.removeItem(storageKey + ":positions"); } catch (e) {}',
-  '        layout();',
+  '        resetPositions();',
   '      } else if (action === "fit" && window.__notsobigFitBoard__) {',
   '        window.__notsobigFitBoard__();',
   '      }',
@@ -1624,7 +1629,7 @@ var BOARD_LAYOUT_CLIENT_JS = [
   '    var resizeObserver = new ResizeObserver(redrawEdges);',
   '    blocks.forEach(function (b) { var el = nodeEl(b.id); if (el) { resizeObserver.observe(el); } });',
   '  }',
-  '  window.__notsobigBoardApi__ = { redraw: redrawEdges, setHighlight: setHighlight, resetPositions: function () { overrides = {}; layout(); } };',
+  '  window.__notsobigBoardApi__ = { redraw: redrawEdges, setHighlight: setHighlight, resetPositions: resetPositions };',
   '});'
 ].join('\n');
 
@@ -1647,15 +1652,25 @@ var BOARD_LAYOUT_CLIENT_JS = [
 // box BOARD_LAYOUT_CLIENT_JS already computed for #board-edges' sizing -
 // scale is clamped to the same [0.25, 2] range as manual zoom, and 0.9
 // leaves a small margin around the tree rather than touching the edges.
+// applyFit() re-reads window.__BOARD_BOUNDS__ and viewport.clientWidth/
+// Height fresh every call (rather than closing over a transform computed
+// once at load) - BOARD_LAYOUT_CLIENT_JS's layout() rewrites those bounds
+// on every direction toggle/drag/reset, and window.__notsobigFitBoard__
+// (the toolbar's "fit" button, and this module's own initial call) must
+// see the current tree, not a stale load-time snapshot; it's also how a
+// 0-clientWidth-at-load report (fit silently skipped then) can still fit
+// once the toolbar button is clicked after layout has settled.
 //
 // `.filter()` excludes a drag-start (mousedown/touchstart) whose target
-// sits inside any .board-node from also starting a pan gesture - without
-// this, every mousedown bubbles up to the viewport where d3.zoom listens,
-// so dragging a node's native CSS resize grip (or clicking a chart bar,
-// sorting a table column, hitting "Export CSV"...) would *also* register
-// as a pan-start, fighting the node's own interaction for the same
-// pointer session (found during Layer 2 verification: a node's resize
-// felt like it kept tracking the cursor past mouseup). Wheel-zoom is
+// sits inside any .board-node or the .board-toolbar from also starting a
+// pan gesture - without this, every mousedown bubbles up to the viewport
+// where d3.zoom listens, so dragging a node (or clicking a toolbar
+// button, a chart bar, sorting a table column, hitting "Export CSV"...)
+// would *also* register as a pan-start, fighting that interaction for the
+// same pointer session (found during Layer 2 verification: a node's
+// resize felt like it kept tracking the cursor past mouseup - the same
+// class of bug the toolbar needs excluded too, since it's a sibling of
+// .board-canvas, not nested inside any .board-node). Wheel-zoom is
 // untouched - scrolling to zoom while the pointer happens to be over a
 // node's content is expected, only drag-to-pan needs this exclusion.
 var BOARD_CLIENT_JS = [
@@ -1667,22 +1682,24 @@ var BOARD_CLIENT_JS = [
   '    .filter(function (event) {',
   '      if (event.ctrlKey && event.type !== "wheel") { return false; }',
   '      if (event.button) { return false; }',
-  '      if ((event.type === "mousedown" || event.type === "touchstart") && event.target.closest(".board-node")) { return false; }',
+  '      if ((event.type === "mousedown" || event.type === "touchstart") && event.target.closest(".board-node, .board-toolbar")) { return false; }',
   '      return true;',
   '    })',
   '    .on("start", function () { viewport.classList.add("board-panning"); })',
   '    .on("end", function () { viewport.classList.remove("board-panning"); })',
   '    .on("zoom", function (event) { canvas.style.transform = "translate(" + event.transform.x + "px," + event.transform.y + "px) scale(" + event.transform.k + ")"; });',
   '  d3.select(viewport).call(zoom);',
-  '  var bounds = window.__BOARD_BOUNDS__;',
-  '  if (bounds && viewport.clientWidth && viewport.clientHeight) {',
+  '  function applyFit() {',
+  '    var bounds = window.__BOARD_BOUNDS__;',
+  '    if (!bounds || !viewport.clientWidth || !viewport.clientHeight) { return; }',
   '    var boundsWidth = bounds.maxX - bounds.minX, boundsHeight = bounds.maxY - bounds.minY;',
   '    var midX = (bounds.minX + bounds.maxX) / 2, midY = (bounds.minY + bounds.maxY) / 2;',
   '    var scale = Math.min(2, Math.max(0.25, 0.9 / Math.max(boundsWidth / viewport.clientWidth, boundsHeight / viewport.clientHeight)));',
   '    var fit = d3.zoomIdentity.translate(viewport.clientWidth / 2 - scale * midX, viewport.clientHeight / 2 - scale * midY).scale(scale);',
   '    d3.select(viewport).call(zoom.transform, fit);',
-  '    window.__notsobigFitBoard__ = function () { d3.select(viewport).call(zoom.transform, fit); };',
   '  }',
+  '  applyFit();',
+  '  window.__notsobigFitBoard__ = applyFit;',
   '});'
 ].join('\n');
 
