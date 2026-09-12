@@ -636,6 +636,31 @@ function buildChartPayload(chart, rows) {
   return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data, linkKey: chart.linkKey, linkTo: chart.linkTo };
 }
 
+// Pure summary of an already-built chart/table payload entry (the exact
+// object buildChartPayload/buildRawTablePayload/buildAggregatedTablePayload
+// already produced - this never re-touches raw rows) into what a board
+// metric card (Task 7) shows: one headline number and an ordered list of
+// points for its mini-chart. Kept separate from the drawing itself (which
+// needs an SVG/DOM and isn't pure) so this stays Node-testable.
+function computeMetricCardData(blockType, block) {
+  if (blockType === 'chart') {
+    if (block.series) {
+      var points = block.data.map(function (entry) {
+        return block.seriesKeys.reduce(function (sum, key) { return sum + (entry.values[key] || 0); }, 0);
+      });
+      return { headline: points.reduce(function (sum, v) { return sum + v; }, 0), points: points };
+    }
+    var totals = block.data.map(function (entry) { return entry.total; });
+    return { headline: totals.reduce(function (sum, v) { return sum + v; }, 0), points: totals };
+  }
+  if (block.mode === 'raw') {
+    return { headline: block.rows.length, points: [] };
+  }
+  var format = block.columns[1] ? block.columns[1].format : 'string';
+  var values = block.rows.map(function (row) { return sortableValue(row[1], format); });
+  return { headline: values.reduce(function (sum, v) { return sum + (typeof v === 'number' ? v : 0); }, 0), points: values };
+}
+
 // Distinct values for one filters[] field, sorted ascending as plain
 // strings - a dropdown's option list, not a plotted axis, so no need for
 // compareGroupValues' numeric-aware sort (that sort exists for chart

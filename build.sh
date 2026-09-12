@@ -88,7 +88,7 @@ build() {
     # top-level "return" would make cli.js an invalid file on its own.
     echo "  return {"
     echo "    cli: cli,"
-    echo "    __test: { buildDocsPayload: buildDocsPayload, discoverNodesForTest: function () { return discoverNodes().nodes; }, renderDocsHtml: renderDocsHtml, computeBoardPositions: computeBoardPositions }"
+    echo "    __test: { buildDocsPayload: buildDocsPayload, discoverNodesForTest: function () { return discoverNodes().nodes; }, renderDocsHtml: renderDocsHtml, computeBoardPositions: computeBoardPositions, computeMetricCardData: computeMetricCardData }"
     echo "  };"
     echo "})();"
   } > "$dest"
