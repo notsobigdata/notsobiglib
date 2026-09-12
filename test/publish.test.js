@@ -760,7 +760,7 @@ function testPublishChartClientJsDispatchesByType() {
 
 // Regression test for a rendering defect found in review: SVG/CSS gives a
 // stylesheet's `fill` property priority over a presentation attribute set
-// via .attr("fill", ...) - REPORT_CSS's ".chart-bar { fill: var(--teal); }"
+// via .attr("fill", ...) - REPORT_CSS's ".chart-bar { fill: var(--accent); }"
 // would silently override any per-item fill set with .attr("fill", ...),
 // so pie slices, stacked/grouped bar segments, and the line chart's path
 // would all render filled instead of respecting the intended fill. Three
@@ -2012,7 +2012,7 @@ function testPublishDarkModeTokensPresent() {
   var html = getHtml();
   assert.ok(/prefers-color-scheme:\s*dark/.test(html), 'expected an OS-preference dark-mode media block, got: ' + html);
   assert.ok(/data-theme="dark"/.test(html), 'expected a manual [data-theme="dark"] override selector, got: ' + html);
-  assert.ok(html.indexOf('#202124') !== -1, 'expected the dark-mode canvas color token, got: ' + html);
+  assert.ok(html.indexOf('#10141B') !== -1, 'expected the dark-mode canvas color token, got: ' + html);
 }
 
 // FOUC avoidance: the theme-init script (reads localStorage, sets
@@ -2051,13 +2051,13 @@ function testPublishThemeToggleClickHandlerPersistsChoice() {
 // (the line chart's stroke) - every other D3 fill already read a CSS
 // custom property (see testPublishChartClientJsUsesStyleForColorScaledFills),
 // so a literal hex here was the one series that wouldn't have re-themed.
-function testPublishLineChartUsesVarTealNotHardcodedHex() {
+function testPublishLineChartUsesVarAccentNotHardcodedHex() {
   var ctx = harness.loadContext([fixture('publish-nodes.js')]);
   var getHtml = shimBigQueryAndDrive(ctx, ['category', 'day', 'revenue'], [['A', '1', '10']]);
   var result = ctx.NotSoBigData.cli('run --select lineChartPublish').nodes[0];
   assert.strictEqual(result.status, 'success', 'expected the shimmed run to succeed, got: ' + result.error);
   var html = getHtml();
-  assert.ok(/\.style\("stroke", "var\(--teal\)"\)/.test(html), 'expected the line chart stroke to read var(--teal), got: ' + html);
+  assert.ok(/\.style\("stroke", "var\(--accent\)"\)/.test(html), 'expected the line chart stroke to read var(--accent), got: ' + html);
   assert.ok(html.indexOf('#3F6659') === -1, 'expected no remaining hardcoded line-chart color, got: ' + html);
 }
 
@@ -2239,7 +2239,7 @@ module.exports = {
   testPublishDarkModeTokensPresent: testPublishDarkModeTokensPresent,
   testPublishThemeInitScriptRunsInHeadBeforeBody: testPublishThemeInitScriptRunsInHeadBeforeBody,
   testPublishThemeToggleClickHandlerPersistsChoice: testPublishThemeToggleClickHandlerPersistsChoice,
-  testPublishLineChartUsesVarTealNotHardcodedHex: testPublishLineChartUsesVarTealNotHardcodedHex,
+  testPublishLineChartUsesVarAccentNotHardcodedHex: testPublishLineChartUsesVarAccentNotHardcodedHex,
   testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard: testPublishThemeAlwaysEmittedWithoutChartsTablesOrBoard,
   testPublishButtonsAndSelectsInheritThemedTextColor: testPublishButtonsAndSelectsInheritThemedTextColor,
   testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault: testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault
