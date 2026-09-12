@@ -239,7 +239,7 @@ var DOCS_DRAWER_CLIENT_JS = [
   '    });',
   '    Array.prototype.forEach.call(document.querySelectorAll(".board-node[data-kind]"), function (node) {',
   '      var match = !needle || node.getAttribute("data-block-id").toLowerCase().indexOf(needle) !== -1;',
-  '      node.style.opacity = match ? "1" : ".25";',
+  '      node.style.opacity = match ? "" : ".25";',
   '    });',
   '  });',
   '});'
