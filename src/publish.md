@@ -411,10 +411,35 @@ second hand-written pass.
 
 `d3.tree()` centers its root at `x = 0` and spreads children on both
 sides, so real nodes can land at negative `x` — unlike the deleted
-contour algorithm, which always started at `0`. `BOARD_LAYOUT_CLIENT_JS`
-shifts every node's `x` by `-minX` (the minimum `x` across all real,
-non-synthetic nodes) before writing any `style.left`, so nothing ever
-gets a negative position.
+contour algorithm, which always started at `0`. `computeBoardPositions`
+(pure, Node-testable, shared by `BOARD_LAYOUT_CLIENT_JS` via
+`.toString()`) is where that shift now happens, and it's grown past a
+plain `-minX`: layout is **direction-aware** — one of four toolbar-
+selectable directions (`top-bottom`/`bottom-top`/`left-right`/
+`right-left`) decides which of `x`/`y` becomes CSS `left`/`top` (swapped
+for the two horizontal directions) and whether the depth axis runs
+forward or reversed, plus which side of each box an edge anchors to
+(`anchorByDirection`). `BOARD_LAYOUT_CLIENT_JS`'s own `layout()` re-runs
+`d3.stratify()`/`d3.tree()`/`computeBoardPositions` from scratch on every
+direction toggle and on "reset" — positions are **not** computed once
+and left alone.
+
+On top of the computed layout, each node is a real per-node drag
+(`pointerdown`/`pointermove`/`pointerup` on the `.board-node` itself, not
+a native HTML5 drag or the browser's CSS `resize` handle) that writes an
+`{left, top}` override into an in-memory `overrides` map and persists it
+to `localStorage` (keyed by `location.pathname`, so distinct reports
+sharing a browser origin don't collide) once the drag ends — `layout()`
+prefers a node's `overrides` entry over its freshly-computed position, so
+a manually-dragged node survives a direction toggle or page reload until
+"reset" clears `overrides` (and the matching `localStorage` key) and
+recomputes. The direction choice is persisted the same way, under a
+sibling key. A `.board-toolbar` (direction cycle / reset / fit-to-view)
+drives all three actions, and hovering a node (or, from `docs.js`'s
+sidebar, a row naming one) calls `setHighlight(id)` to dim everything but
+that node, its direct edges, and its immediate neighbors — all exposed
+off `window.__notsobigBoardApi__` so `docs.js`'s own script can drive the
+same board without reimplementing it.
 
 Edges are **not** taken from `d3.tree()`'s own link objects — they're
 built directly from each block's `relatesTo` field (now attached to
@@ -422,19 +447,55 @@ every payload entry by `buildReportPayload`, unconditionally — same
 "attach per-block, not gated on layout mode" posture `detail` already
 has), the same `{from, to}` shape the deleted `computeBoardLayout`'s
 `edges` array used to produce server-side. The `<path>` drawing itself
-(straight line, parent-bottom-midpoint to child-top-midpoint) is
-unchanged — only which side computes the coordinates moved.
+draws from each anchor's live `offsetLeft`/`offsetTop`/`offsetWidth`/
+`offsetHeight` via the direction-aware `anchorPoint(el, side)` helper
+(not a fixed parent-bottom-midpoint-to-child-top-midpoint line — that
+was only ever correct for the `top-bottom` default) every time
+`redrawEdges()` runs: after layout, after every drag frame, and off a
+`ResizeObserver` watching each node element, kept as a defensive redraw
+for any DOM reflow that changes a node's box (fixed 240x160 in normal
+operation, see below) rather than for a resize handle — there is no
+native CSS `resize` on `.board-node` to observe here.
 
 `BOARD_BOX_WIDTH`/`BOARD_BOX_HEIGHT`/`BOARD_H_GAP`/`BOARD_V_GAP` survive
-the rewrite, repurposed: `BOARD_CSS`'s `.board-node` rule now bakes
-`BOARD_BOX_WIDTH`/`BOARD_BOX_HEIGHT` in directly (replacing the old
-per-node inline `style="width:...;height:..."`), and the same four
-numbers are serialized as literal numbers into `BOARD_LAYOUT_CLIENT_JS`'s
-`d3.tree().nodeSize([...])` call — one source of truth in this
-server-side file, read by both CSS generation and the emitted client
-script.
+the rewrite, repurposed: `BOARD_CSS`'s `.board-node` rule bakes
+`BOARD_BOX_WIDTH`/`BOARD_BOX_HEIGHT` in directly as a fixed `width`/
+`height` (plus `overflow: hidden`, which also clips a kind-bar strip's
+square corners to the node's rounded ones — see `src/docs.md`) — this
+one CSS rule is what a metric card's own `height: 100%` and the layout
+math below both lean on, and it must never go back to shrink-to-fit
+(see the Node test pinning the box size, `testPublishBoardNodeCssHasFixedBoxSize`
+in `test/publish.test.js`) — and the same four numbers are serialized as
+literal numbers into `BOARD_LAYOUT_CLIENT_JS`'s `d3.tree().nodeSize([...])`
+call, with the two entries swapped for the horizontal directions. One
+source of truth in this server-side file, read by CSS generation and
+the emitted client script alike.
 
-`BOARD_CLIENT_JS` (pan/zoom) is now a thin `d3.zoom()` setup instead of
+Each board node itself renders as a compact "metric card" (one headline
+number plus a small sparkline, `MINI_CHART_CLIENT_JS`'s `renderMetricCard`/
+`computeMetricCardData`) rather than the full chart/table inline — the
+full section still renders, server-side, into the same node but hidden
+(`.board-node-full { display: none; }`), and a click on the card (guarded
+by `el.dataset.justDragged`, see below) moves that hidden section into a
+full-screen expand overlay (`openExpandModal`/`closeExpandModal`) and
+back again on close. `filters[]`-reactive charts/tables keep their metric
+card in sync on every filter change too (`FILTER_CLIENT_JS`'s
+`applyFilterToChart`/`applyFilterToTable` call `updateMetricCardById`
+with the freshly-built chart/table object) — the collapsed card is a
+second view onto the same data, not a static snapshot taken once at
+render time.
+
+A drag-then-release on a `.board-node` still fires a native `click` on
+most browsers regardless of pointer distance moved, so
+`BOARD_LAYOUT_CLIENT_JS`'s own `pointerdown` handler clears
+`el.dataset.justDragged` fresh at the start of every pointer interaction,
+and `endDrag()` sets it right after a real drag; both this module's
+metric-card click listener and `docs.js`'s `DOCS_DRAWER_CLIENT_JS` node
+click listener check (not clear) that flag first and bail out if it's
+set — the clearing lives in the one place that sets it, not duplicated
+across every consumer that reads it.
+
+`BOARD_CLIENT_JS` (pan/zoom) is a thin `d3.zoom()` setup instead of
 hand-rolled `mousedown`/`touchstart`/`wheel` listeners — same
 `.board-viewport`/`.board-canvas`/`.board-panning` CSS contract as
 before (`canvas.style.transform`, `.board-panning` toggled on
@@ -442,7 +503,10 @@ drag-start/end), same `scaleExtent([0.25, 2])` clamp range, but gains
 real pinch-zoom and double-click-to-zoom for free from `d3.zoom()`'s
 own defaults. It's registered right after `BOARD_LAYOUT_CLIENT_JS` in
 `renderReportHtml`'s script assembly, so positions and edges already
-exist by the time pan/zoom is wired up.
+exist by the time pan/zoom is wired up. Its zoom filter also excludes
+any drag-start whose target sits inside a `.board-node` or the
+`.board-toolbar`, so dragging a node/clicking the toolbar never also
+registers as a pan gesture.
 
 **Testing tradeoff:** `computeBoardLayout`'s own pure-function position
 tests (single root/2 children, 3-level chain, independent roots, a
@@ -451,10 +515,13 @@ logic isn't server-side anymore, so it isn't Node-testable anymore.
 Layer 1 now only checks that `relatesTo` round-trips into the payload
 correctly and that the emitted markup/client-script shape is right
 (unpositioned `.board-node`s, empty `#board-edges`, the right
-`nodeSize()` numbers present in the emitted script). Actual tree
-geometry (no overlap, edges connecting the right boxes) is Layer2
-(`notsobigtests`, human-run) territory now — the same posture chart
-pixel-accuracy already has.
+`nodeSize()` numbers present in the emitted script, and the fixed
+`width`/`height` baked into the `.board-node` CSS rule itself). Actual
+tree geometry (no overlap, edges connecting the right boxes), drag,
+direction toggling, and the toolbar are all Layer 2 (`notsobigtests`,
+human-run) territory — the same posture chart pixel-accuracy already
+has; `computeBoardPositions` and `computeMetricCardData` are the two
+pure functions out of this whole feature that stay Node-tested at all.
 
 `relatesTo` deliberately shares one id namespace across `charts[]` and
 `tables[]` (`validateBoardRelations`'s `registerBlock` check) - every

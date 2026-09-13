@@ -337,6 +337,20 @@ tables: [
   JavaScript enabled to show any layout at all (it already needed
   JavaScript for pan/zoom, and for any chart drawn on it).
 
+Each block on the board renders as a compact metric card — a headline
+number and a small chart, not the full chart/table — so the canvas reads
+at a glance instead of like a wall of documents. Click a card to expand
+it into the full chart/table (with all its own `reactsTo`/`detail`/
+`linkKey`/`linkTo` behavior intact) in an overlay; close it to collapse
+back to the card. A small toolbar in the bottom-right corner cycles the
+tree's direction (top-to-bottom by default, plus bottom-to-top,
+left-to-right, right-to-left), resets any node a reader has dragged back
+to its computed position, and re-fits the canvas to the viewport.
+Dragging a node, and the chosen direction, are both remembered per file
+(via the browser's `localStorage`, the same mechanism the light/dark
+toggle already uses) — they reset only if a fresh `cli('run')` overwrites
+the file, or a reader opens it in a different browser/device.
+
 ### Detail drill-down
 
 Any `chart` (bar/line/pie) or `mode: 'aggregated'` table can declare

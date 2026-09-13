@@ -4518,6 +4518,20 @@ var NotSoBigData = (function () {
     return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
+  // Extracted so TABLE_CLIENT_JS's inline script and, from Task 6 on, the
+  // board's metric-card headline computation can both reuse the exact
+  // same "recover a number from an already-formatted cell" logic via
+  // .toString() (see FILTER_REUSED_FUNCTIONS_JS's own reuse pattern) -
+  // previously this only existed as hand-written text inside
+  // TABLE_CLIENT_JS's own array, unreachable from anywhere else.
+  function sortableValue(cell, format) {
+    if (format === 'string') {
+      return String(cell).toLowerCase();
+    }
+    var num = Number(String(cell).replace(/[^0-9.-]/g, ''));
+    return isNaN(num) ? String(cell).toLowerCase() : num;
+  }
+
   // mode: 'raw' - one output row per source row, column order/labels exactly
   // as configured. Non-'string' formats coerce through Number() first (row
   // values from fetchTableRows are always strings, same as
@@ -4627,6 +4641,30 @@ var NotSoBigData = (function () {
     return { id: chart.id, title: chart.title, type: chartType, donut: !!chart.donut, data: data, linkKey: chart.linkKey, linkTo: chart.linkTo };
   }
 
+  // Pure summary of an already-built chart/table payload entry (the exact
+  // object buildChartPayload/buildRawTablePayload/buildAggregatedTablePayload
+  // already produced - this never re-touches raw rows) into what a board
+  // metric card (Task 7) shows: one headline number and an ordered list of
+  // points for its mini-chart. Kept separate from the drawing itself (which
+  // needs an SVG/DOM and isn't pure) so this stays Node-testable.
+  function computeMetricCardData(blockType, block) {
+    if (blockType === 'chart') {
+      if (block.series) {
+        var points = block.data.map(function (entry) {
+          return block.seriesKeys.reduce(function (sum, key) { return sum + (entry.values[key] || 0); }, 0);
+        });
+        return { headline: points.reduce(function (sum, v) { return sum + v; }, 0), points: points };
+      }
+      var totals = block.data.map(function (entry) { return entry.total; });
+      return { headline: totals.reduce(function (sum, v) { return sum + v; }, 0), points: totals };
+    }
+    if (block.mode === 'raw') {
+      return { headline: block.rows.length, points: [] };
+    }
+    var values = block.rows.map(function (row) { return sortableValue(row[1], 'number'); });
+    return { headline: values.reduce(function (sum, v) { return sum + (typeof v === 'number' ? v : 0); }, 0), points: values };
+  }
+
   // Distinct values for one filters[] field, sorted ascending as plain
   // strings - a dropdown's option list, not a plotted axis, so no need for
   // compareGroupValues' numeric-aware sort (that sort exists for chart
@@ -4733,6 +4771,7 @@ var NotSoBigData = (function () {
       var built = table.mode === 'raw' ? buildRawTablePayload(table, tableRows) : buildAggregatedTablePayload(table, tableRows);
       built = withDetail(built, table, tableRows);
       built.relatesTo = table.relatesTo || null;
+      built.mode = table.mode === 'raw' ? 'raw' : 'aggregated';
       return built;
     });
     var payload = { kpis: kpis, charts: charts, tables: tables };
@@ -4757,10 +4796,47 @@ var NotSoBigData = (function () {
 
   // Fixed box/gap sizing for layout:'board' - no per-report customization
   // in v1, same posture the REPORT_CSS design tokens already have.
-  var BOARD_BOX_WIDTH = 520;
-  var BOARD_BOX_HEIGHT = 340;
+  var BOARD_BOX_WIDTH = 240;
+  var BOARD_BOX_HEIGHT = 160;
   var BOARD_H_GAP = 40;
   var BOARD_V_GAP = 60;
+
+  // Pure, D3-free position math for layout: 'board'. d3.stratify()/d3.tree()
+  // (client-only - see BOARD_LAYOUT_CLIENT_JS, Task 4) produce each real
+  // node's {id, x, y}: x is always the sibling-spread offset, y is always
+  // the depth offset, regardless of visual orientation - which is exactly
+  // why this function can stay D3-free and Node-testable. All this does is
+  // decide which of x/y becomes CSS left/top for a given `direction`, and
+  // whether the depth axis runs forward or reversed. The caller (Task 4)
+  // is responsible for calling d3.tree().nodeSize() with boxWidth/boxHeight
+  // swapped for the two horizontal directions *before* this ever runs -
+  // this function only consumes the resulting x/y, it never computes them.
+  function computeBoardPositions(treeNodes, direction, boxWidth, boxHeight) {
+    var isHorizontal = direction === 'left-right' || direction === 'right-left';
+    var isReversed = direction === 'bottom-top' || direction === 'right-left';
+    var spreadValues = treeNodes.map(function (n) { return n.x; });
+    var depthValues = treeNodes.map(function (n) { return n.y; });
+    var minSpread = Math.min.apply(null, spreadValues);
+    var maxDepth = Math.max.apply(null, depthValues);
+    var positions = {};
+    treeNodes.forEach(function (n) {
+      var spread = n.x - minSpread;
+      var depth = isReversed ? (maxDepth - n.y) : n.y;
+      positions[n.id] = isHorizontal ? { left: depth, top: spread } : { left: spread, top: depth };
+    });
+    var maxLeft = 0, maxTop = 0;
+    Object.keys(positions).forEach(function (id) {
+      maxLeft = Math.max(maxLeft, positions[id].left + boxWidth);
+      maxTop = Math.max(maxTop, positions[id].top + boxHeight);
+    });
+    var anchorByDirection = {
+      'top-bottom': { from: 'bottom', to: 'top' },
+      'bottom-top': { from: 'top', to: 'bottom' },
+      'left-right': { from: 'right', to: 'left' },
+      'right-left': { from: 'left', to: 'right' }
+    };
+    return { positions: positions, bounds: { width: maxLeft, height: maxTop }, anchor: anchorByDirection[direction] };
+  }
 
   // Fixed design tokens - see the design spec's "Design tokens" section.
   // No per-report customization in v1: every published dashboard looks the
@@ -4769,19 +4845,20 @@ var NotSoBigData = (function () {
   // two fixed token sets (light default + dark), switched by the
   // report-agnostic toggle in THEME_TOGGLE_HTML/THEME_INIT_JS/
   // THEME_TOGGLE_JS below - still nothing a report author can configure.
-  // Colors follow Google's own Material palette (Workspace/Cloud Console
-  // grays, the rgba(60,64,67,...) elevation-shadow tint, Google's actual
-  // light/dark accent blues and reds) rather than an invented brand.
-  var DARK_TOKENS_CSS = '--paper: #202124; --surface: #292A2D; --paper-line: #3C4043; --ink: #E8EAED; --ink-soft: #9AA0A6; --teal: #8AB4F8; --teal-soft: #29344A; --coral: #F28B82; --shadow-sm: 0 1px 2px 0 rgba(0,0,0,.45), 0 2px 6px 2px rgba(0,0,0,.3); --shadow: 0 1px 3px 0 rgba(0,0,0,.5), 0 4px 8px 3px rgba(0,0,0,.35);';
+  // Custom light/dark palette per the pipeline-canvas-redesign spec for
+  // visual consistency across all published reports.
+  var DARK_TOKENS_CSS = '--paper: #10141B; --surface: #171C25; --paper-line: #2A313D; --ink: #E6E9EE; --ink-soft: #98A2B3; --accent: #7C97FF; --accent-soft: #223055; --bad: #F87171; --good: #4ADE80; --warn: #F2B355; --move: #7C97FF; --model: #C09BFF; --publish: #F0A868; --shadow-sm: 0 1px 2px 0 rgba(0,0,0,.45), 0 2px 6px 2px rgba(0,0,0,.3); --shadow: 0 1px 3px 0 rgba(0,0,0,.5), 0 4px 8px 3px rgba(0,0,0,.35);';
   var REPORT_CSS = [
     ':root {',
-    '  --paper: #F8F9FA; --surface: #FFFFFF; --paper-line: #DADCE0; --ink: #202124; --ink-soft: #5F6368;',
-    '  --teal: #1A73E8; --teal-soft: #E8F0FE; --coral: #EA4335;',
+    '  --paper: #F5F4F1; --surface: #FFFFFF; --paper-line: #E1DFD9; --ink: #1B2430; --ink-soft: #5B6472;',
+    '  --accent: #2D5FE0; --accent-soft: #E7ECFE; --bad: #DC2626;',
+    '  --good: #1F9D55; --warn: #B45309;',
+    '  --move: #2D5FE0; --model: #7C3AED; --publish: #C2560B;',
     '  --shadow-sm: 0 1px 2px 0 rgba(60,64,67,.30), 0 2px 6px 2px rgba(60,64,67,.15);',
     '  --shadow: 0 1px 3px 0 rgba(60,64,67,.30), 0 4px 8px 3px rgba(60,64,67,.15);',
     '  --radius: 8px; --radius-sm: 4px;',
     '  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;',
-    '  --sans: Roboto, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;',
+    '  --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;',
     '}',
     '@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { ' + DARK_TOKENS_CSS + ' } }',
     ':root[data-theme="dark"] { ' + DARK_TOKENS_CSS + ' }',
@@ -4796,25 +4873,25 @@ var NotSoBigData = (function () {
     '.chart { background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 20px; margin-top: 16px; }',
     '.chart h2 { font-size: 14px; margin-top: 0; }',
     '.chart-label, .chart-value { font-family: var(--mono); font-size: 12px; fill: var(--ink); }',
-    '.chart-bar { fill: var(--teal); }',
+    '.chart-bar { fill: var(--accent); }',
     '.table-block { background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 20px; margin-top: 16px; }',
     '.table-block h2 { font-size: 14px; margin-top: 0; }',
     '.table-block table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }',
     '.table-block th, .table-block td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); font-variant-numeric: tabular-nums; }',
     '.table-block th.table-sortable { cursor: pointer; user-select: none; }',
-    '.table-block tbody tr:hover { background: var(--teal-soft); }',
+    '.table-block tbody tr:hover { background: var(--accent-soft); }',
     '.table-search { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); border-radius: var(--radius-sm); padding: 2px 6px; margin-bottom: 8px; display: block; transition: border-color .15s ease; }',
-    '.table-search:hover, .table-search:focus-visible { border-color: var(--teal); }',
+    '.table-search:hover, .table-search:focus-visible { border-color: var(--accent); }',
     '.table-pager { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-family: var(--mono); font-size: 12px; }',
     '.table-pager button { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); border-radius: var(--radius-sm); padding: 2px 8px; cursor: pointer; transition: border-color .15s ease; }',
-    '.table-pager button:hover:not(:disabled) { border-color: var(--teal); }',
+    '.table-pager button:hover:not(:disabled) { border-color: var(--accent); }',
     '.table-pager button:disabled { color: var(--ink-soft); cursor: default; }',
     '.table-csv-export { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); border-radius: var(--radius-sm); padding: 2px 8px; margin-top: 8px; cursor: pointer; transition: border-color .15s ease; }',
-    '.table-csv-export:hover { border-color: var(--teal); }',
+    '.table-csv-export:hover { border-color: var(--accent); }',
     '.filters { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }',
     '.filter { font-family: var(--mono); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }',
     '.filter select { font-family: var(--mono); font-size: 12px; background: var(--paper); border: 1px solid var(--paper-line); border-radius: var(--radius-sm); padding: 2px 6px; transition: border-color .15s ease; }',
-    '.filter select:hover, .filter select:focus-visible { border-color: var(--teal); }',
+    '.filter select:hover, .filter select:focus-visible { border-color: var(--accent); }',
     '.detail-modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 1000; }',
     '.detail-modal { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; max-width: 90vw; max-height: 80vh; overflow: auto; }',
     '.detail-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }',
@@ -4823,7 +4900,7 @@ var NotSoBigData = (function () {
     '.detail-modal table { border-collapse: collapse; font-family: var(--mono); font-size: 12px; }',
     '.detail-modal th, .detail-modal td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--paper-line); }',
     '.theme-toggle { position: fixed; top: 12px; right: 12px; z-index: 1100; width: 32px; height: 32px; border-radius: 999px; border: 1px solid var(--paper-line); background: var(--surface); color: var(--ink-soft); display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: var(--shadow-sm); transition: background-color .15s ease, border-color .15s ease, color .15s ease; }',
-    '.theme-toggle:hover { color: var(--teal); border-color: var(--teal); }',
+    '.theme-toggle:hover { color: var(--accent); border-color: var(--accent); }',
     '.theme-toggle-icon-moon { display: none; }',
     '@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .theme-toggle-icon-sun { display: none; } :root:not([data-theme="light"]) .theme-toggle-icon-moon { display: block; } }',
     ':root[data-theme="dark"] .theme-toggle-icon-sun { display: none; }',
@@ -4840,10 +4917,29 @@ var NotSoBigData = (function () {
     '.board-viewport { position: relative; width: 100%; height: 80vh; overflow: hidden; border: 1px solid var(--paper-line); border-radius: var(--radius); cursor: grab; }',
     '.board-viewport.board-panning { cursor: grabbing; }',
     '.board-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }',
-    '.board-node { position: absolute; width: ' + BOARD_BOX_WIDTH + 'px; height: ' + BOARD_BOX_HEIGHT + 'px; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 12px; box-sizing: border-box; overflow: auto; resize: both; min-width: 160px; min-height: 100px; }',
+    '.board-node { position: absolute; width: ' + BOARD_BOX_WIDTH + 'px; height: ' + BOARD_BOX_HEIGHT + 'px; overflow: hidden; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow-sm); box-sizing: border-box; cursor: grab; touch-action: none; user-select: none; transition: box-shadow .12s ease, border-color .12s ease, opacity .12s ease; }',
+    '.board-node.board-node-dragging { cursor: grabbing; box-shadow: var(--shadow); z-index: 50; }',
+    '.board-node.board-node-hi { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); }',
+    '.board-node.board-node-dim { opacity: .35; }',
     '.board-node .chart, .board-node .table-block { border: none; box-shadow: none; margin-top: 0; padding: 0; }',
     '.board-edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }',
-    '.board-edge { fill: none; stroke: var(--paper-line); stroke-width: 2; }'
+    '.board-edge { fill: none; stroke: var(--paper-line); stroke-width: 2; transition: opacity .12s ease, stroke .12s ease, stroke-width .12s ease; }',
+    '.board-edge.board-edge-hi { stroke: var(--accent); stroke-width: 2.6; opacity: 1; }',
+    '.board-edge.board-edge-dim { opacity: .15; }',
+    '.board-toolbar { position: absolute; right: 14px; bottom: 14px; z-index: 60; display: flex; gap: 2px; background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 4px; }',
+    '.board-toolbar button { width: 28px; height: 28px; border: none; background: none; border-radius: 6px; cursor: pointer; color: var(--ink-soft); font-size: 13px; }',
+    '.board-toolbar button:hover { background: var(--paper); color: var(--ink); }',
+    '.board-toolbar .board-toolbar-divider { width: 1px; background: var(--paper-line); margin: 4px 2px; }',
+    '.board-metric-card { padding: 11px 13px; height: 100%; box-sizing: border-box; overflow: hidden; }',
+    '.board-metric-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-soft); font-weight: 600; }',
+    '.board-metric-value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 600; margin-top: 2px; }',
+    '.board-metric-mini { display: block; margin-top: 6px; }',
+    '.board-node-full { display: none; }',
+    '.board-expand-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 1000; }',
+    '.board-expand-box { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; max-width: 90vw; max-height: 85vh; overflow: auto; min-width: 360px; }',
+    '.board-expand-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }',
+    '.board-expand-header h3 { margin: 0; font-size: 14px; }',
+    '.board-expand-close { font-family: var(--mono); font-size: 16px; background: none; border: none; cursor: pointer; }'
   ].join('\n');
 
   // One <select> per filters[] entry: an "All" option plus every distinct
@@ -4902,6 +4998,7 @@ var NotSoBigData = (function () {
     'function applyFilterToChart(chartConfig) {',
     '  var filteredRows = filteredRowsFor(chartConfig.reactsTo);',
     '  var newChart = withDetail(buildChartPayload(chartConfig, filteredRows), chartConfig, filteredRows);',
+    '  if (typeof updateMetricCardById === "function") { updateMetricCardById(chartConfig.id, newChart); }',
     '  var container = document.getElementById("chart-" + chartConfig.id);',
     '  if (!container) { return; }',
     '  while (container.firstChild) { container.removeChild(container.firstChild); }',
@@ -4913,6 +5010,8 @@ var NotSoBigData = (function () {
     'function applyFilterToTable(tableConfig) {',
     '  var filteredRows = filteredRowsFor(tableConfig.reactsTo);',
     '  var newTable = withDetail(tableConfig.mode === "raw" ? buildRawTablePayload(tableConfig, filteredRows) : buildAggregatedTablePayload(tableConfig, filteredRows), tableConfig, filteredRows);',
+    '  newTable.mode = tableConfig.mode === "raw" ? "raw" : "aggregated";',
+    '  if (typeof updateMetricCardById === "function") { updateMetricCardById(tableConfig.id, newTable); }',
     '  var replace = window.__PUBLISH_TABLE_REPLACERS__ && window.__PUBLISH_TABLE_REPLACERS__[tableConfig.id];',
     '  if (replace) { replace(newTable); }',
     '}',
@@ -5091,11 +5190,7 @@ var NotSoBigData = (function () {
     // digits/dot/minus recovers the underlying number; "string" columns (and
     // the aggregated groupBy column, which is always "string") sort
     // case-insensitively as text instead.
-    'function sortableValue(cell, format) {',
-    '  if (format === "string") { return String(cell).toLowerCase(); }',
-    '  var num = Number(String(cell).replace(/[^0-9.-]/g, ""));',
-    '  return isNaN(num) ? String(cell).toLowerCase() : num;',
-    '}',
+    sortableValue.toString(),
     'document.addEventListener("DOMContentLoaded", function () {',
     '  var payload = window.__PUBLISH_PAYLOAD__;',
     '  Array.prototype.forEach.call(document.querySelectorAll(".table-block"), function (section) {',
@@ -5296,7 +5391,7 @@ var NotSoBigData = (function () {
     '    .attr("role", "img").attr("aria-label", chart.title);',
     '  var groupValues = chart.data.map(function (d) { return d.groupValue; });',
     '  var y = d3.scaleBand().domain(groupValues).range([margin.top, height - margin.bottom]).padding(0.2);',
-    '  var color = d3.scaleOrdinal().range(["var(--teal)", "var(--coral)", "var(--ink-soft)", "var(--teal-soft)"]);',
+    '  var color = d3.scaleOrdinal().range(["var(--accent)", "var(--bad)", "var(--ink-soft)", "var(--accent-soft)"]);',
     '  var interactive = !!(chart.linkKey || chart.seriesLinkKey || chart.linkTo || chart.detail);',
     '  if (chart.seriesKeys && chart.seriesKeys.length) {',
     '    color.domain(chart.seriesKeys);',
@@ -5367,7 +5462,7 @@ var NotSoBigData = (function () {
     '  var maxTotal = d3.max(chart.data, function (d) { return d.total; }) || 1;',
     '  var y = d3.scaleLinear().domain([0, maxTotal]).range([height - margin.bottom, margin.top]);',
     '  var line = d3.line().x(function (d) { return x(d.groupValue); }).y(function (d) { return y(d.total); });',
-    '  svg.append("path").datum(chart.data).attr("class", "chart-bar").style("fill", "none").style("stroke", "var(--teal)").attr("stroke-width", 2).attr("d", line);',
+    '  svg.append("path").datum(chart.data).attr("class", "chart-bar").style("fill", "none").style("stroke", "var(--accent)").attr("stroke-width", 2).attr("d", line);',
     '  var points = svg.append("g").selectAll("circle").data(chart.data).join("circle")',
     '    .attr("class", "chart-bar").attr("cx", function (d) { return x(d.groupValue); }).attr("cy", function (d) { return y(d.total); }).attr("r", 3);',
     '  if (chart.linkKey || chart.linkTo || chart.detail) {',
@@ -5383,7 +5478,7 @@ var NotSoBigData = (function () {
     '    .attr("viewBox", "0 0 " + width + " " + height).attr("width", "100%").attr("height", height)',
     '    .attr("role", "img").attr("aria-label", chart.title)',
     '    .append("g").attr("transform", "translate(" + width / 2 + "," + height / 2 + ")");',
-    '  var color = d3.scaleOrdinal().range(["var(--teal)", "var(--coral)", "var(--ink-soft)", "var(--teal-soft)"]);',
+    '  var color = d3.scaleOrdinal().range(["var(--accent)", "var(--bad)", "var(--ink-soft)", "var(--accent-soft)"]);',
     '  var pieGen = d3.pie().value(function (d) { return d.total; });',
     '  var arcGen = d3.arc().innerRadius(chart.donut ? radius * 0.55 : 0).outerRadius(radius);',
     '  var pieData = pieGen(chart.data);',
@@ -5416,83 +5511,303 @@ var NotSoBigData = (function () {
     '});'
   ].join('\n');
 
-  // Client-side board layout via d3-hierarchy - runs on DOMContentLoaded,
-  // before BOARD_CLIENT_JS's pan/zoom setup (registered right after it in
-  // the same script, so it always executes first - see renderReportHtml).
-  // Rebuilds the relatesTo graph from window.__PUBLISH_PAYLOAD__ (server
-  // no longer computes positions, see renderBoardCanvas), wraps it in one
-  // synthetic root (d3.stratify() requires exactly one; relatesTo is a
-  // forest - zero or more independent roots), runs d3.tree(), then shifts
-  // every x by -minX so no real node lands at a negative style.left (d3.tree()
-  // centers the root at x=0 and spreads children on both sides, unlike the
-  // deleted contour algorithm which always started at 0). See
-  // docs/superpowers/specs/2026-09-09-publish-board-d3-layout-design.md §4.
-  //
-  // Edge <path>s are recomputed from each node element's *live* offsetLeft/
-  // offsetTop/offsetWidth/offsetHeight, not the fixed BOARD_BOX_WIDTH/HEIGHT
-  // used only for the tree's initial spacing - a node's native CSS `resize`
-  // grip (BOARD_CSS's .board-node rule) lets a human grow/shrink it after
-  // load, and an edge computed from the nominal box size would stay visually
-  // anchored to where the box *used to* end. A ResizeObserver on every real
-  // node calls the same redraw function whenever any of them changes size,
-  // so a resized node's edges track it continuously, not just once at load.
-  //
-  // window.__BOARD_BOUNDS__ exposes the tree's nominal bounding box (the
-  // four extremes actually reached by a positioned node) for BOARD_CLIENT_JS
-  // to fit/center the initial pan/zoom against - the two scripts don't share
-  // a closure, so this is the hand-off point.
+  // Direction-aware, draggable, hover-highlighting board layout. Reuses
+  // computeBoardPositions (Task 3) via .toString() for the pure axis math;
+  // everything else here - d3.stratify()/d3.tree() itself, drag, hover,
+  // localStorage persistence, the toolbar - needs a real DOM/D3 and can't
+  // run in the Node test harness (same ceiling publish.md's "Board layout"
+  // section already documents for tree geometry in general). Exposes
+  // window.__notsobigBoardApi__ so docs.js's own sidebar (Task 8) can call
+  // setHighlight/resetPositions the same way this module's own toolbar does.
   var BOARD_LAYOUT_CLIENT_JS = [
+    computeBoardPositions.toString(),
+    escapeHtml.toString(),
     'document.addEventListener("DOMContentLoaded", function () {',
     '  var blocks = window.__BOARD_NODES__;',
     '  var rootId = "__board_root__";',
-    '  var nodesData = blocks.map(function (b) { return { id: b.id, relatesTo: b.relatesTo }; });',
-    '  nodesData.push({ id: rootId, relatesTo: null });',
-    '  nodesData.forEach(function (n) { if (n.id !== rootId && !n.relatesTo) { n.relatesTo = rootId; } });',
-    '  var stratify = d3.stratify().id(function (n) { return n.id; }).parentId(function (n) { return n.relatesTo; });',
-    '  var root = stratify(nodesData);',
-    '  var treeLayout = d3.tree().nodeSize([' + (BOARD_BOX_WIDTH + BOARD_H_GAP) + ', ' + (BOARD_BOX_HEIGHT + BOARD_V_GAP) + ']);',
-    '  treeLayout(root);',
-    '  var realNodes = root.descendants().filter(function (n) { return n.id !== rootId; });',
-    '  if (!realNodes.length) { return; }',
-    '  var minX = Math.min.apply(null, realNodes.map(function (n) { return n.x; }));',
-    '  var minY = Math.min.apply(null, realNodes.map(function (n) { return n.y; }));',
-    '  var positionById = {};',
-    '  realNodes.forEach(function (n) {',
-    '    var x = n.x - minX;',
-    '    positionById[n.id] = { x: x, y: n.y };',
-    '    var el = document.querySelector("[data-block-id=\\"" + n.id + "\\"]");',
-    '    if (el) { el.style.left = x + "px"; el.style.top = n.y + "px"; }',
-    '  });',
+    '  var storageKey = "notsobigdata-board:" + location.pathname;',
+    '  var directions = ["top-bottom", "right-left", "bottom-top", "left-right"];',
+    '  var direction = "top-bottom";',
+    '  try {',
+    '    var storedDirection = localStorage.getItem(storageKey + ":direction");',
+    '    if (storedDirection && directions.indexOf(storedDirection) !== -1) { direction = storedDirection; }',
+    '  } catch (e) {}',
+    '  var overrides = {};',
+    '  try {',
+    '    var stored = localStorage.getItem(storageKey + ":positions");',
+    '    if (stored) { overrides = JSON.parse(stored); }',
+    '  } catch (e) {}',
+    '  function persistPositions() {',
+    '    try { localStorage.setItem(storageKey + ":positions", JSON.stringify(overrides)); } catch (e) {}',
+    '  }',
+    '  function persistDirection() {',
+    '    try { localStorage.setItem(storageKey + ":direction", direction); } catch (e) {}',
+    '  }',
+    '  function resetPositions() {',
+    '    overrides = {};',
+    '    try { localStorage.removeItem(storageKey + ":positions"); } catch (e) {}',
+    '    layout();',
+    '  }',
     '  var edges = window.__BOARD_EDGES__ || blocks.filter(function (b) { return b.relatesTo; }).map(function (b) { return { from: b.relatesTo, to: b.id }; });',
-    '  var maxX = 0, maxY = 0;',
-    '  realNodes.forEach(function (n) {',
-    '    var p = positionById[n.id];',
-    '    maxX = Math.max(maxX, p.x + ' + BOARD_BOX_WIDTH + ');',
-    '    maxY = Math.max(maxY, p.y + ' + BOARD_BOX_HEIGHT + ');',
-    '  });',
     '  var svg = document.getElementById("board-edges");',
-    '  svg.setAttribute("width", maxX);',
-    '  svg.setAttribute("height", maxY);',
-    '  window.__BOARD_BOUNDS__ = { minX: 0, minY: minY, maxX: maxX, maxY: maxY };',
+    '  var currentAnchor = null;',
+    '  function nodeEl(id) { return document.querySelector("[data-block-id=\\"" + id + "\\"]"); }',
+    '  function layout() {',
+    '    var nodesData = blocks.map(function (b) { return { id: b.id, relatesTo: b.relatesTo }; });',
+    '    nodesData.push({ id: rootId, relatesTo: null });',
+    '    nodesData.forEach(function (n) { if (n.id !== rootId && !n.relatesTo) { n.relatesTo = rootId; } });',
+    '    var stratify = d3.stratify().id(function (n) { return n.id; }).parentId(function (n) { return n.relatesTo; });',
+    '    var root = stratify(nodesData);',
+    '    var isHorizontal = direction === "left-right" || direction === "right-left";',
+    '    var spreadSize = ' + (BOARD_BOX_WIDTH + BOARD_H_GAP) + ';',
+    '    var depthSize = ' + (BOARD_BOX_HEIGHT + BOARD_V_GAP) + ';',
+    '    var treeLayout = d3.tree().nodeSize(isHorizontal ? [' + (BOARD_BOX_HEIGHT + BOARD_V_GAP) + ', ' + (BOARD_BOX_WIDTH + BOARD_H_GAP) + '] : [spreadSize, depthSize]);',
+    '    treeLayout(root);',
+    '    var realNodes = root.descendants().filter(function (n) { return n.id !== rootId; });',
+    '    if (!realNodes.length) { return; }',
+    '    var computed = computeBoardPositions(realNodes, direction, ' + BOARD_BOX_WIDTH + ', ' + BOARD_BOX_HEIGHT + ');',
+    '    realNodes.forEach(function (n) {',
+    '      var pos = overrides[n.id] || computed.positions[n.id];',
+    '      var el = nodeEl(n.id);',
+    '      if (el) { el.style.left = pos.left + "px"; el.style.top = pos.top + "px"; }',
+    '    });',
+    '    var maxLeft = 0, maxTop = 0;',
+    '    realNodes.forEach(function (n) {',
+    '      var pos = overrides[n.id] || computed.positions[n.id];',
+    '      maxLeft = Math.max(maxLeft, pos.left + ' + BOARD_BOX_WIDTH + ');',
+    '      maxTop = Math.max(maxTop, pos.top + ' + BOARD_BOX_HEIGHT + ');',
+    '    });',
+    '    svg.setAttribute("width", maxLeft);',
+    '    svg.setAttribute("height", maxTop);',
+    '    window.__BOARD_BOUNDS__ = { minX: 0, minY: 0, maxX: maxLeft, maxY: maxTop };',
+    '    currentAnchor = computed.anchor;',
+    '    redrawEdges();',
+    '  }',
+    '  function anchorPoint(el, side) {',
+    '    if (side === "top") { return { x: el.offsetLeft + el.offsetWidth / 2, y: el.offsetTop }; }',
+    '    if (side === "bottom") { return { x: el.offsetLeft + el.offsetWidth / 2, y: el.offsetTop + el.offsetHeight }; }',
+    '    if (side === "left") { return { x: el.offsetLeft, y: el.offsetTop + el.offsetHeight / 2 }; }',
+    '    return { x: el.offsetLeft + el.offsetWidth, y: el.offsetTop + el.offsetHeight / 2 };',
+    '  }',
     '  function redrawEdges() {',
+    '    var anchor = currentAnchor || { from: "bottom", to: "top" };',
     '    var edgePaths = edges.map(function (e) {',
-    '      var fromEl = document.querySelector("[data-block-id=\\"" + e.from + "\\"]");',
-    '      var toEl = document.querySelector("[data-block-id=\\"" + e.to + "\\"]");',
+    '      var fromEl = nodeEl(e.from), toEl = nodeEl(e.to);',
     '      if (!fromEl || !toEl) { return ""; }',
-    '      var x1 = fromEl.offsetLeft + fromEl.offsetWidth / 2, y1 = fromEl.offsetTop + fromEl.offsetHeight;',
-    '      var x2 = toEl.offsetLeft + toEl.offsetWidth / 2, y2 = toEl.offsetTop;',
-    '      return "<path class=\\"board-edge\\" d=\\"M" + x1 + " " + y1 + " L" + x2 + " " + y2 + "\\"></path>";',
+    '      var p1 = anchorPoint(fromEl, anchor.from), p2 = anchorPoint(toEl, anchor.to);',
+    '      return "<path class=\\"board-edge\\" data-from=\\"" + escapeHtml(e.from) + "\\" data-to=\\"" + escapeHtml(e.to) + "\\" d=\\"M" + p1.x + " " + p1.y + " L" + p2.x + " " + p2.y + "\\"></path>";',
     '    });',
     '    svg.innerHTML = edgePaths.join("");',
     '  }',
-    '  redrawEdges();',
-    '  if (window.ResizeObserver) {',
-    '    var resizeObserver = new ResizeObserver(redrawEdges);',
-    '    realNodes.forEach(function (n) {',
-    '      var el = document.querySelector("[data-block-id=\\"" + n.id + "\\"]");',
-    '      if (el) { resizeObserver.observe(el); }',
+    '  function neighborsOf(id) {',
+    '    var out = edges.filter(function (e) { return e.from === id; }).map(function (e) { return e.to; });',
+    '    var into = edges.filter(function (e) { return e.to === id; }).map(function (e) { return e.from; });',
+    '    return out.concat(into);',
+    '  }',
+    '  function setHighlight(id) {',
+    '    var related = id ? [id].concat(neighborsOf(id)) : null;',
+    '    blocks.forEach(function (b) {',
+    '      var el = nodeEl(b.id);',
+    '      if (!el) { return; }',
+    '      var keep = !related || related.indexOf(b.id) !== -1;',
+    '      el.classList.toggle("board-node-dim", !!related && !keep);',
+    '      el.classList.toggle("board-node-hi", !!related && keep);',
+    '    });',
+    '    Array.prototype.forEach.call(svg.querySelectorAll(".board-edge"), function (p) {',
+    '      var isRel = !!id && (p.getAttribute("data-from") === id || p.getAttribute("data-to") === id);',
+    '      p.classList.toggle("board-edge-hi", isRel);',
+    '      p.classList.toggle("board-edge-dim", !!id && !isRel);',
     '    });',
     '  }',
+    '  blocks.forEach(function (b) {',
+    '    var el = nodeEl(b.id);',
+    '    if (!el) { return; }',
+    '    var startX, startY, origLeft, origTop, dragging = false, moved = false;',
+    '    el.addEventListener("pointerdown", function (event) {',
+    '      if (event.button) { return; }',
+    '      dragging = true; moved = false;',
+    '      delete el.dataset.justDragged;',
+    '      startX = event.clientX; startY = event.clientY;',
+    '      origLeft = el.offsetLeft; origTop = el.offsetTop;',
+    '      el.setPointerCapture(event.pointerId);',
+    '      el.classList.add("board-node-dragging");',
+    '    });',
+    '    el.addEventListener("pointermove", function (event) {',
+    '      if (!dragging) { return; }',
+    '      var dx = event.clientX - startX, dy = event.clientY - startY;',
+    '      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) { moved = true; }',
+    '      if (!moved) { return; }',
+    '      var k = d3.zoomTransform(document.querySelector(".board-viewport")).k || 1;',
+    '      var left = origLeft + dx / k, top = origTop + dy / k;',
+    '      el.style.left = left + "px"; el.style.top = top + "px";',
+    '      overrides[b.id] = { left: left, top: top };',
+    '      redrawEdges();',
+    '    });',
+    '    function endDrag() {',
+    '      if (!dragging) { return; }',
+    '      dragging = false;',
+    '      el.classList.remove("board-node-dragging");',
+    '      if (moved) { persistPositions(); el.dataset.justDragged = "true"; }',
+    '    }',
+    '    el.addEventListener("pointerup", endDrag);',
+    '    el.addEventListener("pointercancel", endDrag);',
+    '    el.addEventListener("mouseenter", function () { if (!dragging) { setHighlight(b.id); } });',
+    '    el.addEventListener("mouseleave", function () { if (!dragging) { setHighlight(null); } });',
+    '  });',
+    '  var toolbar = document.querySelector(".board-toolbar");',
+    '  if (toolbar) {',
+    '    toolbar.addEventListener("click", function (event) {',
+    '      var action = event.target.getAttribute("data-board-action");',
+    '      if (action === "direction") {',
+    '        direction = directions[(directions.indexOf(direction) + 1) % directions.length];',
+    '        persistDirection();',
+    '        layout();',
+    '      } else if (action === "reset") {',
+    '        resetPositions();',
+    '      } else if (action === "fit" && window.__notsobigFitBoard__) {',
+    '        window.__notsobigFitBoard__();',
+    '      }',
+    '    });',
+    '  }',
+    '  layout();',
+    '  if (window.ResizeObserver) {',
+    '    var resizeObserver = new ResizeObserver(redrawEdges);',
+    '    blocks.forEach(function (b) { var el = nodeEl(b.id); if (el) { resizeObserver.observe(el); } });',
+    '  }',
+    '  window.__notsobigBoardApi__ = { redraw: redrawEdges, setHighlight: setHighlight, resetPositions: resetPositions };',
+    '});'
+  ].join('\n');
+
+  // Draws every board node's compact metric card from the already-embedded
+  // payload (window.__PUBLISH_PAYLOAD__) and wires the click-to-expand
+  // overlay. computeMetricCardData (Task 6) decides the numbers; this only
+  // draws them (a small hand-rolled SVG sparkline/mini-bars, not a scaled-
+  // down drawBarChart/drawLineChart/drawPieChart call - those assume a
+  // full-size container with axes/labels, see the design spec's Task 3
+  // rationale) and moves a node's hidden .board-node-full section into the
+  // expand overlay on click. Declares sortableValue.toString() alongside
+  // computeMetricCardData.toString() - computeMetricCardData's aggregated-
+  // table branch calls sortableValue, so both must ship together here
+  // (same "declare what a reused function itself calls, in the same list"
+  // rule DETAIL_REUSED_FUNCTIONS_JS's own [formatValue, buildRawTablePayload]
+  // pair already follows, since buildRawTablePayload calls formatValue). A
+  // report whose tables[] also triggers TABLE_CLIENT_JS ends up with
+  // sortableValue declared twice (harmless - a plain function declaration
+  // redeclared in the same non-strict scope is legal and both bodies are
+  // identical) - accepted here rather than adding another hasX branch to
+  // dedupe a 5-line function.
+  //
+  // A drag-then-release on a .board-node still fires a native click on most
+  // browsers regardless of pointer distance moved - BOARD_LAYOUT_CLIENT_JS's
+  // own endDrag() only uses its "moved" flag to decide whether to persist
+  // the new position, it never suppresses the click. So endDrag() (above)
+  // sets el.dataset.justDragged = "true" right after a real drag, and this
+  // module's own .board-node click listener bails out if it's set, before
+  // anything else - a plain DOM attribute has no registration-order
+  // dependency, unlike event.stopPropagation() (which only helps if the
+  // suppressing listener runs before this one - it doesn't, since this
+  // listener is registered at page load and endDrag() only runs later,
+  // after an actual drag). The flag is cleared fresh on the *next*
+  // pointerdown (BOARD_LAYOUT_CLIENT_JS, not here or in DOCS_DRAWER_CLIENT_JS's
+  // identical guard) rather than by whichever click listener happens to
+  // read it, since both this module and docs.js's board consume the same
+  // flag off the same element.
+  var MINI_CHART_CLIENT_JS = [
+    sortableValue.toString(),
+    computeMetricCardData.toString(),
+    'function drawMiniChart(container, points) {',
+    '  if (!points.length) { return; }',
+    '  var w = 190, h = 40;',
+    '  var max = Math.max.apply(null, points), min = Math.min.apply(null, points);',
+    '  var span = (max - min) || 1;',
+    '  var pts = points.map(function (v, i) {',
+    '    var x = points.length > 1 ? (i / (points.length - 1)) * w : w / 2;',
+    '    var y = h - ((v - min) / span) * (h - 6) - 3;',
+    '    return x.toFixed(1) + "," + y.toFixed(1);',
+    '  });',
+    '  container.innerHTML = "<svg viewBox=\\"0 0 " + w + " " + h + "\\" preserveAspectRatio=\\"none\\" width=\\"100%\\" height=\\"" + h + "\\"><polyline points=\\"" + pts.join(" ") + "\\" fill=\\"none\\" stroke=\\"var(--accent)\\" stroke-width=\\"1.8\\"></polyline></svg>";',
+    '}',
+    'function renderMetricCard(card, blockType, block) {',
+    '  var metric = computeMetricCardData(blockType, block);',
+    '  card.innerHTML = "<div class=\\"board-metric-label\\"></div><div class=\\"board-metric-value\\"></div><div class=\\"board-metric-mini\\"></div>";',
+    '  card.querySelector(".board-metric-label").textContent = block.title;',
+    '  card.querySelector(".board-metric-value").textContent = metric.headline.toLocaleString("en-US");',
+    '  drawMiniChart(card.querySelector(".board-metric-mini"), metric.points);',
+    '}',
+    'function renderMetricCards() {',
+    '  var payload = window.__PUBLISH_PAYLOAD__;',
+    '  Array.prototype.forEach.call(document.querySelectorAll("[data-metric-card]"), function (card) {',
+    '    var id = card.getAttribute("data-metric-card");',
+    '    var node = card.closest(".board-node");',
+    '    var blockType = node.getAttribute("data-block-type");',
+    '    var block = (blockType === "chart" ? payload.charts : payload.tables).filter(function (b) { return b.id === id; })[0];',
+    '    if (!block) { return; }',
+    '    renderMetricCard(card, blockType, block);',
+    '  });',
+    '}',
+    // Board-only counterpart to applyHighlight - FILTER_CLIENT_JS's
+    // applyFilterToChart/applyFilterToTable build a fresh newChart/newTable
+    // on every filter change but never write it back to
+    // window.__PUBLISH_PAYLOAD__, so renderMetricCards() alone would just
+    // redraw the same stale block. This redraws one card in place from the
+    // caller's own up-to-date object, keyed by data-metric-card="<id>" (set
+    // server-side, one per board node) rather than block-type lookup.
+    'function updateMetricCardById(id, block) {',
+    '  var card = document.querySelector("[data-metric-card=\\"" + id + "\\"]");',
+    '  if (!card) { return; }',
+    '  var blockType = card.closest(".board-node").getAttribute("data-block-type");',
+    '  renderMetricCard(card, blockType, block);',
+    '}',
+    'function openExpandModal(title, contentEl) {',
+    '  closeExpandModal();',
+    '  var backdrop = document.createElement("div");',
+    '  backdrop.id = "publish-expand-modal";',
+    '  backdrop.className = "board-expand-backdrop";',
+    '  backdrop.addEventListener("click", function (event) { if (event.target === backdrop) { closeExpandModal(); } });',
+    '  var box = document.createElement("div");',
+    '  box.className = "board-expand-box";',
+    '  var header = document.createElement("div");',
+    '  header.className = "board-expand-header";',
+    '  var heading = document.createElement("h3");',
+    '  heading.textContent = title;',
+    '  var closeBtn = document.createElement("button");',
+    '  closeBtn.type = "button";',
+    '  closeBtn.className = "board-expand-close";',
+    '  closeBtn.textContent = "\\u00d7";',
+    '  closeBtn.addEventListener("click", closeExpandModal);',
+    '  header.appendChild(heading);',
+    '  header.appendChild(closeBtn);',
+    '  box.appendChild(header);',
+    '  box.setAttribute("data-return-target", contentEl.getAttribute("data-full-section"));',
+    '  contentEl.style.display = "block";',
+    '  box.appendChild(contentEl);',
+    '  backdrop.appendChild(box);',
+    '  document.body.appendChild(backdrop);',
+    '}',
+    'function closeExpandModal() {',
+    '  var modal = document.getElementById("publish-expand-modal");',
+    '  if (!modal) { return; }',
+    '  var box = modal.querySelector(".board-expand-box");',
+    '  var id = box.getAttribute("data-return-target");',
+    '  var contentEl = box.querySelector("[data-full-section=\\"" + id + "\\"]");',
+    '  var originalParent = document.querySelector(".board-node[data-block-id=\\"" + id + "\\"]");',
+    '  if (contentEl && originalParent) { contentEl.style.display = "none"; originalParent.appendChild(contentEl); }',
+    '  modal.parentNode.removeChild(modal);',
+    '}',
+    'document.addEventListener("DOMContentLoaded", function () {',
+    '  renderMetricCards();',
+    '  Array.prototype.forEach.call(document.querySelectorAll(".board-node"), function (node) {',
+    '    node.addEventListener("click", function (event) {',
+    '      if (node.dataset.justDragged) { return; }',
+    '      if (event.target.closest(".board-metric-card") === null) { return; }',
+    '      var id = node.getAttribute("data-block-id");',
+    '      var full = node.querySelector("[data-full-section=\\"" + id + "\\"]");',
+    '      if (!full) { return; }',
+    '      var titleEl = full.querySelector("h2");',
+    '      openExpandModal(titleEl ? titleEl.textContent : id, full);',
+    '    });',
+    '  });',
+    '  document.addEventListener("keydown", function (event) { if (event.key === "Escape") { closeExpandModal(); } });',
     '});'
   ].join('\n');
 
@@ -5515,15 +5830,25 @@ var NotSoBigData = (function () {
   // box BOARD_LAYOUT_CLIENT_JS already computed for #board-edges' sizing -
   // scale is clamped to the same [0.25, 2] range as manual zoom, and 0.9
   // leaves a small margin around the tree rather than touching the edges.
+  // applyFit() re-reads window.__BOARD_BOUNDS__ and viewport.clientWidth/
+  // Height fresh every call (rather than closing over a transform computed
+  // once at load) - BOARD_LAYOUT_CLIENT_JS's layout() rewrites those bounds
+  // on every direction toggle/drag/reset, and window.__notsobigFitBoard__
+  // (the toolbar's "fit" button, and this module's own initial call) must
+  // see the current tree, not a stale load-time snapshot; it's also how a
+  // 0-clientWidth-at-load report (fit silently skipped then) can still fit
+  // once the toolbar button is clicked after layout has settled.
   //
   // `.filter()` excludes a drag-start (mousedown/touchstart) whose target
-  // sits inside any .board-node from also starting a pan gesture - without
-  // this, every mousedown bubbles up to the viewport where d3.zoom listens,
-  // so dragging a node's native CSS resize grip (or clicking a chart bar,
-  // sorting a table column, hitting "Export CSV"...) would *also* register
-  // as a pan-start, fighting the node's own interaction for the same
-  // pointer session (found during Layer 2 verification: a node's resize
-  // felt like it kept tracking the cursor past mouseup). Wheel-zoom is
+  // sits inside any .board-node or the .board-toolbar from also starting a
+  // pan gesture - without this, every mousedown bubbles up to the viewport
+  // where d3.zoom listens, so dragging a node (or clicking a toolbar
+  // button, a chart bar, sorting a table column, hitting "Export CSV"...)
+  // would *also* register as a pan-start, fighting that interaction for the
+  // same pointer session (found during Layer 2 verification: a node's
+  // resize felt like it kept tracking the cursor past mouseup - the same
+  // class of bug the toolbar needs excluded too, since it's a sibling of
+  // .board-canvas, not nested inside any .board-node). Wheel-zoom is
   // untouched - scrolling to zoom while the pointer happens to be over a
   // node's content is expected, only drag-to-pan needs this exclusion.
   var BOARD_CLIENT_JS = [
@@ -5535,21 +5860,24 @@ var NotSoBigData = (function () {
     '    .filter(function (event) {',
     '      if (event.ctrlKey && event.type !== "wheel") { return false; }',
     '      if (event.button) { return false; }',
-    '      if ((event.type === "mousedown" || event.type === "touchstart") && event.target.closest(".board-node")) { return false; }',
+    '      if ((event.type === "mousedown" || event.type === "touchstart") && event.target.closest(".board-node, .board-toolbar")) { return false; }',
     '      return true;',
     '    })',
     '    .on("start", function () { viewport.classList.add("board-panning"); })',
     '    .on("end", function () { viewport.classList.remove("board-panning"); })',
     '    .on("zoom", function (event) { canvas.style.transform = "translate(" + event.transform.x + "px," + event.transform.y + "px) scale(" + event.transform.k + ")"; });',
     '  d3.select(viewport).call(zoom);',
-    '  var bounds = window.__BOARD_BOUNDS__;',
-    '  if (bounds && viewport.clientWidth && viewport.clientHeight) {',
+    '  function applyFit() {',
+    '    var bounds = window.__BOARD_BOUNDS__;',
+    '    if (!bounds || !viewport.clientWidth || !viewport.clientHeight) { return; }',
     '    var boundsWidth = bounds.maxX - bounds.minX, boundsHeight = bounds.maxY - bounds.minY;',
     '    var midX = (bounds.minX + bounds.maxX) / 2, midY = (bounds.minY + bounds.maxY) / 2;',
     '    var scale = Math.min(2, Math.max(0.25, 0.9 / Math.max(boundsWidth / viewport.clientWidth, boundsHeight / viewport.clientHeight)));',
     '    var fit = d3.zoomIdentity.translate(viewport.clientWidth / 2 - scale * midX, viewport.clientHeight / 2 - scale * midY).scale(scale);',
     '    d3.select(viewport).call(zoom.transform, fit);',
     '  }',
+    '  applyFit();',
+    '  window.__notsobigFitBoard__ = applyFit;',
     '});'
   ].join('\n');
 
@@ -5614,13 +5942,24 @@ var NotSoBigData = (function () {
     tables.forEach(function (table, index) { sectionById[table.id] = tableSectionsList[index]; });
 
     var nodesHtml = charts.concat(tables).map(function (block) {
-      return '<div class="board-node" data-block-id="' + escapeHtml(block.id) + '">' + sectionById[block.id] + '</div>';
+      var blockType = charts.indexOf(block) !== -1 ? 'chart' : 'table';
+      return '<div class="board-node" data-block-id="' + escapeHtml(block.id) + '" data-block-type="' + blockType + '">'
+        + '<div class="board-metric-card" data-metric-card="' + escapeHtml(block.id) + '"></div>'
+        + '<div class="board-node-full" data-full-section="' + escapeHtml(block.id) + '">' + sectionById[block.id] + '</div>'
+        + '</div>';
     }).join('');
+
+    var toolbarHtml = '<div class="board-toolbar">'
+      + '<button type="button" data-board-action="direction" title="Change layout direction">&#8635;</button>'
+      + '<button type="button" data-board-action="reset" title="Reset to auto layout">&#8634;</button>'
+      + '<div class="board-toolbar-divider"></div>'
+      + '<button type="button" data-board-action="fit" title="Fit to screen">&#10021;</button>'
+      + '</div>';
 
     return '<div class="board-viewport"><div class="board-canvas" id="board-canvas">'
       + '<svg class="board-edges" id="board-edges"></svg>'
       + nodesHtml
-      + '</div></div>';
+      + '</div>' + toolbarHtml + '</div>';
   }
 
   function renderReportHtml(payload, config) {
@@ -5653,6 +5992,7 @@ var NotSoBigData = (function () {
       script += 'window.__BOARD_NODES__ = window.__PUBLISH_PAYLOAD__.charts.concat(window.__PUBLISH_PAYLOAD__.tables).map(function (b) { return { id: b.id, relatesTo: b.relatesTo }; });';
       script += BOARD_LAYOUT_CLIENT_JS;
       script += BOARD_CLIENT_JS;
+      script += MINI_CHART_CLIENT_JS;
     }
     if (hasFilters) {
       script += FILTER_REUSED_FUNCTIONS_JS + FILTER_CLIENT_JS;
@@ -5752,12 +6092,35 @@ var NotSoBigData = (function () {
   }
 
   // Minimal styling for the docs-specific bits publish.js's REPORT_CSS/
-  // BOARD_CSS don't already cover (a kind badge, a compile-error callout).
-  // Everything else - colors, dark mode, .board-node/.board-edge - is
-  // reused as-is from publish.js.
-  var DOCS_CSS = '.docs-kind-badge { font-family: var(--mono); font-size: 11px; color: var(--ink-soft); border: 1px solid var(--paper-line); border-radius: var(--radius-sm); padding: 1px 6px; margin-left: 6px; }'
-    + '.docs-error { color: var(--coral); font-family: var(--mono); font-size: 12px; }'
-    + 'pre { white-space: pre-wrap; font-family: var(--mono); font-size: 12px; }';
+  // BOARD_CSS don't already cover (per-kind coloring, the sidebar, the
+  // detail drawer). Everything else - colors, dark mode, .board-node/
+  // .board-edge/.board-metric-card - is reused as-is from publish.js.
+  var DOCS_KIND_TOKEN = { move: '--move', model: '--model', publish: '--publish' };
+
+  var DOCS_CSS = [
+    '.docs-shell { display: grid; grid-template-columns: 240px 1fr; gap: 16px; align-items: start; }',
+    '@media (max-width: 760px) { .docs-shell { grid-template-columns: 1fr; } }',
+    '.docs-sidebar { background: var(--surface); border: 1px solid var(--paper-line); border-radius: var(--radius); padding: 14px; position: sticky; top: 16px; }',
+    '.docs-search { display: flex; align-items: center; gap: 6px; background: var(--paper); border: 1px solid var(--paper-line); border-radius: var(--radius-sm); padding: 7px 10px; margin-bottom: 14px; }',
+    '.docs-search input { border: none; background: none; outline: none; width: 100%; font-size: 12.5px; color: var(--ink); }',
+    '.docs-kind-group { margin-bottom: 14px; }',
+    '.docs-kind-group-head { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft); margin-bottom: 6px; }',
+    '.docs-kind-dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }',
+    '.docs-node-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; font-size: 12.5px; cursor: pointer; color: var(--ink-soft); }',
+    '.docs-node-row:hover { background: var(--paper); color: var(--ink); }',
+    '.docs-node-row.docs-node-row-selected { background: var(--accent-soft); color: var(--accent); font-weight: 500; }',
+    '.docs-node-row .docs-node-row-error { margin-left: auto; color: var(--bad); font-size: 11px; }',
+    '.board-node[data-kind] .board-node-kind-bar { height: 4px; }',
+    '.docs-kind-badge { font-family: var(--mono); font-size: 11px; color: var(--ink-soft); border: 1px solid var(--paper-line); border-radius: var(--radius-sm); padding: 1px 6px; margin-left: 6px; }',
+    '.docs-error { color: var(--bad); font-family: var(--mono); font-size: 12px; }',
+    '.docs-drawer { position: fixed; top: 0; right: 0; height: 100%; width: 340px; max-width: 90vw; background: var(--surface); border-left: 1px solid var(--paper-line); box-shadow: var(--shadow); transform: translateX(100%); transition: transform .18s ease; display: flex; flex-direction: column; z-index: 900; }',
+    '.docs-drawer.docs-drawer-open { transform: translateX(0); }',
+    '.docs-drawer-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--paper-line); }',
+    '.docs-drawer-head h3 { margin: 0; font-size: 13.5px; flex: 1; }',
+    '.docs-drawer-close { border: none; background: none; color: var(--ink-soft); cursor: pointer; font-size: 15px; }',
+    '.docs-drawer-body { padding: 14px 16px; overflow: auto; flex: 1; }',
+    'pre { white-space: pre-wrap; font-family: var(--mono); font-size: 12px; }'
+  ].join('\n');
 
   function renderDocsDetailHtml(kind, detail) {
     // A discoveryError (see buildDocsPayload) can happen to any kind in
@@ -5789,9 +6152,10 @@ var NotSoBigData = (function () {
   }
 
   function renderDocsNodeSection(node) {
-    return '<div class="board-node" data-block-id="' + escapeHtml(node.name) + '">'
-      + '<h2>' + escapeHtml(node.name) + '<span class="docs-kind-badge">' + escapeHtml(node.kind) + '</span></h2>'
-      + renderDocsDetailHtml(node.kind, node.detail)
+    var kindToken = DOCS_KIND_TOKEN[node.kind] || '--ink-soft';
+    return '<div class="board-node" data-block-id="' + escapeHtml(node.name) + '" data-kind="' + escapeHtml(node.kind) + '">'
+      + '<div class="board-node-kind-bar" style="background: var(' + kindToken + ')"></div>'
+      + '<div class="board-metric-card"><div class="board-metric-label">' + escapeHtml(node.name) + '<span class="docs-kind-badge">' + escapeHtml(node.kind) + '</span></div></div>'
       + '</div>';
   }
 
@@ -5804,13 +6168,37 @@ var NotSoBigData = (function () {
       node.dependsOn.forEach(function (dep) { boardEdges.push({ from: dep, to: node.name }); });
     });
     var nodesHtml = payload.map(renderDocsNodeSection).join('');
-    var blocks = '<div class="board-viewport"><div class="board-canvas" id="board-canvas">'
+    var kinds = Object.keys(DOCS_KIND_TOKEN);
+    var sidebarHtml = '<div class="docs-search"><input type="text" id="docs-filter" placeholder="Filter nodes..."></div>'
+      + kinds.map(function (kind) {
+        var items = payload.filter(function (n) { return n.kind === kind; });
+        if (!items.length) { return ''; }
+        var kindToken = DOCS_KIND_TOKEN[kind];
+        var rows = items.map(function (n) {
+          return '<div class="docs-node-row" data-docs-row="' + escapeHtml(n.name) + '"><span class="docs-kind-dot" style="background: var(' + kindToken + ')"></span>' + escapeHtml(n.name)
+            + (n.detail.discoveryError ? '<span class="docs-node-row-error">&#9888;</span>' : '') + '</div>';
+        }).join('');
+        return '<div class="docs-kind-group"><div class="docs-kind-group-head"><span class="docs-kind-dot" style="background: var(' + kindToken + ')"></span>' + kind + '<span>(' + items.length + ')</span></div>' + rows + '</div>';
+      }).join('');
+    var blocks = '<div class="docs-shell">'
+      + '<aside class="docs-sidebar">' + sidebarHtml + '</aside>'
+      + '<div class="board-viewport"><div class="board-canvas" id="board-canvas">'
       + '<svg class="board-edges" id="board-edges"></svg>'
       + nodesHtml
-      + '</div></div>';
+      + '</div><div class="board-toolbar">'
+      + '<button type="button" data-board-action="direction" title="Change layout direction">&#8635;</button>'
+      + '<button type="button" data-board-action="reset" title="Reset to auto layout">&#8634;</button>'
+      + '<div class="board-toolbar-divider"></div>'
+      + '<button type="button" data-board-action="fit" title="Fit to screen">&#10021;</button>'
+      + '</div></div>'
+      + '<div class="docs-drawer" id="docs-drawer"><div class="docs-drawer-head"><h3 id="docs-drawer-title"></h3><button type="button" class="docs-drawer-close" id="docs-drawer-close">&#10005;</button></div><div class="docs-drawer-body" id="docs-drawer-body"></div></div>'
+      + '</div>';
+    var docsDetailByName = {};
+    payload.forEach(function (node) { docsDetailByName[node.name] = { kind: node.kind, html: renderDocsDetailHtml(node.kind, node.detail) }; });
     var script = 'window.__BOARD_NODES__ = ' + JSON.stringify(boardNodes).replace(/</g, '\\u003c') + ';'
       + 'window.__BOARD_EDGES__ = ' + JSON.stringify(boardEdges).replace(/</g, '\\u003c') + ';'
-      + THEME_TOGGLE_JS + BOARD_LAYOUT_CLIENT_JS + BOARD_CLIENT_JS;
+      + 'window.__DOCS_DETAIL_BY_NAME__ = ' + JSON.stringify(docsDetailByName).replace(/</g, '\\u003c') + ';'
+      + THEME_TOGGLE_JS + BOARD_LAYOUT_CLIENT_JS + BOARD_CLIENT_JS + DOCS_DRAWER_CLIENT_JS;
     var d3Script = '<script src="' + D3_CDN_URL + '" integrity="' + D3_CDN_INTEGRITY + '" crossorigin="anonymous"></script>';
     var themeInitScript = '<script>' + THEME_INIT_JS + '</script>';
     var css = REPORT_CSS + BOARD_CSS + DOCS_CSS;
@@ -5822,6 +6210,83 @@ var NotSoBigData = (function () {
       + '<script>' + script + '</script>'
       + '</body></html>';
   }
+
+  // Sidebar search/click + the detail drawer. window.__notsobigBoardApi__
+  // (BOARD_LAYOUT_CLIENT_JS, src/publish.js) already exists by the time
+  // this runs (registered inside the same DOMContentLoaded pass, and this
+  // script is appended right after it - see renderDocsHtml's script
+  // assembly), so hovering a sidebar row can reuse its setHighlight exactly
+  // the way hovering a board node itself already does.
+  //
+  // The node click listener below checks node.dataset.justDragged first,
+  // before anything else - the same guard BOARD_LAYOUT_CLIENT_JS's own
+  // endDrag() (src/publish.js) already requires of MINI_CHART_CLIENT_JS's
+  // .board-node click listener on the publish board: a drag-then-release
+  // still fires a native click on most browsers, so without this guard
+  // ending a drag on a docs node would also pop the drawer open. The flag
+  // itself is cleared on the next pointerdown, by BOARD_LAYOUT_CLIENT_JS -
+  // this listener only reads it.
+  //
+  // Dismissal mirrors MINI_CHART_CLIENT_JS's expand overlay (src/publish.js,
+  // openExpandModal/closeExpandModal): Escape closes the drawer, and a
+  // document-level click closes it when the click landed outside both the
+  // drawer and anything that opens it (a board node or a sidebar row) -
+  // otherwise this listener would fight the per-row/per-node "open" click
+  // also registered below, which needs to switch the drawer to a new node
+  // rather than have this one close it first. The drawer itself is a
+  // position:fixed panel, not a full-screen backdrop+box like the publish
+  // overlay, so "click-outside" is a targeted closest() check instead of a
+  // backdrop element.
+  var DOCS_DRAWER_CLIENT_JS = [
+    'document.addEventListener("DOMContentLoaded", function () {',
+    '  var drawer = document.getElementById("docs-drawer");',
+    '  var titleEl = document.getElementById("docs-drawer-title");',
+    '  var bodyEl = document.getElementById("docs-drawer-body");',
+    '  function openDrawer(name) {',
+    '    var detail = window.__DOCS_DETAIL_BY_NAME__[name];',
+    '    if (!detail) { return; }',
+    '    titleEl.textContent = name;',
+    '    bodyEl.innerHTML = detail.html;',
+    '    drawer.classList.add("docs-drawer-open");',
+    '    Array.prototype.forEach.call(document.querySelectorAll(".docs-node-row"), function (row) {',
+    '      row.classList.toggle("docs-node-row-selected", row.getAttribute("data-docs-row") === name);',
+    '    });',
+    '  }',
+    '  function closeDrawer() {',
+    '    drawer.classList.remove("docs-drawer-open");',
+    '  }',
+    '  document.getElementById("docs-drawer-close").addEventListener("click", closeDrawer);',
+    '  document.addEventListener("keydown", function (event) { if (event.key === "Escape") { closeDrawer(); } });',
+    '  document.addEventListener("click", function (event) {',
+    '    if (!drawer.classList.contains("docs-drawer-open")) { return; }',
+    '    if (event.target.closest("#docs-drawer") || event.target.closest(".board-node") || event.target.closest(".docs-node-row")) { return; }',
+    '    closeDrawer();',
+    '  });',
+    '  Array.prototype.forEach.call(document.querySelectorAll(".board-node[data-kind]"), function (node) {',
+    '    node.addEventListener("click", function () {',
+    '      if (node.dataset.justDragged) { return; }',
+    '      openDrawer(node.getAttribute("data-block-id"));',
+    '    });',
+    '  });',
+    '  Array.prototype.forEach.call(document.querySelectorAll(".docs-node-row"), function (row) {',
+    '    var name = row.getAttribute("data-docs-row");',
+    '    row.addEventListener("click", function () { openDrawer(name); });',
+    '    row.addEventListener("mouseenter", function () { if (window.__notsobigBoardApi__) { window.__notsobigBoardApi__.setHighlight(name); } });',
+    '    row.addEventListener("mouseleave", function () { if (window.__notsobigBoardApi__) { window.__notsobigBoardApi__.setHighlight(null); } });',
+    '  });',
+    '  var filterInput = document.getElementById("docs-filter");',
+    '  filterInput.addEventListener("input", function () {',
+    '    var needle = filterInput.value.toLowerCase();',
+    '    Array.prototype.forEach.call(document.querySelectorAll(".docs-node-row"), function (row) {',
+    '      row.style.display = row.getAttribute("data-docs-row").toLowerCase().indexOf(needle) === -1 ? "none" : "";',
+    '    });',
+    '    Array.prototype.forEach.call(document.querySelectorAll(".board-node[data-kind]"), function (node) {',
+    '      var match = !needle || node.getAttribute("data-block-id").toLowerCase().indexOf(needle) !== -1;',
+    '      node.style.opacity = match ? "" : ".25";',
+    '    });',
+    '  });',
+    '});'
+  ].join('\n');
 
   // Drive-writing glue: reuses move.js's resolveDriveWriteTarget/writeDriveText
   // (the same primitive writeManifestFile already crosses the move/cli
@@ -7390,6 +7855,6 @@ var NotSoBigData = (function () {
 
   return {
     cli: cli,
-    __test: { buildDocsPayload: buildDocsPayload, discoverNodesForTest: function () { return discoverNodes().nodes; }, renderDocsHtml: renderDocsHtml }
+    __test: { buildDocsPayload: buildDocsPayload, discoverNodesForTest: function () { return discoverNodes().nodes; }, renderDocsHtml: renderDocsHtml, computeBoardPositions: computeBoardPositions, computeMetricCardData: computeMetricCardData }
   };
 })();
