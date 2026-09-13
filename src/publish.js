@@ -1516,6 +1516,7 @@ var CHART_CLIENT_JS = [
 // setHighlight/resetPositions the same way this module's own toolbar does.
 var BOARD_LAYOUT_CLIENT_JS = [
   computeBoardPositions.toString(),
+  escapeHtml.toString(),
   'document.addEventListener("DOMContentLoaded", function () {',
   '  var blocks = window.__BOARD_NODES__;',
   '  var rootId = "__board_root__";',
@@ -1589,7 +1590,7 @@ var BOARD_LAYOUT_CLIENT_JS = [
   '      var fromEl = nodeEl(e.from), toEl = nodeEl(e.to);',
   '      if (!fromEl || !toEl) { return ""; }',
   '      var p1 = anchorPoint(fromEl, anchor.from), p2 = anchorPoint(toEl, anchor.to);',
-  '      return "<path class=\\"board-edge\\" data-from=\\"" + e.from + "\\" data-to=\\"" + e.to + "\\" d=\\"M" + p1.x + " " + p1.y + " L" + p2.x + " " + p2.y + "\\"></path>";',
+  '      return "<path class=\\"board-edge\\" data-from=\\"" + escapeHtml(e.from) + "\\" data-to=\\"" + escapeHtml(e.to) + "\\" d=\\"M" + p1.x + " " + p1.y + " L" + p2.x + " " + p2.y + "\\"></path>";',
   '    });',
   '    svg.innerHTML = edgePaths.join("");',
   '  }',

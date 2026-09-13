@@ -2134,6 +2134,9 @@ function testPublishBoardEmitsBoardNodesGlobalAndKeepsRelatesToEdgesByDefault() 
   assert.ok(/var edges = window\.__BOARD_EDGES__ \|\| blocks\.filter\(function \(b\) \{ return b\.relatesTo; \}\)/.test(html), 'expected the relatesTo-derived edge fallback to remain byte-identical, got: ' + html);
   assert.ok(/function computeBoardPositions\(treeNodes, direction, boxWidth, boxHeight\)/.test(html), 'expected computeBoardPositions to be reused verbatim in the emitted script, got: ' + html);
   assert.ok(html.indexOf('data-board-action="direction"') !== -1, 'expected the direction toolbar button, got: ' + html);
+  assert.ok(/function escapeHtml\(value\)/.test(html), 'expected escapeHtml to be reused in the emitted board script (security regression guard), got: ' + html);
+  assert.ok(/data-from=\\"" \+ escapeHtml\(e\.from\)/.test(html), 'expected redrawEdges to escape e.from before writing it into innerHTML, got: ' + html);
+  assert.ok(/data-to=\\"" \+ escapeHtml\(e\.to\)/.test(html), 'expected redrawEdges to escape e.to before writing it into innerHTML, got: ' + html);
 }
 
 // Task 7: each board node now shows a compact metric card (headline +
